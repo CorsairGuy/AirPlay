@@ -56,6 +56,7 @@ symphonia = { version = "0.6", default-features = false, features = ["aac", "ala
 libloading = "0.8"
 cpal = "0.18"
 subtle = "2"
+socket2 = "0.6"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

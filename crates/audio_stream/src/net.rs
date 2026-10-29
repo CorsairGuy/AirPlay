@@ -8,6 +8,7 @@ use std::sync::Arc;
 use clock::{Anchor, TimeSource};
 use codec::Format;
 use rtp::AudioCipher;
+use socket2::{Domain, Protocol, Socket, Type};
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::task::JoinHandle;
@@ -94,19 +95,35 @@ impl Drop for Stream {
     }
 }
 
-/// TCP на случайном порту: `[::]` (принимает и IPv4), иначе `0.0.0.0`.
+/// TCP на случайном порту для IPv4 и IPv6 сразу. `IPV6_V6ONLY` снимаем
+/// явно: на Windows он включён по умолчанию и сокет `[::]` не принимает IPv4.
 pub fn bind_tcp() -> io::Result<TcpListener> {
-    let l = std::net::TcpListener::bind((Ipv6Addr::UNSPECIFIED, 0))
-        .or_else(|_| std::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)))?;
-    l.set_nonblocking(true)?;
-    TcpListener::from_std(l)
+    let s = dual_stack(Type::STREAM, Protocol::TCP)?;
+    s.listen(16)?;
+    TcpListener::from_std(s.into())
 }
 
 fn bind_udp() -> io::Result<UdpSocket> {
-    let s = std::net::UdpSocket::bind((Ipv6Addr::UNSPECIFIED, 0))
-        .or_else(|_| std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)))?;
+    UdpSocket::from_std(dual_stack(Type::DGRAM, Protocol::UDP)?.into())
+}
+
+fn dual_stack(ty: Type, proto: Protocol) -> io::Result<Socket> {
+    let v6 = Socket::new(Domain::IPV6, ty, Some(proto)).and_then(|s| {
+        s.set_only_v6(false)?;
+        s.bind(&SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)).into())?;
+        Ok(s)
+    });
+    let s = match v6 {
+        Ok(s) => s,
+        // Без IPv6 в системе.
+        Err(_) => {
+            let s = Socket::new(Domain::IPV4, ty, Some(proto))?;
+            s.bind(&SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)).into())?;
+            s
+        }
+    };
     s.set_nonblocking(true)?;
-    UdpSocket::from_std(s)
+    Ok(s)
 }
 
 async fn accept_buffered(listener: TcpListener, cipher: Arc<AudioCipher>, playout: Arc<Playout>) {

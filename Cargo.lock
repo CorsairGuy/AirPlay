@@ -108,6 +108,7 @@ dependencies = [
  "ap_clock",
  "ap_codec",
  "ap_rtp",
+ "socket2 0.6.5",
  "tokio",
  "tracing",
 ]
