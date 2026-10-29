@@ -133,8 +133,14 @@ mod tests {
         let elapsed = start.elapsed();
         // 300 мс данных минус 50 мс буфера.
         assert!(elapsed >= Duration::from_millis(240), "{elapsed:?}");
+        // После сна задержка зависит от того, насколько планировщик проспал
+        // (на машинах CI бывает больше буфера), поэтому только верхняя граница.
+        assert!(s.delay_frames() <= 2300);
+        s.stop();
+        // Запись меньше буфера не ждёт: задержка — ровно записанное.
+        s.write(&chunk[..882 * CHANNELS]).unwrap();
         let delay = s.delay_frames();
-        assert!((1500..=2300).contains(&delay), "задержка {delay}");
+        assert!((700..=882).contains(&delay), "задержка {delay}");
         s.stop();
         assert_eq!(s.delay_frames(), 0);
     }
