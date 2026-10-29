@@ -40,6 +40,26 @@ impl ControlKeys {
         }
     }
 
+    /// Канал данных удалённого управления (поток 130): соль —
+    /// `DataStream-Salt` и `seed` из SETUP десятичным числом. Отправитель
+    /// пишет `Output`, мы — `Input` (как в pyatv и shairport-sync).
+    pub fn accessory_data(shared: &[u8], seed: u64) -> Self {
+        let salt = format!("DataStream-Salt{seed}");
+        Self {
+            read: hkdf_sha512(shared, salt.as_bytes(), b"DataStream-Output-Encryption-Key"),
+            write: hkdf_sha512(shared, salt.as_bytes(), b"DataStream-Input-Encryption-Key"),
+        }
+    }
+
+    /// Канал данных со стороны отправителя.
+    pub fn controller_data(shared: &[u8], seed: u64) -> Self {
+        let acc = Self::accessory_data(shared, seed);
+        Self {
+            read: acc.write,
+            write: acc.read,
+        }
+    }
+
     /// Ключи для стороны отправителя (controller).
     pub fn controller(shared: &[u8]) -> Self {
         let acc = Self::accessory(shared);

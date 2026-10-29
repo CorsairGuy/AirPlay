@@ -7,6 +7,7 @@
 //! [`serve::run`].
 
 pub mod media;
+pub mod remote;
 pub mod serve;
 pub mod session;
 pub mod state;

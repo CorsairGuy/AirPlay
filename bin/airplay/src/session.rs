@@ -36,6 +36,10 @@ pub struct Context {
     pub port: u16,
     /// Зеркалирование экрана: куда отдавать видео.
     pub mirror: Option<mirror::VideoSinkFactory>,
+    /// Команды отправителю.
+    pub remote: crate::remote::Remote,
+    /// Служба MRP, куда пересылается канал потока 130.
+    pub mrp_bridge: Option<SocketAddr>,
 }
 
 impl Context {
@@ -326,6 +330,8 @@ mod tests {
             mdns: std::sync::Mutex::new(None),
             port: 7000,
             mirror: None,
+            remote: Default::default(),
+            mrp_bridge: None,
             player: Arc::new(Player::new(
                 audio_stream::Config {
                     device: "null".into(),
@@ -658,6 +664,143 @@ mod tests {
         assert_eq!(got[0], (true, config.to_vec()));
         assert_eq!(got[1], (false, frames[0].clone()));
         assert_eq!(got[2], (false, frames[1].clone()));
+    }
+
+    /// Пульт: команды уходят отправителю по каналу событий, канал MRP
+    /// (поток 130) расшифровывается и пересылается в службу MRP.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn remote_control_end_to_end() {
+        use crate::remote::{Command, Remote};
+        use plist::{Dictionary, Value};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let backend = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let remote = Remote::new();
+        let mut ctx = ctx();
+        {
+            let c = Arc::get_mut(&mut ctx).unwrap();
+            c.mrp_bridge = Some(backend.local_addr().unwrap());
+            c.remote = remote.clone();
+        }
+        let mut c = Client::new(ctx);
+        let mut setup = ControllerSetup::new(Identity::from_seed("ctl", &[6; 32]), "", true);
+        let hkp = [("X-Apple-HKP", "4")];
+        let m2 = c.call("POST", "/pair-setup", &hkp, setup.m1()).body;
+        let m4 = c
+            .call("POST", "/pair-setup", &hkp, setup.m3(&m2).unwrap())
+            .body;
+        c.encrypt(setup.check_m4(&m4).unwrap().unwrap());
+        let shared = setup.session_key().unwrap().to_vec();
+        let to_plist = |d: Dictionary| {
+            let mut out = Vec::new();
+            Value::Dictionary(d).to_writer_binary(&mut out).unwrap();
+            out
+        };
+        let reply = |r: Response| {
+            assert_eq!(r.status, 200);
+            plist::from_bytes::<Value>(&r.body)
+                .unwrap()
+                .into_dictionary()
+                .unwrap()
+        };
+
+        // Канал событий: после updateInfo — команды.
+        assert!(!remote.send(Command::Next), "отправителя ещё нет");
+        let session = reply(c.call("SETUP", "rtsp://x/1", &[], to_plist(Dictionary::new())));
+        let event_port = session["eventPort"].as_unsigned_integer().unwrap() as u16;
+        let mut events = tokio::net::TcpStream::connect(("127.0.0.1", event_port))
+            .await
+            .unwrap();
+        let mut channel = Channel::new(ControlKeys::controller_events(&shared));
+        let mut wire = Vec::new();
+        let mut plain = Vec::new();
+        let mut next_request = async || loop {
+            if let Some(req) = rtsp::decode_request(&mut plain).unwrap() {
+                return req;
+            }
+            let mut buf = [0u8; 4096];
+            let n = events.read(&mut buf).await.unwrap();
+            assert!(n > 0, "канал событий закрыт");
+            wire.extend_from_slice(&buf[..n]);
+            channel.open(&mut wire, &mut plain).unwrap();
+        };
+        assert_eq!(next_request().await.uri, "/command");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !remote.connected() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "канал событий не привязан"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        assert!(remote.send(Command::Next));
+        assert!(remote.send(Command::Volume(0.5)));
+        let next = next_request().await;
+        assert_eq!(next.headers.get("CSeq"), Some("1"));
+        let body = plist::from_bytes::<Value>(&next.body).unwrap();
+        let body = body.as_dictionary().unwrap();
+        assert_eq!(body["type"].as_string(), Some("sendMediaRemoteCommand"));
+        assert_eq!(
+            body["modernMediaRemoteCommand"].as_unsigned_integer(),
+            Some(4)
+        );
+        let volume = next_request().await;
+        assert_eq!(volume.headers.get("CSeq"), Some("2"));
+        let vol = c.call("GET_PARAMETER", "rtsp://x/1", &[], b"volume\r\n".to_vec());
+        assert_eq!(vol.body, b"volume: -15.000000\r\n");
+
+        // Поток 130 без seed — только регистрация.
+        let stream = |seed: Option<u64>| {
+            let mut s = Dictionary::new();
+            s.insert("type".into(), Value::Integer(130.into()));
+            if let Some(seed) = seed {
+                s.insert("seed".into(), Value::Integer(seed.into()));
+            }
+            let mut d = Dictionary::new();
+            d.insert("streams".into(), Value::Array(vec![s.into()]));
+            to_plist(d)
+        };
+        let first = |d: Dictionary| {
+            d["streams"].as_array().unwrap()[0]
+                .as_dictionary()
+                .unwrap()
+                .clone()
+        };
+        let logical = first(reply(c.call("SETUP", "rtsp://x/1", &[], stream(None))));
+        assert_eq!(logical["streamID"].as_unsigned_integer(), Some(1));
+        assert!(!logical.contains_key("dataPort"));
+
+        // С seed — шифрованный канал до службы MRP и обратно.
+        let seed = u64::MAX - 7;
+        let data = first(reply(c.call(
+            "SETUP",
+            "rtsp://x/1",
+            &[],
+            stream(Some(seed)),
+        )));
+        let port = data["dataPort"].as_unsigned_integer().unwrap() as u16;
+        let mut client = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        let mut ch = Channel::new(ControlKeys::controller_data(&shared, seed));
+        let mut out = Vec::new();
+        ch.seal(b"ping", &mut out);
+        client.write_all(&out).await.unwrap();
+        let (mut service, _) = backend.accept().await.unwrap();
+        let mut got = [0u8; 4];
+        service.read_exact(&mut got).await.unwrap();
+        assert_eq!(&got, b"ping");
+        service.write_all(b"pong").await.unwrap();
+        let mut sealed = Vec::new();
+        let mut opened = Vec::new();
+        while opened.len() < 4 {
+            let mut buf = [0u8; 256];
+            let n = client.read(&mut buf).await.unwrap();
+            assert!(n > 0);
+            sealed.extend_from_slice(&buf[..n]);
+            ch.open(&mut sealed, &mut opened).unwrap();
+        }
+        assert_eq!(opened, b"pong");
     }
 
     #[test]

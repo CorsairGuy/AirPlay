@@ -32,6 +32,9 @@ const USAGE: &str = "\
   --model МОДЕЛЬ  модель для iOS (по умолчанию AirPlay)
   --no-mdns       не объявлять себя в Bonjour
   --require-pin   пускать только после сопряжения по PIN (без transient)
+  --mrp-bridge АДРЕС
+                  пересылать канал MediaRemote (поток 130) в службу MRP по
+                  TCP, например 127.0.0.1:18902
   --mirror        режим зеркалирования экрана вместо звука AirPlay 2
   --video-dump ПУТЬ
                   писать видео зеркалирования в файл H.264 или H.265 (Annex B);
@@ -73,6 +76,8 @@ fn parse_serve(args: &[String]) -> Result<serve::Options, String> {
         audio: audio_stream::Config::default(),
         require_pin: false,
         mirror: None,
+        remote: Default::default(),
+        mrp_bridge: None,
         display: device::Display {
             width: 1920,
             height: 1080,
@@ -103,6 +108,11 @@ fn parse_serve(args: &[String]) -> Result<serve::Options, String> {
             "--model" => opts.model = value()?,
             "--no-mdns" => opts.mdns = false,
             "--require-pin" => opts.require_pin = true,
+            "--mrp-bridge" => {
+                opts.mrp_bridge = Some(value()?.parse().map_err(|_| {
+                    "--mrp-bridge: нужен адрес, например 127.0.0.1:18902".to_string()
+                })?)
+            }
             "--mirror" => mirror = true,
             "--video-dump" => dump = Some(value()?),
             "--video-decoder" => decoder = Some(value()?),

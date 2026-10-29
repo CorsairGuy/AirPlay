@@ -22,6 +22,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
+use crate::remote::{self, Command, Remote};
 use crate::session::{BPLIST, Context, OCTETS};
 
 /// Сколько байт отправитель может прислать вперёд в буферизованном потоке:
@@ -117,6 +118,14 @@ pub struct Media {
     legacy_shared: Option<[u8; 32]>,
     /// Часы NTP, видеопоток и заглушка звука зеркалирования.
     tasks: Vec<JoinHandle<()>>,
+    /// Команды отправителю идут через канал событий этого соединения.
+    control: Remote,
+    /// Соединение только для пульта (`isRemoteControlOnly`): звука в нём
+    /// нет, команды через него не шлём.
+    rc_only: bool,
+    /// Куда пересылать канал MRP (поток 130).
+    mrp_bridge: Option<SocketAddr>,
+    mrp: Option<JoinHandle<()>>,
 }
 
 impl Media {
@@ -136,6 +145,10 @@ impl Media {
             ntp: None,
             legacy_shared: None,
             tasks: Vec::new(),
+            control: ctx.remote.clone(),
+            rc_only: false,
+            mrp_bridge: ctx.mrp_bridge,
+            mrp: None,
         }
     }
 
@@ -203,6 +216,9 @@ impl Media {
                     if let Some(events) = self.events.take() {
                         events.abort();
                     }
+                    if let Some(mrp) = self.mrp.take() {
+                        mrp.abort();
+                    }
                     self.stop_tasks();
                 }
                 info!("TEARDOWN");
@@ -237,11 +253,11 @@ impl Media {
             .get("timingProtocol")
             .and_then(Value::as_string)
             .unwrap_or("None");
-        info!(
-            timing,
-            rc_only = body.contains_key("isRemoteControlOnly"),
-            "SETUP сессии"
-        );
+        self.rc_only = body
+            .get("isRemoteControlOnly")
+            .and_then(Value::as_boolean)
+            .unwrap_or(false);
+        info!(timing, rc_only = self.rc_only, "SETUP сессии");
         let mut d = Dictionary::new();
         if let Some(ekey) = body.get("ekey").and_then(Value::as_data) {
             match <&[u8; 72]>::try_from(ekey).map(|e| self.fairplay.decrypt(e)) {
@@ -398,6 +414,9 @@ impl Media {
         if let Some(old) = self.events.take() {
             old.abort();
         }
+        let control = (!self.rc_only).then(|| self.control.clone());
+        let player = self.player.clone();
+        let owner = self.id;
         self.events = Some(tokio::spawn(async move {
             let Ok((mut conn, peer)) = listener.accept().await else {
                 return;
@@ -406,9 +425,35 @@ impl Media {
             if conn.write_all(&hello).await.is_err() {
                 return;
             }
-            // Ответы отправителя нам не нужны, но читать надо, чтобы он не встал.
+            let mut commands = control.as_ref().map(|c| c.attach(owner));
+            let mut cseq = 0u32;
             let mut buf = [0u8; 1024];
-            while matches!(conn.read(&mut buf).await, Ok(n) if n > 0) {}
+            loop {
+                tokio::select! {
+                    // Ответы отправителя на наши команды; читать надо, чтобы он не встал.
+                    n = conn.read(&mut buf) => {
+                        if !matches!(n, Ok(n) if n > 0) {
+                            break;
+                        }
+                    }
+                    Some(command) = next_command(&mut commands) => {
+                        if let Command::Volume(v) = command {
+                            player.set_volume(owner, Command::volume_db(v));
+                        }
+                        cseq += 1;
+                        let req = remote::command_request(remote::command_body(command), cseq);
+                        let mut wire = Vec::new();
+                        channel.seal(&req, &mut wire);
+                        if conn.write_all(&wire).await.is_err() {
+                            break;
+                        }
+                        debug!(?command, "команда отправителю");
+                    }
+                }
+            }
+            if let Some(c) = control {
+                c.detach(owner);
+            }
             debug!("канал событий закрыт");
         }));
         Some(port)
@@ -460,10 +505,7 @@ impl Media {
                     self.anchor = None;
                     self.player.replace(self.id, stream);
                 }
-                130 => {
-                    // Удалённое управление (MediaRemote): пока только подтверждаем.
-                    r.insert("streamID".into(), Value::Integer(1.into()));
-                }
+                130 => self.setup_remote_control(s, &mut r)?,
                 other => {
                     warn!(kind = other, "поток не поддерживается");
                     continue;
@@ -474,6 +516,34 @@ impl Media {
         let mut d = Dictionary::new();
         d.insert("streams".into(), Value::Array(replies));
         Ok(d)
+    }
+
+    /// Поток 130 (MediaRemote). Без `seed` это логическая регистрация:
+    /// отвечаем `streamID`, канала нет. С `seed` и заданной службой MRP
+    /// открываем шифрованный канал данных и пересылаем его туда; новый
+    /// SETUP заменяет прежний канал.
+    fn setup_remote_control(&mut self, s: &Dictionary, r: &mut Dictionary) -> Result<(), String> {
+        r.insert("streamID".into(), Value::Integer(1.into()));
+        let seed = uint(s, "seed");
+        let (Some(seed), Some(backend)) = (seed, self.mrp_bridge) else {
+            debug!(seed = seed.is_some(), "MRP: логическая регистрация");
+            return Ok(());
+        };
+        let shared = self.shared.as_ref().ok_or("канал MRP без сопряжения")?;
+        let listener = audio_stream::bind_tcp().map_err(|e| format!("сокет MRP: {e}"))?;
+        let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+        if let Some(old) = self.mrp.take() {
+            old.abort();
+        }
+        self.mrp = Some(tokio::spawn(remote::bridge(
+            listener,
+            self.remote,
+            ControlKeys::accessory_data(shared, seed),
+            backend,
+        )));
+        info!(port, %backend, "канал MRP");
+        r.insert("dataPort".into(), Value::Integer(port.into()));
+        Ok(())
     }
 
     fn set_anchor(&mut self, req: &Request) {
@@ -542,6 +612,21 @@ impl Drop for Media {
         if let Some(events) = self.events.take() {
             events.abort();
         }
+        if let Some(mrp) = self.mrp.take() {
+            mrp.abort();
+        }
+        self.control.detach(self.id);
+    }
+}
+
+/// Следующая команда, или вечное ожидание, если команд для этого
+/// соединения нет.
+async fn next_command(
+    rx: &mut Option<tokio::sync::mpsc::UnboundedReceiver<Command>>,
+) -> Option<Command> {
+    match rx {
+        Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
     }
 }
 
