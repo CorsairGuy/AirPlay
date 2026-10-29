@@ -41,7 +41,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "signal", "sync"] }
 plist = "1.7"
-mdns-sd = "0.13"
+mdns-sd = "0.21"
 rand = "0.8"
 sha2 = "0.10"
 hkdf = "0.12"
