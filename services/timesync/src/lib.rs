@@ -144,3 +144,9 @@ fn bind(addr: SocketAddr) -> std::io::Result<UdpSocket> {
     s.set_nonblocking(true)?;
     UdpSocket::from_std(s)
 }
+
+impl clock::TimeSource for TimeSync {
+    fn offset(&self, timeline: u64) -> Option<i64> {
+        self.timeline(timeline).map(|t| t.offset_ns)
+    }
+}

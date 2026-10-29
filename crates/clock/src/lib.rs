@@ -38,6 +38,21 @@ impl Anchor {
     }
 }
 
+/// Откуда плеер узнаёт смещение часов отправителя.
+pub trait TimeSource: Send + Sync {
+    /// `мастер − локальные` для шкалы `timeline`, нс.
+    fn offset(&self, timeline: u64) -> Option<i64>;
+}
+
+/// Без PTP: смещения нет, плеер играет по своим часам.
+pub struct NoTime;
+
+impl TimeSource for NoTime {
+    fn offset(&self, _timeline: u64) -> Option<i64> {
+        None
+    }
+}
+
 /// Монотонные локальные часы процесса, нс. Общая шкала для PTP и вывода звука.
 pub fn now_ns() -> u64 {
     use std::sync::OnceLock;

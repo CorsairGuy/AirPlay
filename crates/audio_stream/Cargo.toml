@@ -10,3 +10,14 @@ publish = false
 
 [lints]
 workspace = true
+
+[dependencies]
+audio.workspace = true
+clock.workspace = true
+codec.workspace = true
+rtp.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
