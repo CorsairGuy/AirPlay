@@ -5,7 +5,7 @@
 //! без `streams` (часы и канал событий), затем SETUP потока, RECORD и
 //! SETRATEANCHORTIME, когда пора играть.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -104,10 +104,20 @@ pub struct Media {
     fairplay: FairPlay,
     events: Option<JoinHandle<()>>,
     anchor: Option<Anchor>,
+    /// Адрес отправителя: туда шлём запросы времени NTP.
+    remote: IpAddr,
+    /// Куда отдавать видео; `None` — зеркалирование выключено.
+    mirror: Option<mirror::VideoSinkFactory>,
+    /// Ключ AES из FairPlay `ekey` (зеркалирование).
+    aes_key: Option<[u8; 16]>,
+    /// Общий секрет legacy pair-verify: подмешивается в ключ видео.
+    legacy_shared: Option<[u8; 32]>,
+    /// Часы NTP, видеопоток и заглушка звука зеркалирования.
+    tasks: Vec<JoinHandle<()>>,
 }
 
 impl Media {
-    pub fn new(ctx: &Context, local: IpAddr) -> Self {
+    pub fn new(ctx: &Context, local: IpAddr, remote: IpAddr) -> Self {
         Self {
             player: ctx.player.clone(),
             id: ctx.player.next_id.fetch_add(1, Ordering::Relaxed),
@@ -116,7 +126,16 @@ impl Media {
             fairplay: FairPlay::new(),
             events: None,
             anchor: None,
+            remote: remote.to_canonical(),
+            mirror: ctx.mirror.clone(),
+            aes_key: None,
+            legacy_shared: None,
+            tasks: Vec::new(),
         }
+    }
+
+    pub fn set_legacy_shared(&mut self, shared: [u8; 32]) {
+        self.legacy_shared = Some(shared);
     }
 
     pub fn set_shared(&mut self, shared: Vec<u8>) {
@@ -175,8 +194,11 @@ impl Media {
                 let streams_only = plist_dict(&req.body).is_some_and(|d| d.contains_key("streams"));
                 self.player.release(self.id);
                 self.anchor = None;
-                if !streams_only && let Some(events) = self.events.take() {
-                    events.abort();
+                if !streams_only {
+                    if let Some(events) = self.events.take() {
+                        events.abort();
+                    }
+                    self.stop_tasks();
                 }
                 info!("TEARDOWN");
                 ok()
@@ -216,6 +238,23 @@ impl Media {
             "SETUP сессии"
         );
         let mut d = Dictionary::new();
+        if let Some(ekey) = body.get("ekey").and_then(Value::as_data) {
+            match <&[u8; 72]>::try_from(ekey).map(|e| self.fairplay.decrypt(e)) {
+                Ok(Ok(key)) => self.aes_key = Some(key),
+                Ok(Err(e)) => warn!("ekey: {e}"),
+                Err(_) => warn!(len = ekey.len(), "ekey неожиданной длины"),
+            }
+        }
+        if timing == "NTP" {
+            let port = uint(body, "timingPort").unwrap_or(0) as u16;
+            match timesync::ntp::start(SocketAddr::new(self.remote, port)) {
+                Ok((local, task)) => {
+                    self.tasks.push(task);
+                    d.insert("timingPort".into(), Value::Integer(local.into()));
+                }
+                Err(e) => warn!("NTP: {e}"),
+            }
+        }
         if timing == "PTP" {
             if let Some(info) = body.get("timingPeerInfo").and_then(Value::as_dictionary) {
                 self.player.time.set_peers(addresses(info));
@@ -228,8 +267,67 @@ impl Media {
         }
         let port = self.start_events(ctx).unwrap_or(0);
         d.insert("eventPort".into(), Value::Integer(port.into()));
-        d.insert("timingPort".into(), Value::Integer(0.into()));
+        if !d.contains_key("timingPort") {
+            d.insert("timingPort".into(), Value::Integer(0.into()));
+        }
         d
+    }
+
+    fn stop_tasks(&mut self) {
+        for t in self.tasks.drain(..) {
+            t.abort();
+        }
+    }
+
+    /// Тип 110: видеопоток зеркалирования.
+    fn setup_video(&mut self, s: &Dictionary, r: &mut Dictionary) -> Result<(), String> {
+        let factory = self
+            .mirror
+            .clone()
+            .ok_or("зеркалирование выключено (--mirror)")?;
+        let aes = self.aes_key.ok_or("нет ключа видео: SETUP без ekey")?;
+        let id = s
+            .get("streamConnectionID")
+            .and_then(|v| {
+                v.as_unsigned_integer()
+                    .or(v.as_signed_integer().map(|i| i as u64))
+            })
+            .unwrap_or(0);
+        let session = mirror::session_key(&aes, self.legacy_shared.as_ref());
+        let (key, iv) = mirror::stream_key_iv(&session, id);
+        let listener = audio_stream::bind_tcp().map_err(|e| format!("видеосокет: {e}"))?;
+        let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+        info!(id, port, "видеопоток");
+        self.tasks.push(tokio::spawn(mirror::receive(
+            listener,
+            key,
+            iv,
+            factory.open(),
+        )));
+        r.insert("dataPort".into(), Value::Integer(port.into()));
+        Ok(())
+    }
+
+    /// Звук зеркалирования (тип 96 без `shk`: AAC-ELD, AES-CBC) пока не
+    /// играем, но порты отдаём, иначе отправитель не начнёт видео.
+    fn setup_mirror_audio(&mut self, r: &mut Dictionary) -> Result<(), String> {
+        warn!("звук зеркалирования (AAC-ELD) пока не поддерживается");
+        for key in ["dataPort", "controlPort"] {
+            let socket = std::net::UdpSocket::bind((std::net::Ipv6Addr::UNSPECIFIED, 0))
+                .or_else(|_| std::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)))
+                .and_then(|s| {
+                    s.set_nonblocking(true)?;
+                    tokio::net::UdpSocket::from_std(s)
+                })
+                .map_err(|e| format!("сокет звука: {e}"))?;
+            let port = socket.local_addr().map_err(|e| e.to_string())?.port();
+            r.insert(key.into(), Value::Integer(port.into()));
+            self.tasks.push(tokio::spawn(async move {
+                let mut buf = [0u8; 2048];
+                while socket.recv(&mut buf).await.is_ok() {}
+            }));
+        }
+        Ok(())
     }
 
     /// Канал событий: отправитель подключается сам; первым сообщением
@@ -274,6 +372,10 @@ impl Media {
             let mut r = Dictionary::new();
             r.insert("type".into(), Value::Integer(kind.into()));
             match kind {
+                96 if self.mirror.is_some() && !s.contains_key("shk") => {
+                    self.setup_mirror_audio(&mut r)?;
+                }
+                110 => self.setup_video(s, &mut r)?,
                 96 | 103 => {
                     let shk: [u8; 32] = s
                         .get("shk")
@@ -386,6 +488,7 @@ impl Media {
 impl Drop for Media {
     fn drop(&mut self) {
         self.player.release(self.id);
+        self.stop_tasks();
         if let Some(events) = self.events.take() {
             events.abort();
         }

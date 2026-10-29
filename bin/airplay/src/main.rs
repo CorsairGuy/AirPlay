@@ -5,7 +5,7 @@
 
 use std::process::ExitCode;
 
-use airplay::{audio_stream, serve, state};
+use airplay::{audio_stream, device, mirror, serve, state};
 
 use tracing_subscriber::EnvFilter;
 
@@ -30,6 +30,11 @@ const USAGE: &str = "\
   --model МОДЕЛЬ  модель для iOS (по умолчанию AirPlay)
   --no-mdns       не объявлять себя в Bonjour
   --require-pin   пускать только после сопряжения по PIN (без transient)
+  --mirror        режим зеркалирования экрана вместо звука AirPlay 2
+  --video-dump ПУТЬ
+                  писать видео зеркалирования в файл H.264 (Annex B);
+                  «-» — в stdout: airplay serve --mirror --video-dump - | ffplay -f h264 -
+  --display ШxВ@К экран для зеркалирования (по умолчанию 1920x1080@60)
   --audio ВЫВОД   куда играть: default, null (никуда) или устройство ALSA,
                   например hw:0,0 (по умолчанию default)
   --buffer МС     буфер звуковой карты, мс (по умолчанию 100; меньше —
@@ -57,7 +62,15 @@ fn parse_serve(args: &[String]) -> Result<serve::Options, String> {
         model: "AirPlay".into(),
         audio: audio_stream::Config::default(),
         require_pin: false,
+        mirror: None,
+        display: device::Display {
+            width: 1920,
+            height: 1080,
+            fps: 60,
+        },
     };
+    let mut mirror = false;
+    let mut dump: Option<String> = None;
     let ms = |v: String, name: &str| {
         v.parse::<u64>()
             .map(std::time::Duration::from_millis)
@@ -78,11 +91,27 @@ fn parse_serve(args: &[String]) -> Result<serve::Options, String> {
             "--model" => opts.model = value()?,
             "--no-mdns" => opts.mdns = false,
             "--require-pin" => opts.require_pin = true,
+            "--mirror" => mirror = true,
+            "--video-dump" => dump = Some(value()?),
+            "--display" => opts.display = parse_display(&value()?)?,
             "--audio" => opts.audio.device = value()?,
             "--buffer" => opts.audio.output_latency = ms(value()?, "--buffer")?,
             "--latency" => opts.audio.fallback_latency = ms(value()?, "--latency")?,
             other => return Err(format!("неизвестный параметр {other}")),
         }
+    }
+    if dump.is_some() && !mirror {
+        return Err("--video-dump только вместе с --mirror".into());
+    }
+    if mirror {
+        if opts.model == "AirPlay" {
+            // Как у UxPlay: под этой моделью iOS предлагает «Повтор экрана».
+            opts.model = "AppleTV3,2".into();
+        }
+        opts.mirror = Some(match dump {
+            Some(path) => mirror::VideoSinkFactory::new(move || dump_sink(&path)),
+            None => mirror::VideoSinkFactory::new(|| Box::new(mirror::CountingSink(0))),
+        });
     }
     Ok(opts)
 }
@@ -98,7 +127,9 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
+            // Логи в stderr: stdout может занимать видео (--video-dump -).
             tracing_subscriber::fmt()
+                .with_writer(std::io::stderr)
                 .with_env_filter(
                     EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
                 )
@@ -131,6 +162,31 @@ fn main() -> ExitCode {
         _ => {
             eprintln!("{USAGE}");
             ExitCode::from(2)
+        }
+    }
+}
+
+fn parse_display(v: &str) -> Result<device::Display, String> {
+    let err = || format!("--display: нужно ШxВ@К, например 1920x1080@60, а не {v}");
+    let (size, fps) = v.split_once('@').unwrap_or((v, "60"));
+    let (w, h) = size.split_once('x').ok_or_else(err)?;
+    Ok(device::Display {
+        width: w.parse().map_err(|_| err())?,
+        height: h.parse().map_err(|_| err())?,
+        fps: fps.parse().map_err(|_| err())?,
+    })
+}
+
+/// Каждый новый видеопоток пишется в файл заново.
+fn dump_sink(path: &str) -> Box<dyn mirror::VideoSink> {
+    if path == "-" {
+        return Box::new(mirror::AnnexBWriter::new(std::io::stdout()));
+    }
+    match std::fs::File::create(path) {
+        Ok(f) => Box::new(mirror::AnnexBWriter::new(std::io::BufWriter::new(f))),
+        Err(e) => {
+            tracing::warn!("{path}: {e}");
+            Box::new(mirror::CountingSink(0))
         }
     }
 }
