@@ -37,6 +37,7 @@ name = "airplay"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ap_audio",
  "ap_audio_stream",
  "ap_base",
  "ap_clock",

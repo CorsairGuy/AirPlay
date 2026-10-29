@@ -25,6 +25,7 @@ fn config() -> Config {
         device: "null".into(),
         output_latency: Duration::from_millis(20),
         fallback_latency: Duration::from_millis(50),
+        ..Config::default()
     }
 }
 
@@ -104,4 +105,71 @@ async fn flush_drops_range() {
     assert_eq!(stream.playout().buffered_packets(), sent - 10);
     stream.playout().flush(Some(15 * 1024), 1_000_000);
     assert_eq!(stream.playout().buffered_packets(), 5);
+}
+
+/// Вывод встраивающей программы: громкость берёт на себя, сэмплы получает
+/// без масштабирования.
+struct HardwareVolume {
+    inner: audio::Null,
+    volume: Arc<std::sync::Mutex<Option<f32>>>,
+    peak: Arc<std::sync::atomic::AtomicU32>,
+}
+
+impl audio::Sink for HardwareVolume {
+    fn sample_rate(&self) -> u32 {
+        self.inner.sample_rate()
+    }
+    fn write(&mut self, samples: &[i16]) -> std::io::Result<()> {
+        let peak = samples
+            .iter()
+            .map(|s| s.unsigned_abs() as u32)
+            .max()
+            .unwrap_or(0);
+        self.peak
+            .fetch_max(peak, std::sync::atomic::Ordering::Relaxed);
+        self.inner.write(samples)
+    }
+    fn delay_frames(&mut self) -> u32 {
+        self.inner.delay_frames()
+    }
+    fn stop(&mut self) {
+        self.inner.stop()
+    }
+    fn set_volume(&mut self, db: f32) -> bool {
+        *self.volume.lock().unwrap() = Some(db);
+        true
+    }
+}
+
+#[tokio::test]
+async fn custom_sink_with_hardware_volume() {
+    let volume = Arc::new(std::sync::Mutex::new(None));
+    let peak = Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let (v, p) = (volume.clone(), peak.clone());
+    let cfg = Config {
+        sink: Some(audio::SinkFactory::new(move |rate, _| {
+            Ok(Box::new(HardwareVolume {
+                inner: audio::Null::new(rate),
+                volume: v.clone(),
+                peak: p.clone(),
+            }))
+        })),
+        ..config()
+    };
+    let shk = [5u8; 32];
+    let stream = Stream::buffered(cfg, &shk, Arc::new(NoTime)).unwrap();
+    let sent = send_frames(&stream, &shk).await;
+    assert!(wait_for(&stream, sent, Duration::from_secs(2)).await);
+    // −29 дБ цифрой почти заглушили бы синус; вывод должен получить его целым.
+    stream.playout().set_volume(-29.0);
+    stream.playout().set_anchor(Anchor {
+        rtp: 0,
+        network_ns: 0,
+        timeline: 0,
+        playing: true,
+    });
+    assert!(wait_for(&stream, 0, Duration::from_secs(5)).await);
+    assert_eq!(*volume.lock().unwrap(), Some(-29.0));
+    let peak = peak.load(std::sync::atomic::Ordering::Relaxed);
+    assert!(peak > 2000, "сэмплы масштабированы: {peak}");
 }

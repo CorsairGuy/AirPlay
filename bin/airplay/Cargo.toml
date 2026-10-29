@@ -20,6 +20,7 @@ rtp.workspace = true
 clock.workspace = true
 codec.workspace = true
 plist.workspace = true
+audio.workspace = true
 audio_stream.workspace = true
 mirror.workspace = true
 hls.workspace = true

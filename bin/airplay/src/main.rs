@@ -3,12 +3,9 @@
 //! `airplay serve` запускает демон (по умолчанию все службы в этом процессе),
 //! остальные подкоманды управляют работающим демоном через `ipc`.
 
-mod media;
-mod serve;
-mod session;
-mod state;
-
 use std::process::ExitCode;
+
+use airplay::{audio_stream, serve, state};
 
 use tracing_subscriber::EnvFilter;
 
