@@ -2,6 +2,7 @@
 //! канал HAP, AES-CTR для сопряжения AirPlay 1.
 
 pub mod aead;
+pub mod cbc;
 pub mod channel;
 pub mod ctr;
 pub mod kdf;

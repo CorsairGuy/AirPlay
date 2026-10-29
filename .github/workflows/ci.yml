@@ -33,6 +33,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --workspace
 
+  # Звук зеркалирования (AAC-ELD) через libavcodec: фича ffmpeg.
+  ffmpeg:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: sudo apt-get update && sudo apt-get install -y libavcodec-dev libavformat-dev libavutil-dev libswresample-dev libclang-dev pkg-config
+      - run: cargo clippy --workspace --all-targets --features airplay/ffmpeg -- -D warnings
+      - run: cargo test --workspace --features airplay/ffmpeg
+
   # Станция (ARMv7) и Raspberry Pi (ARM64): пока только проверка сборки.
   cross-check:
     strategy:

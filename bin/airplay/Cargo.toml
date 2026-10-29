@@ -36,5 +36,9 @@ rand.workspace = true
 sha2.workspace = true
 hex.workspace = true
 
+[features]
+# Звук зеркалирования (AAC-ELD) через libavcodec.
+ffmpeg = ["codec/ffmpeg"]
+
 [lints]
 workspace = true
