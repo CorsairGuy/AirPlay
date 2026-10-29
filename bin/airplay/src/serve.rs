@@ -28,6 +28,12 @@ pub struct Options {
     pub mirror: Option<mirror::VideoSinkFactory>,
     /// Экран, который объявляем для зеркалирования.
     pub display: device::Display,
+    /// Ручка команд отправителю (play/pause/next, громкость, перемотка).
+    pub remote: crate::remote::Remote,
+    /// Служба MRP (например airplay_mrp на 127.0.0.1:18902): туда идёт
+    /// расшифрованный канал потока 130. `None` — поток 130 только
+    /// регистрируется.
+    pub mrp_bridge: Option<std::net::SocketAddr>,
 }
 
 pub async fn run(opts: Options) -> Result<()> {
@@ -87,6 +93,8 @@ pub async fn run(opts: Options) -> Result<()> {
         mdns: std::sync::Mutex::new(None),
         port: opts.port,
         mirror: opts.mirror,
+        remote: opts.remote,
+        mrp_bridge: opts.mrp_bridge,
     });
     if opts.mdns {
         let host = format!("airplay-{}", device_id.replace(':', "").to_lowercase());

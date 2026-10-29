@@ -45,6 +45,10 @@ sudo RUST_LOG=info ./target/release/airplay serve --name "airplay"
 - `--latency 250` — задержка в мс, если часов отправителя нет.
 - `--require-pin` — пускать только после сопряжения по PIN, без transient (PIN пишется в лог или задаётся `--pin`).
 
+### Пульт
+
+Программа, которая встраивает приёмник, управляет отправителем через `remote::Remote` в `serve::Options`: play, pause, next, previous, перемотка и громкость уходят plist-ом `sendMediaRemoteCommand` по каналу событий (DACP в AirPlay 2 не работает). Канал MediaRemote (поток 130) расшифровывается и пересылается по TCP в службу MRP: `--mrp-bridge 127.0.0.1:18902`. Сам протокол MRP (карточка «Сейчас играет» на iPhone) разбирает она.
+
 ### Зеркалирование экрана
 
 ```sh
