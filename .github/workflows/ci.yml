@@ -46,3 +46,22 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - run: cargo check --workspace --target ${{ matrix.target }}
+
+  # Независимая проверка: клиентская криптография pyatv против живого сервера.
+  interop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pyatv "srptools==1.0.1"
+      - run: cargo build -p airplay
+      - name: pyatv против airplay serve
+        env:
+          AIRPLAY_STATE_DIR: ${{ runner.temp }}/airplay-state
+        run: |
+          ./target/debug/airplay serve --port 7123 --pin 1234 --no-mdns &
+          for i in $(seq 1 50); do (echo > /dev/tcp/127.0.0.1/7123) 2>/dev/null && break; sleep 0.1; done
+          python tests/interop/pyatv_client.py 127.0.0.1 7123 1234
