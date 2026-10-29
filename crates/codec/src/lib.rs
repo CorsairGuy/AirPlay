@@ -1,5 +1,6 @@
 //! Декодеры звука AirPlay: AAC-LC (буферизованный поток AirPlay 2) и ALAC
-//! (realtime-поток и AirPlay 1). Чистый Rust на symphonia.
+//! (realtime-поток и AirPlay 1). Чистый Rust на symphonia. AAC-ELD (звук
+//! зеркалирования экрана) — через libavcodec с фичей `ffmpeg`.
 //!
 //! На выходе всегда интерлив i16: такой формат принимает любая звуковая
 //! карта, и на слабом ARM не нужно гонять f32 через весь конвейер.
@@ -9,6 +10,9 @@ use symphonia::core::codecs::audio::well_known::{CODEC_ID_AAC, CODEC_ID_ALAC};
 use symphonia::core::codecs::audio::{AudioCodecParameters, AudioDecoder, AudioDecoderOptions};
 use symphonia::core::packet::PacketRef;
 use symphonia::core::units::{Duration, Timestamp};
+
+#[cfg(feature = "ffmpeg")]
+mod eld;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -25,6 +29,8 @@ pub enum Codec {
         bit_depth: u8,
         frames_per_packet: u32,
     },
+    /// AAC-ELD, 480 сэмплов в пакете: звук зеркалирования экрана.
+    AacEld,
 }
 
 /// Формат потока. AirPlay 2 сообщает его в SSRC каждого RTP-пакета
@@ -74,6 +80,7 @@ impl Format {
     pub fn frames_per_packet(&self) -> u32 {
         match self.codec {
             Codec::Aac => 1024,
+            Codec::AacEld => 480,
             Codec::Alac {
                 frames_per_packet, ..
             } => frames_per_packet,
@@ -83,12 +90,30 @@ impl Format {
 
 pub struct Decoder {
     format: Format,
-    inner: Box<dyn AudioDecoder>,
+    inner: Inner,
     scratch: Vec<i16>,
+}
+
+enum Inner {
+    Symphonia(Box<dyn AudioDecoder>),
+    #[cfg(feature = "ffmpeg")]
+    Ffmpeg(eld::Eld),
 }
 
 impl Decoder {
     pub fn new(format: Format) -> Result<Self, Error> {
+        if format.codec == Codec::AacEld {
+            #[cfg(feature = "ffmpeg")]
+            return Ok(Self {
+                format,
+                inner: Inner::Ffmpeg(eld::Eld::new(&eld::ASC_44100_STEREO_480)?),
+                scratch: Vec::new(),
+            });
+            #[cfg(not(feature = "ffmpeg"))]
+            return Err(Error::Init(
+                "AAC-ELD: соберите с фичей ffmpeg (нужен libavcodec)".into(),
+            ));
+        }
         let mut params = AudioCodecParameters::new();
         params
             .with_sample_rate(format.sample_rate)
@@ -107,13 +132,14 @@ impl Decoder {
                     .for_codec(CODEC_ID_ALAC)
                     .with_extra_data(alac_cookie(format, bit_depth, frames_per_packet).into());
             }
+            Codec::AacEld => unreachable!("разобран выше"),
         }
         let inner = symphonia::default::get_codecs()
             .make_audio_decoder(&params, &AudioDecoderOptions::default())
             .map_err(|e| Error::Init(e.to_string()))?;
         Ok(Self {
             format,
-            inner,
+            inner: Inner::Symphonia(inner),
             scratch: Vec::new(),
         })
     }
@@ -124,9 +150,15 @@ impl Decoder {
 
     /// Декодирует пакет и дописывает стерео i16 в `out`. Возвращает число кадров.
     pub fn decode(&mut self, packet: &[u8], out: &mut Vec<i16>) -> Result<usize, Error> {
+        // Без фичи ffmpeg вариант один, и clippy предлагает `let`.
+        #[allow(clippy::infallible_destructuring_match)]
+        let inner = match &mut self.inner {
+            Inner::Symphonia(d) => d,
+            #[cfg(feature = "ffmpeg")]
+            Inner::Ffmpeg(d) => return d.decode(packet, out),
+        };
         let packet = PacketRef::new(0, Timestamp::new(0), Duration::new(1), packet);
-        let buf = self
-            .inner
+        let buf = inner
             .decode_ref(&packet)
             .map_err(|e| Error::Decode(e.to_string()))?;
         let channels = buf.spec().channels().count().max(1);
@@ -144,7 +176,11 @@ impl Decoder {
     }
 
     pub fn reset(&mut self) {
-        self.inner.reset();
+        match &mut self.inner {
+            Inner::Symphonia(d) => d.reset(),
+            #[cfg(feature = "ffmpeg")]
+            Inner::Ffmpeg(d) => d.reset(),
+        }
     }
 }
 

@@ -38,6 +38,15 @@ impl Anchor {
     }
 }
 
+/// Шкала времени NTP (AirPlay 1 и зеркалирование) в [`Anchor::timeline`]:
+/// отметки — наносекунды от 1900 года по часам отправителя.
+pub const NTP_TIMELINE: u64 = 0x4E54_5000;
+
+/// NTP 32.32 → нс.
+pub fn ntp_to_ns(ntp: u64) -> u64 {
+    (ntp >> 32) * 1_000_000_000 + (((ntp & 0xFFFF_FFFF) * 1_000_000_000) >> 32)
+}
+
 /// Откуда плеер узнаёт смещение часов отправителя.
 pub trait TimeSource: Send + Sync {
     /// `мастер − локальные` для шкалы `timeline`, нс.

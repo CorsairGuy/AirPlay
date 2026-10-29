@@ -7,7 +7,8 @@ use std::sync::Arc;
 
 use clock::{Anchor, TimeSource};
 use codec::Format;
-use rtp::AudioCipher;
+use crypto::cbc::AudioCbc;
+use rtp::{AudioCipher, HEADER_LEN, Header};
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
@@ -15,6 +16,34 @@ use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
 use crate::playout::{Config, Playout};
+
+/// Ключ realtime-потока.
+#[derive(Clone, Copy)]
+pub enum StreamKey {
+    /// AirPlay 2: `shk` из SETUP, ChaCha20-Poly1305.
+    ChaCha([u8; 32]),
+    /// AirPlay 1 и звук зеркалирования: ключ сессии и `eiv`, AES-128-CBC.
+    AesCbc { key: [u8; 16], iv: [u8; 16] },
+}
+
+enum Decrypt {
+    ChaCha(AudioCipher),
+    Cbc(Box<AudioCbc>),
+}
+
+impl Decrypt {
+    fn open<'a>(&self, packet: &'a mut [u8]) -> Option<(Header, &'a [u8])> {
+        match self {
+            Decrypt::ChaCha(c) => c.open(packet),
+            Decrypt::Cbc(c) => {
+                let header = Header::parse(packet)?;
+                let body = &mut packet[HEADER_LEN..];
+                c.decrypt(body);
+                Some((header, body))
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamKind {
@@ -41,7 +70,7 @@ impl Stream {
         let data_port = listener.local_addr()?.port();
         let control_port = control.local_addr()?.port();
         let playout = Arc::new(Playout::start(cfg, time, None));
-        let cipher = Arc::new(AudioCipher::new(shk));
+        let cipher = Arc::new(Decrypt::ChaCha(AudioCipher::new(shk)));
         let tasks = vec![
             tokio::spawn(accept_buffered(listener, cipher, playout.clone())),
             // Отправитель шлёт сюда редко и ничего важного; читаем, чтобы не копилось.
@@ -58,7 +87,7 @@ impl Stream {
 
     pub fn realtime(
         cfg: Config,
-        shk: &[u8; 32],
+        key: StreamKey,
         format: Format,
         time: Arc<dyn TimeSource>,
     ) -> io::Result<Stream> {
@@ -67,7 +96,10 @@ impl Stream {
         let data_port = data.local_addr()?.port();
         let control_port = control.local_addr()?.port();
         let playout = Arc::new(Playout::start(cfg, time, Some(format)));
-        let cipher = Arc::new(AudioCipher::new(shk));
+        let cipher = Arc::new(match key {
+            StreamKey::ChaCha(shk) => Decrypt::ChaCha(AudioCipher::new(&shk)),
+            StreamKey::AesCbc { key, iv } => Decrypt::Cbc(Box::new(AudioCbc::new(&key, &iv))),
+        });
         let tasks = vec![
             tokio::spawn(receive_realtime(data, cipher.clone(), playout.clone())),
             tokio::spawn(receive_control(control, cipher, playout.clone())),
@@ -126,7 +158,7 @@ fn dual_stack(ty: Type, proto: Protocol) -> io::Result<Socket> {
     Ok(s)
 }
 
-async fn accept_buffered(listener: TcpListener, cipher: Arc<AudioCipher>, playout: Arc<Playout>) {
+async fn accept_buffered(listener: TcpListener, cipher: Arc<Decrypt>, playout: Arc<Playout>) {
     loop {
         match listener.accept().await {
             Ok((conn, peer)) => {
@@ -142,7 +174,7 @@ async fn accept_buffered(listener: TcpListener, cipher: Arc<AudioCipher>, playou
     }
 }
 
-async fn read_buffered(mut conn: TcpStream, cipher: &AudioCipher, playout: &Playout) {
+async fn read_buffered(mut conn: TcpStream, cipher: &Decrypt, playout: &Playout) {
     let _ = conn.set_nodelay(true);
     let mut buf = Vec::with_capacity(64 * 1024);
     let mut chunk = vec![0u8; 32 * 1024];
@@ -162,7 +194,7 @@ async fn read_buffered(mut conn: TcpStream, cipher: &AudioCipher, playout: &Play
     }
 }
 
-fn push(cipher: &AudioCipher, playout: &Playout, packet: &mut [u8]) -> Option<u32> {
+fn push(cipher: &Decrypt, playout: &Playout, packet: &mut [u8]) -> Option<u32> {
     match cipher.open(packet) {
         Some((h, payload)) => {
             playout.push(h.timestamp, h.ssrc, payload.to_vec());
@@ -175,7 +207,7 @@ fn push(cipher: &AudioCipher, playout: &Playout, packet: &mut [u8]) -> Option<u3
     }
 }
 
-async fn receive_realtime(socket: UdpSocket, cipher: Arc<AudioCipher>, playout: Arc<Playout>) {
+async fn receive_realtime(socket: UdpSocket, cipher: Arc<Decrypt>, playout: Arc<Playout>) {
     let mut buf = vec![0u8; 2048];
     loop {
         let n = match socket.recv(&mut buf).await {
@@ -193,7 +225,7 @@ async fn receive_realtime(socket: UdpSocket, cipher: Arc<AudioCipher>, playout: 
 
 /// Управляющий канал realtime: синхропакеты с PTP-временем (0xD7) и
 /// повторно присланные пакеты (0xD6).
-async fn receive_control(socket: UdpSocket, cipher: Arc<AudioCipher>, playout: Arc<Playout>) {
+async fn receive_control(socket: UdpSocket, cipher: Arc<Decrypt>, playout: Arc<Playout>) {
     let mut buf = vec![0u8; 2048];
     loop {
         let (n, _from): (usize, SocketAddr) = match socket.recv_from(&mut buf).await {
@@ -218,6 +250,18 @@ async fn receive_control(socket: UdpSocket, cipher: Arc<AudioCipher>, playout: A
                     rtp,
                     network_ns,
                     timeline,
+                    playing: true,
+                });
+            }
+            0x54 if n >= 20 => {
+                // AirPlay 1: [4..8] звучит в момент [8..16] (NTP по часам
+                // отправителя), [16..20] — метка, отправляемая сейчас.
+                let rtp = u32::from_be_bytes(packet[4..8].try_into().unwrap());
+                let ntp = u64::from_be_bytes(packet[8..16].try_into().unwrap());
+                playout.set_anchor(Anchor {
+                    rtp,
+                    network_ns: clock::ntp_to_ns(ntp),
+                    timeline: clock::NTP_TIMELINE,
                     playing: true,
                 });
             }

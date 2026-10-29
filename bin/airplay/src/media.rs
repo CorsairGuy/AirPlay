@@ -9,7 +9,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use audio_stream::Stream;
+use audio_stream::{Stream, StreamKey};
 use clock::{Anchor, TimeSource};
 use codec::{Codec, Format};
 use crypto::Channel;
@@ -108,8 +108,11 @@ pub struct Media {
     remote: IpAddr,
     /// Куда отдавать видео; `None` — зеркалирование выключено.
     mirror: Option<mirror::VideoSinkFactory>,
-    /// Ключ AES из FairPlay `ekey` (зеркалирование).
+    /// Ключ AES из FairPlay `ekey` и IV `eiv` (зеркалирование).
     aes_key: Option<[u8; 16]>,
+    eiv: Option<[u8; 16]>,
+    /// Часы отправителя по NTP (зеркалирование).
+    ntp: Option<timesync::ntp::NtpClock>,
     /// Общий секрет legacy pair-verify: подмешивается в ключ видео.
     legacy_shared: Option<[u8; 32]>,
     /// Часы NTP, видеопоток и заглушка звука зеркалирования.
@@ -129,6 +132,8 @@ impl Media {
             remote: remote.to_canonical(),
             mirror: ctx.mirror.clone(),
             aes_key: None,
+            eiv: None,
+            ntp: None,
             legacy_shared: None,
             tasks: Vec::new(),
         }
@@ -245,11 +250,15 @@ impl Media {
                 Err(_) => warn!(len = ekey.len(), "ekey неожиданной длины"),
             }
         }
+        if let Some(eiv) = body.get("eiv").and_then(Value::as_data) {
+            self.eiv = eiv.try_into().ok();
+        }
         if timing == "NTP" {
             let port = uint(body, "timingPort").unwrap_or(0) as u16;
             match timesync::ntp::start(SocketAddr::new(self.remote, port)) {
-                Ok((local, task)) => {
+                Ok((local, clock, task)) => {
                     self.tasks.push(task);
+                    self.ntp = Some(clock);
                     d.insert("timingPort".into(), Value::Integer(local.into()));
                 }
                 Err(e) => warn!("NTP: {e}"),
@@ -308,10 +317,44 @@ impl Media {
         Ok(())
     }
 
-    /// Звук зеркалирования (тип 96 без `shk`: AAC-ELD, AES-CBC) пока не
-    /// играем, но порты отдаём, иначе отправитель не начнёт видео.
-    fn setup_mirror_audio(&mut self, r: &mut Dictionary) -> Result<(), String> {
-        warn!("звук зеркалирования (AAC-ELD) пока не поддерживается");
+    /// Звук зеркалирования: тип 96 без `shk`, AAC-ELD, AES-128-CBC ключом
+    /// сессии и `eiv`, время по NTP. Без декодера AAC-ELD (сборка без фичи
+    /// `ffmpeg`) порты всё равно отдаём, иначе отправитель не начнёт видео.
+    fn setup_mirror_audio(&mut self, s: &Dictionary, r: &mut Dictionary) -> Result<(), String> {
+        let format = Format {
+            codec: Codec::AacEld,
+            sample_rate: uint(s, "sr").unwrap_or(44_100) as u32,
+            channels: 2,
+        };
+        if let Err(e) = codec::Decoder::new(format) {
+            warn!("звук зеркалирования не играет: {e}");
+            return self.drain_mirror_audio(r);
+        }
+        let aes = self.aes_key.ok_or("нет ключа звука: SETUP без ekey")?;
+        let iv = self.eiv.ok_or("нет eiv в SETUP")?;
+        let key = mirror::session_key(&aes, self.legacy_shared.as_ref());
+        let time: Arc<dyn TimeSource> = match &self.ntp {
+            Some(clock) => Arc::new(clock.clone()),
+            None => Arc::new(clock::NoTime),
+        };
+        let stream = Stream::realtime(
+            self.player.audio.clone(),
+            StreamKey::AesCbc { key, iv },
+            format,
+            time,
+        )
+        .map_err(|e| format!("сокеты звука: {e}"))?;
+        info!("звук зеркалирования (AAC-ELD)");
+        r.insert("dataPort".into(), Value::Integer(stream.data_port.into()));
+        r.insert(
+            "controlPort".into(),
+            Value::Integer(stream.control_port.into()),
+        );
+        self.player.replace(self.id, stream);
+        Ok(())
+    }
+
+    fn drain_mirror_audio(&mut self, r: &mut Dictionary) -> Result<(), String> {
         for key in ["dataPort", "controlPort"] {
             let socket = std::net::UdpSocket::bind((std::net::Ipv6Addr::UNSPECIFIED, 0))
                 .or_else(|_| std::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, 0)))
@@ -373,7 +416,7 @@ impl Media {
             r.insert("type".into(), Value::Integer(kind.into()));
             match kind {
                 96 if self.mirror.is_some() && !s.contains_key("shk") => {
-                    self.setup_mirror_audio(&mut r)?;
+                    self.setup_mirror_audio(s, &mut r)?;
                 }
                 110 => self.setup_video(s, &mut r)?,
                 96 | 103 => {
@@ -390,7 +433,7 @@ impl Media {
                         info!(?format, "realtime-поток");
                         Stream::realtime(
                             self.player.audio.clone(),
-                            &shk,
+                            StreamKey::ChaCha(shk),
                             format,
                             self.player.time_source(),
                         )
