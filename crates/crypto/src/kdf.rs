@@ -31,9 +31,27 @@ impl ControlKeys {
         }
     }
 
+    /// Канал событий (порт `eventPort` из SETUP): приёмник пишет
+    /// `Events-Write-Encryption-Key`, как в shairplay-rust.
+    pub fn accessory_events(shared: &[u8]) -> Self {
+        Self {
+            read: hkdf_sha512(shared, b"Events-Salt", b"Events-Read-Encryption-Key"),
+            write: hkdf_sha512(shared, b"Events-Salt", b"Events-Write-Encryption-Key"),
+        }
+    }
+
     /// Ключи для стороны отправителя (controller).
     pub fn controller(shared: &[u8]) -> Self {
         let acc = Self::accessory(shared);
+        Self {
+            read: acc.write,
+            write: acc.read,
+        }
+    }
+
+    /// Канал событий со стороны отправителя.
+    pub fn controller_events(shared: &[u8]) -> Self {
+        let acc = Self::accessory_events(shared);
         Self {
             read: acc.write,
             write: acc.read,

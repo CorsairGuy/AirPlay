@@ -3,6 +3,7 @@
 //! `airplay serve` запускает демон (по умолчанию все службы в этом процессе),
 //! остальные подкоманды управляют работающим демоном через `ipc`.
 
+mod media;
 mod serve;
 mod session;
 mod state;
@@ -31,6 +32,11 @@ const USAGE: &str = "\
   --state КАТАЛОГ где хранить ключи (по умолчанию ~/.local/state/airplay)
   --model МОДЕЛЬ  модель для iOS (по умолчанию AirPlay)
   --no-mdns       не объявлять себя в Bonjour
+  --audio ВЫВОД   куда играть: default, null (никуда) или устройство ALSA,
+                  например hw:0,0 (по умолчанию default)
+  --buffer МС     буфер звуковой карты, мс (по умолчанию 100; меньше —
+                  быстрее отклик, больше — устойчивее на слабом железе)
+  --latency МС    задержка, если часов отправителя нет (по умолчанию 250)
 
 Подробность логов задаёт RUST_LOG, например RUST_LOG=debug.";
 
@@ -51,6 +57,12 @@ fn parse_serve(args: &[String]) -> Result<serve::Options, String> {
         state_dir: state::default_dir(),
         mdns: true,
         model: "AirPlay".into(),
+        audio: audio_stream::Config::default(),
+    };
+    let ms = |v: String, name: &str| {
+        v.parse::<u64>()
+            .map(std::time::Duration::from_millis)
+            .map_err(|_| format!("{name}: нужно число миллисекунд"))
     };
     let mut it = args.iter();
     while let Some(arg) = it.next() {
@@ -66,6 +78,9 @@ fn parse_serve(args: &[String]) -> Result<serve::Options, String> {
             "--state" => opts.state_dir = value()?.into(),
             "--model" => opts.model = value()?,
             "--no-mdns" => opts.mdns = false,
+            "--audio" => opts.audio.device = value()?,
+            "--buffer" => opts.audio.output_latency = ms(value()?, "--buffer")?,
+            "--latency" => opts.audio.fallback_latency = ms(value()?, "--latency")?,
             other => return Err(format!("неизвестный параметр {other}")),
         }
     }

@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 license = "GPL-3.0-or-later"
-repository = "https://github.com/CorsairGuy/airplay"
+repository = "https://github.com/CorsairGuy/AirPlay"
 
 # Библиотеки называются ap_<имя>, но в коде подключаются без префикса: `use rtsp::…`.
 [workspace.dependencies]
@@ -52,6 +52,11 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 num-bigint = "0.4"
 hex = "0.4"
+symphonia = { version = "0.6", default-features = false, features = ["aac", "alac"] }
+libloading = "0.8"
+cpal = "0.18"
+subtle = "2"
+socket2 = "0.6"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

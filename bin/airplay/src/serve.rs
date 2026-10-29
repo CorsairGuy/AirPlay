@@ -9,6 +9,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{info, warn};
 
+use crate::media::Player;
 use crate::session::{Context, Session};
 use crate::state;
 
@@ -19,6 +20,7 @@ pub struct Options {
     pub state_dir: PathBuf,
     pub mdns: bool,
     pub model: String,
+    pub audio: audio_stream::Config,
 }
 
 pub async fn run(opts: Options) -> Result<()> {
@@ -73,11 +75,16 @@ pub async fn run(opts: Options) -> Result<()> {
         None
     };
 
+    let time = timesync::TimeSync::start(clock_id(&device_id));
+    info!(device = %opts.audio.device, buffer_ms = opts.audio.output_latency.as_millis(), "вывод звука");
+    let player = Arc::new(Player::new(opts.audio, time));
+
     let ctx = Arc::new(Context {
         identity,
         device,
         store: Box::new(store),
         pin,
+        player,
     });
 
     for listener in listeners {
@@ -111,7 +118,8 @@ async fn accept_loop(listener: TcpListener, ctx: Arc<Context>) {
 
 async fn serve_connection(mut stream: TcpStream, ctx: Arc<Context>, peer: String) -> Result<()> {
     stream.set_nodelay(true)?;
-    let mut session = Session::new(ctx, peer);
+    let local = stream.local_addr()?.ip();
+    let mut session = Session::new(ctx, peer, local);
     let mut buf = vec![0u8; 16 * 1024];
     let mut out = Vec::new();
     loop {
@@ -125,4 +133,17 @@ async fn serve_connection(mut stream: TcpStream, ctx: Arc<Context>, peer: String
             out.clear();
         }
     }
+}
+
+/// Идентификатор часов PTP из MAC-адреса, как EUI-64: `aa:bb:cc` FF FE `dd:ee:ff`.
+fn clock_id(device_id: &str) -> u64 {
+    let mac: Vec<u8> = device_id
+        .split(':')
+        .filter_map(|b| u8::from_str_radix(b, 16).ok())
+        .collect();
+    if mac.len() != 6 {
+        return rand::random();
+    }
+    let eui = [mac[0], mac[1], mac[2], 0xFF, 0xFE, mac[3], mac[4], mac[5]];
+    u64::from_be_bytes(eui)
 }

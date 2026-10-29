@@ -46,7 +46,12 @@ pub enum SetupOutcome {
     Continue(Vec<u8>),
     /// Transient-сопряжение завершено: отправить ответ открытым текстом,
     /// затем включить шифрование канала этими ключами.
-    Transient { reply: Vec<u8>, keys: ControlKeys },
+    /// `shared` — ключ сессии SRP, из него выводятся ключи канала событий.
+    Transient {
+        reply: Vec<u8>,
+        keys: ControlKeys,
+        shared: Vec<u8>,
+    },
     /// Постоянное сопряжение завершено, контроллер сохранён в хранилище.
     Paired {
         reply: Vec<u8>,
@@ -125,7 +130,11 @@ impl PairSetup {
             .encode();
         if self.transient {
             let keys = ControlKeys::accessory(&verified.session_key);
-            return Ok(SetupOutcome::Transient { reply, keys });
+            return Ok(SetupOutcome::Transient {
+                reply,
+                keys,
+                shared: verified.session_key,
+            });
         }
         self.session_key = Some(verified.session_key);
         Ok(SetupOutcome::Continue(reply))
@@ -368,6 +377,11 @@ impl ControllerSetup {
             .then(|| ControlKeys::controller(&proof.session_key)))
     }
 
+    /// Ключ сессии SRP после M3: общий секрет для каналов событий и данных.
+    pub fn session_key(&self) -> Option<&[u8]> {
+        self.proof.as_ref().map(|p| p.session_key.as_slice())
+    }
+
     pub fn m5(&self) -> Result<Vec<u8>, Error> {
         let proof = self.proof.as_ref().ok_or(Error::UnexpectedState(5))?;
         let device_x = hkdf_sha512(
@@ -539,7 +553,8 @@ mod tests {
         let mut client = ControllerSetup::new(controller(), "", true);
         let m2 = reply(server.handle(&client.m1(), &store).unwrap());
         let m3 = client.m3(&m2).unwrap();
-        let SetupOutcome::Transient { reply, keys } = server.handle(&m3, &store).unwrap() else {
+        let SetupOutcome::Transient { reply, keys, .. } = server.handle(&m3, &store).unwrap()
+        else {
             panic!("ожидалось transient-сопряжение");
         };
         let ctl_keys = client.check_m4(&reply).unwrap().unwrap();
