@@ -1,0 +1,53 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "services/*", "bin/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/CorsairGuy/airplay"
+
+# Библиотеки называются ap_<имя>, но в коде подключаются без префикса: `use rtsp::…`.
+[workspace.dependencies]
+base = { package = "ap_base", path = "crates/base" }
+rtsp = { package = "ap_rtsp", path = "crates/rtsp" }
+pair = { package = "ap_pair", path = "crates/pair" }
+crypto = { package = "ap_crypto", path = "crates/crypto" }
+fairplay = { package = "ap_fairplay", path = "crates/fairplay" }
+mdns = { package = "ap_mdns", path = "crates/mdns" }
+device = { package = "ap_device", path = "crates/device" }
+clock = { package = "ap_clock", path = "crates/clock" }
+rtp = { package = "ap_rtp", path = "crates/rtp" }
+audio_stream = { package = "ap_audio_stream", path = "crates/audio_stream" }
+mirror = { package = "ap_mirror", path = "crates/mirror" }
+hls = { package = "ap_hls", path = "crates/hls" }
+mrp = { package = "ap_mrp", path = "crates/mrp" }
+companion = { package = "ap_companion", path = "crates/companion" }
+codec = { package = "ap_codec", path = "crates/codec" }
+audio = { package = "ap_audio", path = "crates/audio" }
+video = { package = "ap_video", path = "crates/video" }
+capture = { package = "ap_capture", path = "crates/capture" }
+ipc = { package = "ap_ipc", path = "crates/ipc" }
+timesync = { path = "services/timesync" }
+mediaserver = { path = "services/mediaserver" }
+mediaremote = { path = "services/mediaremote" }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# Для Станции и других устройств с маленькой флеш-памятью.
+[profile.release-small]
+inherits = "release"
+opt-level = "s"

@@ -1,0 +1,12 @@
+[package]
+name = "ap_clock"
+description = "Часы: PTP (профиль Apple), NTP AirPlay 1, якорь времени, фильтр смещения и частоты."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true

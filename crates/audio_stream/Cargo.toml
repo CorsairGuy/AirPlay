@@ -1,0 +1,12 @@
+[package]
+name = "ap_audio_stream"
+description = "Аудиопотоки AirPlay: realtime (тип 96) и buffered (тип 103), ALAC/AAC/PCM."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true

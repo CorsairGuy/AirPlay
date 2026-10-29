@@ -1,0 +1,16 @@
+[package]
+name = "mediaremote"
+description = "Служба MediaRemote (аналог mediaremoted): «Сейчас играет», пульт."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+base.workspace = true
+mrp.workspace = true
+
+[lints]
+workspace = true

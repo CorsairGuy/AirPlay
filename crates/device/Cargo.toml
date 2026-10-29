@@ -1,0 +1,12 @@
+[package]
+name = "ap_device"
+description = "Битовые поля Features и StatusFlags, ответ /info, профили моделей."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
