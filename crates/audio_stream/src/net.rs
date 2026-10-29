@@ -32,16 +32,11 @@ pub struct Stream {
 }
 
 impl Stream {
-    pub async fn buffered(
-        cfg: Config,
-        shk: &[u8; 32],
-        time: Arc<dyn TimeSource>,
-    ) -> io::Result<Stream> {
-        let listener = match TcpListener::bind((Ipv6Addr::UNSPECIFIED, 0)).await {
-            Ok(l) => l,
-            Err(_) => TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).await?,
-        };
-        let control = bind_udp().await?;
+    /// Сокеты занимаются сразу, задачи приёма запускаются в текущем
+    /// рантайме tokio — вызывать изнутри него.
+    pub fn buffered(cfg: Config, shk: &[u8; 32], time: Arc<dyn TimeSource>) -> io::Result<Stream> {
+        let listener = bind_tcp()?;
+        let control = bind_udp()?;
         let data_port = listener.local_addr()?.port();
         let control_port = control.local_addr()?.port();
         let playout = Arc::new(Playout::start(cfg, time, None));
@@ -60,14 +55,14 @@ impl Stream {
         })
     }
 
-    pub async fn realtime(
+    pub fn realtime(
         cfg: Config,
         shk: &[u8; 32],
         format: Format,
         time: Arc<dyn TimeSource>,
     ) -> io::Result<Stream> {
-        let data = bind_udp().await?;
-        let control = bind_udp().await?;
+        let data = bind_udp()?;
+        let control = bind_udp()?;
         let data_port = data.local_addr()?.port();
         let control_port = control.local_addr()?.port();
         let playout = Arc::new(Playout::start(cfg, time, Some(format)));
@@ -99,11 +94,19 @@ impl Drop for Stream {
     }
 }
 
-async fn bind_udp() -> io::Result<UdpSocket> {
-    match UdpSocket::bind((Ipv6Addr::UNSPECIFIED, 0)).await {
-        Ok(s) => Ok(s),
-        Err(_) => UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await,
-    }
+/// TCP на случайном порту: `[::]` (принимает и IPv4), иначе `0.0.0.0`.
+pub fn bind_tcp() -> io::Result<TcpListener> {
+    let l = std::net::TcpListener::bind((Ipv6Addr::UNSPECIFIED, 0))
+        .or_else(|_| std::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)))?;
+    l.set_nonblocking(true)?;
+    TcpListener::from_std(l)
+}
+
+fn bind_udp() -> io::Result<UdpSocket> {
+    let s = std::net::UdpSocket::bind((Ipv6Addr::UNSPECIFIED, 0))
+        .or_else(|_| std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)))?;
+    s.set_nonblocking(true)?;
+    UdpSocket::from_std(s)
 }
 
 async fn accept_buffered(listener: TcpListener, cipher: Arc<AudioCipher>, playout: Arc<Playout>) {

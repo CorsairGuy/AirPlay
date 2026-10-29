@@ -1,0 +1,487 @@
+//! Медиачасть RTSP-сессии AirPlay 2: FairPlay, SETUP потоков, якорь
+//! времени, перемотка, громкость, канал событий.
+//!
+//! Последовательность — по shairplay-rust и shairport-sync: первый SETUP
+//! без `streams` (часы и канал событий), затем SETUP потока, RECORD и
+//! SETRATEANCHORTIME, когда пора играть.
+
+use std::net::IpAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+
+use audio_stream::Stream;
+use clock::{Anchor, TimeSource};
+use codec::{Codec, Format};
+use crypto::Channel;
+use crypto::kdf::ControlKeys;
+use fairplay::FairPlay;
+use plist::{Dictionary, Value};
+use rtsp::{Request, Response};
+use timesync::TimeSync;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::task::JoinHandle;
+use tracing::{debug, info, warn};
+
+use crate::session::{BPLIST, Context, OCTETS};
+
+/// Сколько байт отправитель может прислать вперёд в буферизованном потоке:
+/// 1 МиБ — около 30 с AAC 256 кбит/с.
+const AUDIO_BUFFER_SIZE: u64 = 1 << 20;
+
+/// Звук играет один отправитель: новый поток вытесняет прежний.
+pub struct Player {
+    pub audio: audio_stream::Config,
+    pub time: TimeSync,
+    active: Mutex<Option<(u64, Stream)>>,
+    volume_db: Mutex<f32>,
+    next_id: AtomicU64,
+}
+
+impl Player {
+    pub fn new(audio: audio_stream::Config, time: TimeSync) -> Self {
+        Self {
+            audio,
+            time,
+            active: Mutex::new(None),
+            volume_db: Mutex::new(0.0),
+            next_id: AtomicU64::new(1),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<(u64, Stream)>> {
+        self.active.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn time_source(&self) -> Arc<dyn TimeSource> {
+        Arc::new(self.time.clone())
+    }
+
+    fn replace(&self, owner: u64, stream: Stream) {
+        stream
+            .playout()
+            .set_volume(*self.volume_db.lock().unwrap_or_else(|e| e.into_inner()));
+        if let Some((old, _)) = self.lock().replace((owner, stream))
+            && old != owner
+        {
+            info!("новый отправитель, прежний поток остановлен");
+        }
+    }
+
+    fn with<R>(&self, owner: u64, f: impl FnOnce(&Stream) -> R) -> Option<R> {
+        match &*self.lock() {
+            Some((id, stream)) if *id == owner => Some(f(stream)),
+            _ => None,
+        }
+    }
+
+    fn release(&self, owner: u64) {
+        let mut active = self.lock();
+        if active.as_ref().is_some_and(|(id, _)| *id == owner) {
+            *active = None;
+        }
+    }
+
+    fn set_volume(&self, owner: u64, db: f32) {
+        *self.volume_db.lock().unwrap_or_else(|e| e.into_inner()) = db;
+        self.with(owner, |s| s.playout().set_volume(db));
+    }
+
+    #[cfg(test)]
+    pub fn active_packets(&self) -> Option<usize> {
+        self.lock()
+            .as_ref()
+            .map(|(_, s)| s.playout().buffered_packets())
+    }
+}
+
+pub struct Media {
+    player: Arc<Player>,
+    id: u64,
+    /// Наш адрес в этом соединении: его отдаём как адрес PTP.
+    local: IpAddr,
+    /// Общий секрет сопряжения, из него — ключи канала событий.
+    shared: Option<Vec<u8>>,
+    fairplay: FairPlay,
+    events: Option<JoinHandle<()>>,
+    anchor: Option<Anchor>,
+}
+
+impl Media {
+    pub fn new(ctx: &Context, local: IpAddr) -> Self {
+        Self {
+            player: ctx.player.clone(),
+            id: ctx.player.next_id.fetch_add(1, Ordering::Relaxed),
+            local: local.to_canonical(),
+            shared: None,
+            fairplay: FairPlay::new(),
+            events: None,
+            anchor: None,
+        }
+    }
+
+    pub fn set_shared(&mut self, shared: Vec<u8>) {
+        self.shared = Some(shared);
+    }
+
+    /// Запрос медиачасти; `None` — не наш.
+    pub fn handle(&mut self, ctx: &Context, req: &Request) -> Option<Response> {
+        let ok = || Response::to(req, 200);
+        Some(match (req.method.as_str(), req.path()) {
+            ("POST", "/fp-setup") => match self.fairplay.handle(&req.body) {
+                Ok(body) => ok().with_body(OCTETS, body),
+                Err(e) => {
+                    warn!("fp-setup: {e}");
+                    Response::to(req, 400)
+                }
+            },
+            ("SETUP", _) => self.setup(ctx, req),
+            ("RECORD", _) => {
+                let mut resp = ok();
+                resp.headers.insert("Audio-Latency", "0");
+                resp
+            }
+            ("SETRATEANCHORTIME", _) => {
+                self.set_anchor(req);
+                ok()
+            }
+            ("FLUSHBUFFERED", _) => {
+                self.flush(req);
+                ok()
+            }
+            ("FLUSH", _) => ok(),
+            ("SETPEERS", _) | ("SETPEERSX", _) => {
+                let peers = parse_peers(&req.body);
+                self.player.time.set_peers(peers);
+                ok()
+            }
+            ("SET_PARAMETER", _) => {
+                self.set_parameter(req);
+                ok()
+            }
+            ("GET_PARAMETER", _) => {
+                let db = *self
+                    .player
+                    .volume_db
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                let body = if String::from_utf8_lossy(&req.body).contains("volume") {
+                    format!("volume: {db:.6}\r\n").into_bytes()
+                } else {
+                    Vec::new()
+                };
+                ok().with_body("text/parameters", body)
+            }
+            ("TEARDOWN", _) => {
+                let streams_only = plist_dict(&req.body).is_some_and(|d| d.contains_key("streams"));
+                self.player.release(self.id);
+                self.anchor = None;
+                if !streams_only && let Some(events) = self.events.take() {
+                    events.abort();
+                }
+                info!("TEARDOWN");
+                ok()
+            }
+            ("POST", "/feedback") | ("POST", "/command") | ("POST", "/audioMode") => ok(),
+            _ => return None,
+        })
+    }
+
+    fn setup(&mut self, ctx: &Context, req: &Request) -> Response {
+        let Some(body) = plist_dict(&req.body) else {
+            warn!("SETUP без plist: отправители AirPlay 1 пока не поддерживаются");
+            return Response::to(req, 400);
+        };
+        let reply = match body.get("streams").and_then(Value::as_array) {
+            Some(streams) => self.setup_streams(streams),
+            None => Ok(self.setup_session(ctx, &body)),
+        };
+        match reply {
+            Ok(d) => Response::to(req, 200).with_body(BPLIST, write_plist(d)),
+            Err(e) => {
+                warn!("SETUP: {e}");
+                Response::to(req, 500)
+            }
+        }
+    }
+
+    /// Первый SETUP: часы и канал событий.
+    fn setup_session(&mut self, ctx: &Context, body: &Dictionary) -> Dictionary {
+        let timing = body
+            .get("timingProtocol")
+            .and_then(Value::as_string)
+            .unwrap_or("None");
+        info!(
+            timing,
+            rc_only = body.contains_key("isRemoteControlOnly"),
+            "SETUP сессии"
+        );
+        let mut d = Dictionary::new();
+        if timing == "PTP" {
+            if let Some(info) = body.get("timingPeerInfo").and_then(Value::as_dictionary) {
+                self.player.time.set_peers(addresses(info));
+            }
+            let ip = self.local.to_string();
+            let mut peer = Dictionary::new();
+            peer.insert("Addresses".into(), Value::Array(vec![ip.clone().into()]));
+            peer.insert("ID".into(), ip.into());
+            d.insert("timingPeerInfo".into(), peer.into());
+        }
+        let port = self.start_events(ctx).unwrap_or(0);
+        d.insert("eventPort".into(), Value::Integer(port.into()));
+        d.insert("timingPort".into(), Value::Integer(0.into()));
+        d
+    }
+
+    /// Канал событий: отправитель подключается сам; первым сообщением
+    /// сообщаем о себе (`updateInfo`) — без него iOS дольше подключается.
+    fn start_events(&mut self, ctx: &Context) -> Option<u16> {
+        let shared = self.shared.as_ref()?;
+        let listener = match audio_stream::bind_tcp() {
+            Ok(l) => l,
+            Err(e) => {
+                warn!("канал событий: {e}");
+                return None;
+            }
+        };
+        let port = listener.local_addr().ok()?.port();
+        let mut channel = Channel::new(ControlKeys::accessory_events(shared));
+        let mut hello = Vec::new();
+        channel.seal(&update_info(ctx), &mut hello);
+        if let Some(old) = self.events.take() {
+            old.abort();
+        }
+        self.events = Some(tokio::spawn(async move {
+            let Ok((mut conn, peer)) = listener.accept().await else {
+                return;
+            };
+            debug!(%peer, "канал событий подключён");
+            if conn.write_all(&hello).await.is_err() {
+                return;
+            }
+            // Ответы отправителя нам не нужны, но читать надо, чтобы он не встал.
+            let mut buf = [0u8; 1024];
+            while matches!(conn.read(&mut buf).await, Ok(n) if n > 0) {}
+            debug!("канал событий закрыт");
+        }));
+        Some(port)
+    }
+
+    fn setup_streams(&mut self, streams: &[Value]) -> Result<Dictionary, String> {
+        let mut replies = Vec::new();
+        for s in streams {
+            let Some(s) = s.as_dictionary() else { continue };
+            let kind = uint(s, "type").unwrap_or(0);
+            let mut r = Dictionary::new();
+            r.insert("type".into(), Value::Integer(kind.into()));
+            match kind {
+                96 | 103 => {
+                    let shk: [u8; 32] = s
+                        .get("shk")
+                        .and_then(Value::as_data)
+                        .and_then(|k| k.try_into().ok())
+                        .ok_or("нет ключа потока shk")?;
+                    let stream = if kind == 103 {
+                        info!("буферизованный поток (AAC)");
+                        Stream::buffered(self.player.audio.clone(), &shk, self.player.time_source())
+                    } else {
+                        let format = realtime_format(s)?;
+                        info!(?format, "realtime-поток");
+                        Stream::realtime(
+                            self.player.audio.clone(),
+                            &shk,
+                            format,
+                            self.player.time_source(),
+                        )
+                    }
+                    .map_err(|e| format!("сокеты потока: {e}"))?;
+                    r.insert("dataPort".into(), Value::Integer(stream.data_port.into()));
+                    r.insert(
+                        "controlPort".into(),
+                        Value::Integer(stream.control_port.into()),
+                    );
+                    if kind == 103 {
+                        r.insert(
+                            "audioBufferSize".into(),
+                            Value::Integer(AUDIO_BUFFER_SIZE.into()),
+                        );
+                    }
+                    self.anchor = None;
+                    self.player.replace(self.id, stream);
+                }
+                130 => {
+                    // Удалённое управление (MediaRemote): пока только подтверждаем.
+                    r.insert("streamID".into(), Value::Integer(1.into()));
+                }
+                other => {
+                    warn!(kind = other, "поток не поддерживается");
+                    continue;
+                }
+            }
+            replies.push(Value::Dictionary(r));
+        }
+        let mut d = Dictionary::new();
+        d.insert("streams".into(), Value::Array(replies));
+        Ok(d)
+    }
+
+    fn set_anchor(&mut self, req: &Request) {
+        let Some(d) = plist_dict(&req.body) else {
+            return;
+        };
+        let rate = d
+            .get("rate")
+            .and_then(|v| {
+                v.as_real()
+                    .or_else(|| v.as_signed_integer().map(|i| i as f64))
+            })
+            .unwrap_or(0.0);
+        let anchor = match (uint(&d, "rtpTime"), uint(&d, "networkTimeSecs")) {
+            (Some(rtp), Some(secs)) => Anchor {
+                rtp: rtp as u32,
+                network_ns: Anchor::network_time(secs, uint(&d, "networkTimeFrac").unwrap_or(0)),
+                timeline: uint(&d, "networkTimeTimelineID").unwrap_or(0),
+                playing: rate != 0.0,
+            },
+            // Пауза приходит без времени: берём прежний якорь.
+            _ => match self.anchor {
+                Some(a) => Anchor {
+                    playing: rate != 0.0,
+                    ..a
+                },
+                None => return,
+            },
+        };
+        debug!(?anchor, rate, "SETRATEANCHORTIME");
+        self.anchor = Some(anchor);
+        self.player
+            .with(self.id, |s| s.playout().set_anchor(anchor));
+    }
+
+    fn flush(&mut self, req: &Request) {
+        let Some(d) = plist_dict(&req.body) else {
+            return;
+        };
+        let Some(until) = uint(&d, "flushUntilTS") else {
+            return;
+        };
+        let from = uint(&d, "flushFromTS").map(|t| t as u32);
+        self.player
+            .with(self.id, |s| s.playout().flush(from, until as u32));
+    }
+
+    fn set_parameter(&mut self, req: &Request) {
+        let text = String::from_utf8_lossy(&req.body);
+        for line in text.lines() {
+            if let Some(v) = line.strip_prefix("volume:")
+                && let Ok(db) = v.trim().parse::<f32>()
+            {
+                info!(db, "громкость");
+                self.player.set_volume(self.id, db);
+            }
+        }
+    }
+}
+
+/// Соединение RTSP закрылось — его звук тоже заканчивается.
+impl Drop for Media {
+    fn drop(&mut self) {
+        self.player.release(self.id);
+        if let Some(events) = self.events.take() {
+            events.abort();
+        }
+    }
+}
+
+fn realtime_format(s: &Dictionary) -> Result<Format, String> {
+    let sample_rate = uint(s, "sr").unwrap_or(44_100) as u32;
+    let frames = uint(s, "spf").unwrap_or(352) as u32;
+    let bits = uint(s, "ss").unwrap_or(16) as u8;
+    let codec = match uint(s, "ct").unwrap_or(2) {
+        2 => Codec::Alac {
+            bit_depth: bits,
+            frames_per_packet: frames,
+        },
+        4 => Codec::Aac,
+        8 => return Err("AAC-ELD пока не поддерживается".into()),
+        other => return Err(format!("неизвестный кодек ct={other}")),
+    };
+    Ok(Format {
+        codec,
+        sample_rate,
+        channels: 2,
+    })
+}
+
+fn update_info(ctx: &Context) -> Vec<u8> {
+    let dev = &ctx.device;
+    let mut value = Dictionary::new();
+    value.insert(
+        "statusFlags".into(),
+        Value::Integer(dev.status_flags.into()),
+    );
+    value.insert(
+        "features".into(),
+        Value::Integer((dev.features.0 as i64).into()),
+    );
+    value.insert("model".into(), dev.model.clone().into());
+    value.insert("sourceVersion".into(), dev.source_version.clone().into());
+    value.insert(
+        "protocolVersion".into(),
+        device::DeviceInfo::PROTOCOL_VERSION.into(),
+    );
+    let mut msg = Dictionary::new();
+    msg.insert("type".into(), "updateInfo".into());
+    msg.insert("value".into(), value.into());
+    let body = write_plist(msg);
+    let mut req = Request::new("POST", "/command", "RTSP/1.0");
+    req.headers.insert("CSeq", "0");
+    req.headers.insert("Content-Type", BPLIST);
+    req.body = body;
+    let mut out = Vec::new();
+    req.encode(&mut out);
+    out
+}
+
+fn plist_dict(body: &[u8]) -> Option<Dictionary> {
+    if body.is_empty() {
+        return None;
+    }
+    plist::from_bytes::<Value>(body).ok()?.into_dictionary()
+}
+
+fn write_plist(d: Dictionary) -> Vec<u8> {
+    let mut out = Vec::new();
+    Value::Dictionary(d)
+        .to_writer_binary(&mut out)
+        .expect("запись plist в память не может завершиться ошибкой");
+    out
+}
+
+fn uint(d: &Dictionary, key: &str) -> Option<u64> {
+    d.get(key).and_then(Value::as_unsigned_integer)
+}
+
+fn addresses(d: &Dictionary) -> Vec<IpAddr> {
+    d.get("Addresses")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|a| a.as_string()?.parse().ok())
+        .collect()
+}
+
+/// SETPEERS — массив адресов, SETPEERSX — массив словарей с `Addresses`.
+fn parse_peers(body: &[u8]) -> Vec<IpAddr> {
+    let Ok(Value::Array(items)) = plist::from_bytes::<Value>(body) else {
+        return Vec::new();
+    };
+    let mut peers = Vec::new();
+    for item in items {
+        match item {
+            Value::String(s) => peers.extend(s.parse::<IpAddr>().ok()),
+            Value::Dictionary(d) => peers.extend(addresses(&d)),
+            _ => {}
+        }
+    }
+    peers
+}

@@ -5,5 +5,5 @@
 mod net;
 mod playout;
 
-pub use net::{Stream, StreamKind};
+pub use net::{Stream, StreamKind, bind_tcp};
 pub use playout::{Config, Playout};

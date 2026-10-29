@@ -1,6 +1,7 @@
 //! Одно соединение с отправителем на порту 7000: RTSP-запросы, сопряжение,
 //! переход на шифрованный канал. Без ввода-вывода — байты на вход и выход.
 
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -13,10 +14,12 @@ use pair::{Identity, PairingStore};
 use rtsp::{Request, Response};
 use tracing::{debug, info, warn};
 
+use crate::media::{Media, Player};
+
 pub const SERVER: &str = "AirTunes/366.0";
 const PUBLIC: &str = "ANNOUNCE, SETUP, RECORD, PAUSE, FLUSH, TEARDOWN, OPTIONS, GET_PARAMETER, SET_PARAMETER, POST, GET";
-const BPLIST: &str = "application/x-apple-binary-plist";
-const OCTETS: &str = "application/octet-stream";
+pub(crate) const BPLIST: &str = "application/x-apple-binary-plist";
+pub(crate) const OCTETS: &str = "application/octet-stream";
 
 /// Общее для всех соединений.
 pub struct Context {
@@ -25,6 +28,7 @@ pub struct Context {
     pub store: Box<dyn PairingStore>,
     /// PIN для постоянного HAP-сопряжения.
     pub pin: String,
+    pub player: Arc<Player>,
 }
 
 pub struct Session {
@@ -38,11 +42,13 @@ pub struct Session {
     setup: Option<PairSetup>,
     verify: Option<PairVerify>,
     legacy: Option<LegacyServer>,
+    media: Media,
 }
 
 impl Session {
-    pub fn new(ctx: Arc<Context>, peer: String) -> Self {
+    pub fn new(ctx: Arc<Context>, peer: String, local: IpAddr) -> Self {
         Self {
+            media: Media::new(&ctx, local),
             ctx,
             peer,
             wire: Vec::new(),
@@ -110,6 +116,10 @@ impl Session {
             ("POST", "/pair-verify") if is_legacy_verify(req) => (self.legacy_verify(req), None),
             ("POST", "/pair-verify") => self.hap_verify(req),
             _ => {
+                let ctx = self.ctx.clone();
+                if let Some(resp) = self.media.handle(&ctx, req) {
+                    return (resp, None);
+                }
                 warn!(peer = %self.peer, "ещё не поддерживается: {} {}", req.method, req.uri);
                 (Response::to(req, 501), None)
             }
@@ -125,8 +135,13 @@ impl Session {
             Ok(SetupOutcome::Continue(body)) => {
                 (Response::to(req, 200).with_body(OCTETS, body), None)
             }
-            Ok(SetupOutcome::Transient { reply, keys }) => {
+            Ok(SetupOutcome::Transient {
+                reply,
+                keys,
+                shared,
+            }) => {
                 info!(peer = %self.peer, "transient-сопряжение выполнено");
+                self.media.set_shared(shared);
                 self.setup = None;
                 (Response::to(req, 200).with_body(OCTETS, reply), Some(keys))
             }
@@ -160,8 +175,13 @@ impl Session {
             Ok(VerifyOutcome::Continue(body)) => {
                 (Response::to(req, 200).with_body(OCTETS, body), None)
             }
-            Ok(VerifyOutcome::Verified { reply, keys, .. }) => {
+            Ok(VerifyOutcome::Verified {
+                reply,
+                keys,
+                shared,
+            }) => {
                 info!(peer = %self.peer, "pair-verify выполнен");
+                self.media.set_shared(shared.to_vec());
                 self.verify = None;
                 (Response::to(req, 200).with_body(OCTETS, reply), Some(keys))
             }
@@ -245,6 +265,13 @@ mod tests {
             identity,
             store: Box::new(MemoryStore::default()),
             pin: "1234".into(),
+            player: Arc::new(Player::new(
+                audio_stream::Config {
+                    device: "null".into(),
+                    ..Default::default()
+                },
+                timesync::TimeSync::idle(1),
+            )),
         })
     }
 
@@ -258,7 +285,7 @@ mod tests {
     impl Client {
         fn new(ctx: Arc<Context>) -> Self {
             Self {
-                session: Session::new(ctx, "test".into()),
+                session: Session::new(ctx, "test".into(), IpAddr::from([127, 0, 0, 1])),
                 channel: None,
                 cseq: 0,
             }
@@ -314,6 +341,133 @@ mod tests {
         assert_eq!(resp.status, 200);
         let v = plist::Value::from_reader(std::io::Cursor::new(resp.body)).unwrap();
         assert_eq!(v.as_dictionary().unwrap()["name"].as_string(), Some("Тест"));
+    }
+
+    /// Как iPhone: transient-сопряжение, SETUP сессии и буферизованного
+    /// потока, шифрованный AAC по TCP, якорь, громкость, TEARDOWN.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn buffered_audio_end_to_end() {
+        use plist::{Dictionary, Value};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let ctx = ctx();
+        let mut c = Client::new(ctx.clone());
+        let mut setup = ControllerSetup::new(Identity::from_seed("ctl", &[6; 32]), "", true);
+        let hkp = [("X-Apple-HKP", "4")];
+        let m2 = c.call("POST", "/pair-setup", &hkp, setup.m1()).body;
+        let m4 = c
+            .call("POST", "/pair-setup", &hkp, setup.m3(&m2).unwrap())
+            .body;
+        c.encrypt(setup.check_m4(&m4).unwrap().unwrap());
+        let shared = setup.session_key().unwrap().to_vec();
+
+        let to_plist = |d: Dictionary| {
+            let mut out = Vec::new();
+            Value::Dictionary(d).to_writer_binary(&mut out).unwrap();
+            out
+        };
+        let reply = |r: Response| {
+            assert_eq!(r.status, 200);
+            plist::from_bytes::<Value>(&r.body)
+                .unwrap()
+                .into_dictionary()
+                .unwrap()
+        };
+
+        // Сессия: канал событий присылает updateInfo.
+        let mut d = Dictionary::new();
+        d.insert("timingProtocol".into(), "PTP".into());
+        let session = reply(c.call("SETUP", "rtsp://x/1", &[], to_plist(d)));
+        assert!(session.contains_key("timingPeerInfo"));
+        let event_port = session["eventPort"].as_unsigned_integer().unwrap() as u16;
+        let mut events = tokio::net::TcpStream::connect(("127.0.0.1", event_port))
+            .await
+            .unwrap();
+        let mut wire = vec![0u8; 4096];
+        let n = events.read(&mut wire).await.unwrap();
+        let mut wire = wire[..n].to_vec();
+        let mut plain = Vec::new();
+        Channel::new(ControlKeys::controller_events(&shared))
+            .open(&mut wire, &mut plain)
+            .unwrap();
+        let info = rtsp::decode_request(&mut plain).unwrap().unwrap();
+        assert_eq!(info.uri, "/command");
+
+        // Поток AAC 44,1 кГц.
+        let shk = [3u8; 32];
+        let mut s = Dictionary::new();
+        s.insert("type".into(), Value::Integer(103.into()));
+        s.insert("shk".into(), Value::Data(shk.to_vec()));
+        let mut d = Dictionary::new();
+        d.insert("streams".into(), Value::Array(vec![s.into()]));
+        let streams = reply(c.call("SETUP", "rtsp://x/1", &[], to_plist(d)));
+        let stream = streams["streams"].as_array().unwrap()[0]
+            .as_dictionary()
+            .unwrap();
+        let data_port = stream["dataPort"].as_unsigned_integer().unwrap() as u16;
+
+        let frames = adts_frames(include_bytes!(
+            "../../../crates/codec/tests/data/sine440.adts"
+        ));
+        let cipher = rtp::AudioCipher::new(&shk);
+        let mut wire = Vec::new();
+        for (i, f) in frames.iter().enumerate() {
+            let h = rtp::Header {
+                marker: false,
+                payload_type: 0x67,
+                seq: i as u16,
+                timestamp: 1000 + i as u32 * 1024,
+                ssrc: 0x1600_0000,
+            };
+            rtp::frame_buffered(&cipher.seal(&h, f, i as u64), &mut wire);
+        }
+        let mut data = tokio::net::TcpStream::connect(("127.0.0.1", data_port))
+            .await
+            .unwrap();
+        data.write_all(&wire).await.unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while ctx.player.active_packets() != Some(frames.len()) {
+            assert!(std::time::Instant::now() < deadline, "пакеты не дошли");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        assert_eq!(c.call("RECORD", "rtsp://x/1", &[], vec![]).status, 200);
+        let volume = c.call(
+            "SET_PARAMETER",
+            "rtsp://x/1",
+            &[("Content-Type", "text/parameters")],
+            b"volume: -10.0\r\n".to_vec(),
+        );
+        assert_eq!(volume.status, 200);
+        let mut d = Dictionary::new();
+        d.insert("rate".into(), Value::Real(1.0));
+        d.insert("rtpTime".into(), Value::Integer(1000.into()));
+        d.insert("networkTimeSecs".into(), Value::Integer(1.into()));
+        d.insert("networkTimeFrac".into(), Value::Integer(0.into()));
+        d.insert("networkTimeTimelineID".into(), Value::Integer(42.into()));
+        let anchor = c.call("SETRATEANCHORTIME", "rtsp://x/1", &[], to_plist(d));
+        assert_eq!(anchor.status, 200);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while ctx.player.active_packets() != Some(0) {
+            assert!(std::time::Instant::now() < deadline, "звук не проигран");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(c.call("TEARDOWN", "rtsp://x/1", &[], vec![]).status, 200);
+        assert_eq!(ctx.player.active_packets(), None);
+    }
+
+    fn adts_frames(mut data: &[u8]) -> Vec<&[u8]> {
+        let mut frames = Vec::new();
+        while data.len() > 7 && data[0] == 0xFF && data[1] & 0xF0 == 0xF0 {
+            let len = ((data[3] as usize & 3) << 11)
+                | ((data[4] as usize) << 3)
+                | (data[5] as usize >> 5);
+            let header = if data[1] & 1 == 0 { 9 } else { 7 };
+            frames.push(&data[header..len]);
+            data = &data[len..];
+        }
+        frames
     }
 
     #[test]
@@ -377,6 +531,6 @@ mod tests {
     #[test]
     fn unknown_request_is_not_implemented() {
         let mut c = Client::new(ctx());
-        assert_eq!(c.call("SETUP", "rtsp://x/1", &[], vec![]).status, 501);
+        assert_eq!(c.call("ANNOUNCE", "rtsp://x/1", &[], vec![]).status, 501);
     }
 }

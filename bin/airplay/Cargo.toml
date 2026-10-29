@@ -17,6 +17,9 @@ fairplay.workspace = true
 mdns.workspace = true
 device.workspace = true
 rtp.workspace = true
+clock.workspace = true
+codec.workspace = true
+plist.workspace = true
 audio_stream.workspace = true
 mirror.workspace = true
 hls.workspace = true
@@ -31,9 +34,6 @@ tracing-subscriber.workspace = true
 rand.workspace = true
 sha2.workspace = true
 hex.workspace = true
-
-[dev-dependencies]
-plist.workspace = true
 
 [lints]
 workspace = true

@@ -63,9 +63,7 @@ async fn wait_for(stream: &Stream, count: usize, limit: Duration) -> bool {
 #[tokio::test]
 async fn plays_buffered_aac() {
     let shk = [7u8; 32];
-    let stream = Stream::buffered(config(), &shk, Arc::new(NoTime))
-        .await
-        .unwrap();
+    let stream = Stream::buffered(config(), &shk, Arc::new(NoTime)).unwrap();
     let sent = send_frames(&stream, &shk).await;
     assert!(
         wait_for(&stream, sent, Duration::from_secs(2)).await,
@@ -99,9 +97,7 @@ async fn plays_buffered_aac() {
 #[tokio::test]
 async fn flush_drops_range() {
     let shk = [9u8; 32];
-    let stream = Stream::buffered(config(), &shk, Arc::new(NoTime))
-        .await
-        .unwrap();
+    let stream = Stream::buffered(config(), &shk, Arc::new(NoTime)).unwrap();
     let sent = send_frames(&stream, &shk).await;
     assert!(wait_for(&stream, sent, Duration::from_secs(2)).await);
     stream.playout().flush(None, 10 * 1024);

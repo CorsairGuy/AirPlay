@@ -39,6 +39,8 @@ dependencies = [
  "anyhow",
  "ap_audio_stream",
  "ap_base",
+ "ap_clock",
+ "ap_codec",
  "ap_crypto",
  "ap_device",
  "ap_fairplay",
