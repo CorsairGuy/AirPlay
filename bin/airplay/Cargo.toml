@@ -1,0 +1,29 @@
+[package]
+name = "airplay"
+description = "Демон и утилита AirPlay: `airplay serve` запускает транспорт и службы, остальные подкоманды им управляют."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+base.workspace = true
+rtsp.workspace = true
+pair.workspace = true
+crypto.workspace = true
+fairplay.workspace = true
+mdns.workspace = true
+device.workspace = true
+rtp.workspace = true
+audio_stream.workspace = true
+mirror.workspace = true
+hls.workspace = true
+ipc.workspace = true
+timesync.workspace = true
+mediaserver.workspace = true
+mediaremote.workspace = true
+
+[lints]
+workspace = true

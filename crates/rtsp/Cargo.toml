@@ -1,0 +1,12 @@
+[package]
+name = "ap_rtsp"
+description = "RTSP/HTTP 1.1 без ввода-вывода: кодек, сервер, клиент, reverse HTTP, event-канал."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true

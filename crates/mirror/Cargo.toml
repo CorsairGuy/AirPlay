@@ -1,0 +1,12 @@
+[package]
+name = "ap_mirror"
+description = "Зеркалирование экрана (тип 110): H.264/H.265 поверх TCP, AES-CTR, SPS/PPS."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true

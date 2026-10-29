@@ -1,0 +1,12 @@
+[package]
+name = "ap_video"
+description = "Вывод видео: KMS, GL/EGL, D3D11, показ по vsync с регулируемым буфером."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true

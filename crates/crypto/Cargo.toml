@@ -1,0 +1,12 @@
+[package]
+name = "ap_crypto"
+description = "Шифрованный канал ChaCha20-Poly1305, HKDF, SRP-6a 3072, AES для AirPlay 1."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true

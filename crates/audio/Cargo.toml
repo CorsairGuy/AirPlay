@@ -1,0 +1,12 @@
+[package]
+name = "ap_audio"
+description = "Вывод звука: lock-free кольцевой буфер, ресемплер, ALSA/PipeWire/WASAPI/CoreAudio."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true

@@ -1,0 +1,12 @@
+[package]
+name = "ap_mdns"
+description = "Bonjour: объявление и поиск _airplay._tcp и _raop._tcp, TXT-записи."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
