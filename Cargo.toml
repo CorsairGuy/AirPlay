@@ -34,6 +34,25 @@ timesync = { path = "services/timesync" }
 mediaserver = { path = "services/mediaserver" }
 mediaremote = { path = "services/mediaremote" }
 
+anyhow = "1"
+bytes = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "signal", "sync"] }
+plist = "1.7"
+mdns-sd = "0.13"
+rand = "0.8"
+sha2 = "0.10"
+hkdf = "0.12"
+chacha20poly1305 = "0.10"
+aes = "0.8"
+ctr = "0.9"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+num-bigint = "0.4"
+hex = "0.4"
+
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 

@@ -8,5 +8,9 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[dependencies]
+plist.workspace = true
+hex.workspace = true
+
 [lints]
 workspace = true
