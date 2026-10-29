@@ -17,26 +17,11 @@ pub const ASC_44100_STEREO_480: [u8; 4] = [0xF8, 0xE8, 0x50, 0x00];
 impl Eld {
     pub fn new(config: &[u8]) -> Result<Self, Error> {
         let init = |e: ff::Error| Error::Init(format!("libavcodec: {e}"));
-        ff::init().map_err(init)?;
-        // Ошибки пакетов libavcodec пишет в stderr сам; мы сообщаем их через Error.
-        ff::util::log::set_level(ff::util::log::Level::Quiet);
+        crate::ff::init()?;
         let codec = ff::decoder::find(ff::codec::Id::AAC)
             .ok_or_else(|| Error::Init("в libavcodec нет декодера AAC".into()))?;
         let mut ctx = ff::codec::Context::new_with_codec(codec);
-        // SAFETY: контекст наш и ещё не открыт; extradata выделяется
-        // av_mallocz с запасом AV_INPUT_BUFFER_PADDING_SIZE, как требует
-        // libavcodec, и освобождается им же вместе с контекстом.
-        unsafe {
-            let raw = ctx.as_mut_ptr();
-            let pad = ff::ffi::AV_INPUT_BUFFER_PADDING_SIZE as usize;
-            let buf = ff::ffi::av_mallocz(config.len() + pad) as *mut u8;
-            if buf.is_null() {
-                return Err(Error::Init("нет памяти".into()));
-            }
-            std::ptr::copy_nonoverlapping(config.as_ptr(), buf, config.len());
-            (*raw).extradata = buf;
-            (*raw).extradata_size = config.len() as i32;
-        }
+        crate::ff::set_extradata(&mut ctx, config)?;
         let dec = ctx
             .decoder()
             .open_as(codec)

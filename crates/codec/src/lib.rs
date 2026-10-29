@@ -1,6 +1,7 @@
 //! Декодеры звука AirPlay: AAC-LC (буферизованный поток AirPlay 2) и ALAC
 //! (realtime-поток и AirPlay 1). Чистый Rust на symphonia. AAC-ELD (звук
-//! зеркалирования экрана) — через libavcodec с фичей `ffmpeg`.
+//! зеркалирования экрана) и видео H.264/H.265 ([`video`]) — через libavcodec
+//! с фичей `ffmpeg`.
 //!
 //! На выходе всегда интерлив i16: такой формат принимает любая звуковая
 //! карта, и на слабом ARM не нужно гонять f32 через весь конвейер.
@@ -13,6 +14,10 @@ use symphonia::core::units::{Duration, Timestamp};
 
 #[cfg(feature = "ffmpeg")]
 mod eld;
+#[cfg(feature = "ffmpeg")]
+mod ff;
+#[cfg(feature = "ffmpeg")]
+pub mod video;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

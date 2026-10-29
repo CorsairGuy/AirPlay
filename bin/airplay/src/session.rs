@@ -561,7 +561,7 @@ mod tests {
         let recorded = Recorded::default();
         let sink = recorded.clone();
         let mut ctx = ctx();
-        Arc::get_mut(&mut ctx).unwrap().mirror = Some(mirror::VideoSinkFactory::new(move || {
+        Arc::get_mut(&mut ctx).unwrap().mirror = Some(mirror::VideoSinkFactory::new(move |_| {
             Box::new(sink.clone())
         }));
         let mut c = Client::new(ctx);

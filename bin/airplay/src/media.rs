@@ -288,6 +288,14 @@ impl Media {
         }
     }
 
+    /// Часы отправителя для зеркалирования: NTP, если обмен метками начат.
+    fn time_source(&self) -> Arc<dyn TimeSource> {
+        match &self.ntp {
+            Some(clock) => Arc::new(clock.clone()),
+            None => Arc::new(clock::NoTime),
+        }
+    }
+
     /// Тип 110: видеопоток зеркалирования.
     fn setup_video(&mut self, s: &Dictionary, r: &mut Dictionary) -> Result<(), String> {
         let factory = self
@@ -307,11 +315,14 @@ impl Media {
         let listener = audio_stream::bind_tcp().map_err(|e| format!("видеосокет: {e}"))?;
         let port = listener.local_addr().map_err(|e| e.to_string())?.port();
         info!(id, port, "видеопоток");
+        let info = mirror::StreamInfo {
+            time: self.time_source(),
+        };
         self.tasks.push(tokio::spawn(mirror::receive(
             listener,
             key,
             iv,
-            factory.open(),
+            factory.open(&info),
         )));
         r.insert("dataPort".into(), Value::Integer(port.into()));
         Ok(())
@@ -333,15 +344,11 @@ impl Media {
         let aes = self.aes_key.ok_or("нет ключа звука: SETUP без ekey")?;
         let iv = self.eiv.ok_or("нет eiv в SETUP")?;
         let key = mirror::session_key(&aes, self.legacy_shared.as_ref());
-        let time: Arc<dyn TimeSource> = match &self.ntp {
-            Some(clock) => Arc::new(clock.clone()),
-            None => Arc::new(clock::NoTime),
-        };
         let stream = Stream::realtime(
             self.player.audio.clone(),
             StreamKey::AesCbc { key, iv },
             format,
-            time,
+            self.time_source(),
         )
         .map_err(|e| format!("сокеты звука: {e}"))?;
         info!("звук зеркалирования (AAC-ELD)");

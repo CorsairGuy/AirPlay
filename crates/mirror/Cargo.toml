@@ -12,6 +12,7 @@ publish = false
 workspace = true
 
 [dependencies]
+clock.workspace = true
 crypto.workspace = true
 sha2.workspace = true
 tokio.workspace = true

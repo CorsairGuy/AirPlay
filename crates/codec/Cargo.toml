@@ -1,6 +1,6 @@
 [package]
 name = "ap_codec"
-description = "Кодеки: аппаратный декод и кодирование видео через FFmpeg, ALAC, AAC-ELD."
+description = "Кодеки: ALAC и AAC на symphonia; AAC-ELD и видео H.264/H.265 (программно или аппаратно) через libavcodec."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
