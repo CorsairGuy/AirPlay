@@ -20,23 +20,42 @@ pub struct Service {
 /// Объявляет службы, пока живёт. При удалении снимает объявления.
 pub struct Advertiser {
     daemon: ServiceDaemon,
+    host: String,
     registered: Vec<String>,
 }
 
 impl Advertiser {
     /// `host` — имя узла без `.local.`, адреса берутся со всех интерфейсов.
     pub fn start(host: &str, services: Vec<Service>) -> Result<Self, Error> {
-        let daemon = ServiceDaemon::new()?;
-        let host = format!("{host}.local.");
-        let mut registered = Vec::new();
+        let mut this = Self {
+            daemon: ServiceDaemon::new()?,
+            host: format!("{host}.local."),
+            registered: Vec::new(),
+        };
+        this.update(services)?;
+        Ok(this)
+    }
+
+    /// Объявляет службы заново, например с новыми TXT после сопряжения.
+    /// Повторная регистрация того же имени заменяет прежние записи.
+    pub fn update(&mut self, services: Vec<Service>) -> Result<(), Error> {
         for s in services {
-            let info =
-                ServiceInfo::new(s.service_type, &s.instance, &host, "", s.port, &s.txt[..])?
-                    .enable_addr_auto();
-            registered.push(info.get_fullname().to_owned());
-            daemon.register(info)?;
+            let info = ServiceInfo::new(
+                s.service_type,
+                &s.instance,
+                &self.host,
+                "",
+                s.port,
+                &s.txt[..],
+            )?
+            .enable_addr_auto();
+            let name = info.get_fullname().to_owned();
+            self.daemon.register(info)?;
+            if !self.registered.contains(&name) {
+                self.registered.push(name);
+            }
         }
-        Ok(Self { daemon, registered })
+        Ok(())
     }
 }
 

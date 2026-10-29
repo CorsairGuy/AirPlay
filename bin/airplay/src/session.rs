@@ -28,7 +28,54 @@ pub struct Context {
     pub store: Box<dyn PairingStore>,
     /// PIN для постоянного HAP-сопряжения.
     pub pin: String,
+    /// Только постоянное сопряжение по PIN, без transient.
+    pub require_pin: bool,
     pub player: Arc<Player>,
+    /// Объявление в Bonjour; обновляется, когда меняется состояние сопряжения.
+    pub mdns: std::sync::Mutex<Option<mdns::Advertiser>>,
+    pub port: u16,
+}
+
+impl Context {
+    pub fn services(&self) -> Vec<mdns::Service> {
+        let device = self.device();
+        vec![
+            mdns::Service {
+                service_type: mdns::AIRPLAY,
+                instance: device.name.clone(),
+                port: self.port,
+                txt: device.airplay_txt(),
+            },
+            mdns::Service {
+                service_type: mdns::RAOP,
+                instance: device.raop_instance(),
+                port: self.port,
+                txt: device.raop_txt(),
+            },
+        ]
+    }
+
+    /// После первого сопряжения в режиме PIN меняются флаги: объявим заново.
+    fn paired(&self) {
+        if !self.require_pin {
+            return;
+        }
+        let services = self.services();
+        if let Some(adv) = self.mdns.lock().unwrap_or_else(|e| e.into_inner()).as_mut()
+            && let Err(e) = adv.update(services)
+        {
+            warn!("Bonjour: {e}");
+        }
+    }
+
+    /// Описание приёмника с флагами по текущему состоянию сопряжения.
+    pub fn device(&self) -> DeviceInfo {
+        let mut d = self.device.clone();
+        if self.require_pin {
+            d.require_pin(!self.store.is_empty());
+        }
+        d
+    }
 }
 
 pub struct Session {
@@ -104,7 +151,7 @@ impl Session {
                 (resp, None)
             }
             ("GET", "/info") => (
-                Response::to(req, 200).with_body(BPLIST, self.ctx.device.info_plist()),
+                Response::to(req, 200).with_body(BPLIST, self.ctx.device().info_plist()),
                 None,
             ),
             ("POST", "/pair-pin-start") => {
@@ -128,9 +175,14 @@ impl Session {
 
     fn hap_setup(&mut self, req: &Request) -> (Response, Option<ControlKeys>) {
         let ctx = self.ctx.clone();
-        let setup = self
-            .setup
-            .get_or_insert_with(|| PairSetup::new(ctx.identity.clone(), ctx.pin.clone()));
+        let setup = self.setup.get_or_insert_with(|| {
+            let setup = PairSetup::new(ctx.identity.clone(), ctx.pin.clone());
+            if ctx.require_pin {
+                setup.without_transient()
+            } else {
+                setup
+            }
+        });
         match setup.handle(&req.body, ctx.store.as_ref()) {
             Ok(SetupOutcome::Continue(body)) => {
                 (Response::to(req, 200).with_body(OCTETS, body), None)
@@ -151,6 +203,7 @@ impl Session {
             }) => {
                 info!(peer = %self.peer, controller = %String::from_utf8_lossy(&controller_id), "сопряжение по PIN выполнено");
                 self.setup = None;
+                ctx.paired();
                 (Response::to(req, 200).with_body(OCTETS, reply), None)
             }
             Ok(SetupOutcome::Rejected(reply)) => {
@@ -265,6 +318,9 @@ mod tests {
             identity,
             store: Box::new(MemoryStore::default()),
             pin: "1234".into(),
+            require_pin: false,
+            mdns: std::sync::Mutex::new(None),
+            port: 7000,
             player: Arc::new(Player::new(
                 audio_stream::Config {
                     device: "null".into(),
@@ -512,6 +568,44 @@ mod tests {
             .body;
         c.encrypt(verify.check_m4(&m4).unwrap());
         assert_eq!(c.call("GET", "/info", &[], vec![]).status, 200);
+    }
+
+    #[test]
+    fn pin_only_mode() {
+        let mut ctx = ctx();
+        Arc::get_mut(&mut ctx).unwrap().require_pin = true;
+        let info = |c: &mut Client| {
+            let body = c.call("GET", "/info", &[], vec![]).body;
+            let d = plist::from_bytes::<plist::Value>(&body)
+                .unwrap()
+                .into_dictionary()
+                .unwrap();
+            let flags = d["statusFlags"].as_unsigned_integer().unwrap();
+            let features = d["features"].as_unsigned_integer().unwrap();
+            (flags, features & Features::SYSTEM_PAIRING != 0)
+        };
+        let hkp = [("X-Apple-HKP", "3")];
+        let mut c = Client::new(ctx.clone());
+        assert_eq!(info(&mut c), (0x204, false));
+
+        // transient отклоняется сразу на M2.
+        let setup = ControllerSetup::new(Identity::from_seed("ctl", &[6; 32]), "", true);
+        let m2 = c.call("POST", "/pair-setup", &hkp, setup.m1()).body;
+        assert!(
+            pair::tlv8::Tlv8::decode(&m2)
+                .unwrap()
+                .get(pair::tlv8::ERROR)
+                .is_some()
+        );
+
+        let mut setup = ControllerSetup::new(Identity::from_seed("ctl", &[6; 32]), "1234", false);
+        let m2 = c.call("POST", "/pair-setup", &hkp, setup.m1()).body;
+        let m4 = c
+            .call("POST", "/pair-setup", &hkp, setup.m3(&m2).unwrap())
+            .body;
+        setup.check_m4(&m4).unwrap();
+        c.call("POST", "/pair-setup", &hkp, setup.m5().unwrap());
+        assert_eq!(info(&mut c), (0x604, false));
     }
 
     #[test]

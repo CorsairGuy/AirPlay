@@ -118,6 +118,10 @@ impl PairingStore for FileStore {
         self.mem.get(id)
     }
 
+    fn len(&self) -> usize {
+        self.mem.len()
+    }
+
     fn add(&self, id: &[u8], public_key: [u8; 32]) {
         let _guard = self.write.lock().unwrap();
         self.mem.add(id, public_key);

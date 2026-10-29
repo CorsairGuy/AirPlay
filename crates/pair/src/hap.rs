@@ -67,6 +67,7 @@ pub struct PairSetup {
     pin: String,
     srp: Option<srp::Server>,
     transient: bool,
+    allow_transient: bool,
     session_key: Option<Vec<u8>>,
 }
 
@@ -78,8 +79,15 @@ impl PairSetup {
             pin: pin.into(),
             srp: None,
             transient: false,
+            allow_transient: true,
             session_key: None,
         }
+    }
+
+    /// Только постоянное сопряжение по PIN: transient отклоняется.
+    pub fn without_transient(mut self) -> Self {
+        self.allow_transient = false;
+        self
     }
 
     pub fn handle(&mut self, body: &[u8], store: &dyn PairingStore) -> Result<SetupOutcome, Error> {
@@ -94,6 +102,9 @@ impl PairSetup {
 
     fn m1(&mut self, msg: &Tlv8) -> Result<SetupOutcome, Error> {
         self.transient = msg.get_uint(tlv8::FLAGS).unwrap_or(0) & tlv8::FLAG_TRANSIENT != 0;
+        if self.transient && !self.allow_transient {
+            return Ok(SetupOutcome::Rejected(error_reply(2)));
+        }
         let pin = if self.transient {
             TRANSIENT_PIN
         } else {

@@ -72,6 +72,22 @@ pub struct DeviceInfo {
 
 impl DeviceInfo {
     pub const PROTOCOL_VERSION: &'static str = "1.1";
+    /// statusFlags: приёмник готов к работе.
+    pub const STATUS_READY: u32 = 0x4;
+    /// statusFlags: нужен PIN (как у shairplay-rust в режиме PIN).
+    pub const STATUS_PIN_REQUIRED: u32 = 0x200;
+    /// statusFlags: сопряжение по PIN уже выполнено хотя бы с одним контроллером.
+    pub const STATUS_PAIRED: u32 = 0x400;
+
+    /// Режим «только по PIN»: снимает transient-сопряжение (бит 47), без
+    /// которого iOS спрашивает PIN, и выставляет флаги состояния.
+    pub fn require_pin(&mut self, paired: bool) {
+        self.features = Features(self.features.0 & !Features::SYSTEM_PAIRING);
+        self.status_flags = Self::STATUS_READY | Self::STATUS_PIN_REQUIRED;
+        if paired {
+            self.status_flags |= Self::STATUS_PAIRED;
+        }
+    }
 
     /// Тело ответа на `GET /info` (двоичный plist).
     pub fn info_plist(&self) -> Vec<u8> {
