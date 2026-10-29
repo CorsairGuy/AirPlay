@@ -3,12 +3,9 @@
 //! `airplay serve` запускает демон (по умолчанию все службы в этом процессе),
 //! остальные подкоманды управляют работающим демоном через `ipc`.
 
-mod media;
-mod serve;
-mod session;
-mod state;
-
 use std::process::ExitCode;
+
+use airplay::{audio_stream, serve, state};
 
 use tracing_subscriber::EnvFilter;
 
@@ -32,6 +29,7 @@ const USAGE: &str = "\
   --state КАТАЛОГ где хранить ключи (по умолчанию ~/.local/state/airplay)
   --model МОДЕЛЬ  модель для iOS (по умолчанию AirPlay)
   --no-mdns       не объявлять себя в Bonjour
+  --require-pin   пускать только после сопряжения по PIN (без transient)
   --audio ВЫВОД   куда играть: default, null (никуда) или устройство ALSA,
                   например hw:0,0 (по умолчанию default)
   --buffer МС     буфер звуковой карты, мс (по умолчанию 100; меньше —
@@ -58,6 +56,7 @@ fn parse_serve(args: &[String]) -> Result<serve::Options, String> {
         mdns: true,
         model: "AirPlay".into(),
         audio: audio_stream::Config::default(),
+        require_pin: false,
     };
     let ms = |v: String, name: &str| {
         v.parse::<u64>()
@@ -78,6 +77,7 @@ fn parse_serve(args: &[String]) -> Result<serve::Options, String> {
             "--state" => opts.state_dir = value()?.into(),
             "--model" => opts.model = value()?,
             "--no-mdns" => opts.mdns = false,
+            "--require-pin" => opts.require_pin = true,
             "--audio" => opts.audio.device = value()?,
             "--buffer" => opts.audio.output_latency = ms(value()?, "--buffer")?,
             "--latency" => opts.audio.fallback_latency = ms(value()?, "--latency")?,

@@ -21,6 +21,8 @@ pub struct Options {
     pub mdns: bool,
     pub model: String,
     pub audio: audio_stream::Config,
+    /// Только постоянное сопряжение по PIN.
+    pub require_pin: bool,
 }
 
 pub async fn run(opts: Options) -> Result<()> {
@@ -54,27 +56,6 @@ pub async fn run(opts: Options) -> Result<()> {
     }
     info!(name = %opts.name, %device_id, port = opts.port, state = %opts.state_dir.display(), "приёмник запущен");
 
-    let _mdns = if opts.mdns {
-        let host = format!("airplay-{}", device_id.replace(':', "").to_lowercase());
-        let services = vec![
-            mdns::Service {
-                service_type: mdns::AIRPLAY,
-                instance: device.name.clone(),
-                port: opts.port,
-                txt: device.airplay_txt(),
-            },
-            mdns::Service {
-                service_type: mdns::RAOP,
-                instance: device.raop_instance(),
-                port: opts.port,
-                txt: device.raop_txt(),
-            },
-        ];
-        Some(mdns::Advertiser::start(&host, services).context("не запустить Bonjour")?)
-    } else {
-        None
-    };
-
     let time = timesync::TimeSync::start(clock_id(&device_id));
     info!(device = %opts.audio.device, buffer_ms = opts.audio.output_latency.as_millis(), "вывод звука");
     let player = Arc::new(Player::new(opts.audio, time));
@@ -84,8 +65,17 @@ pub async fn run(opts: Options) -> Result<()> {
         device,
         store: Box::new(store),
         pin,
+        require_pin: opts.require_pin,
         player,
+        mdns: std::sync::Mutex::new(None),
+        port: opts.port,
     });
+    if opts.mdns {
+        let host = format!("airplay-{}", device_id.replace(':', "").to_lowercase());
+        let advertiser =
+            mdns::Advertiser::start(&host, ctx.services()).context("не запустить Bonjour")?;
+        *ctx.mdns.lock().unwrap() = Some(advertiser);
+    }
 
     for listener in listeners {
         tokio::spawn(accept_loop(listener, ctx.clone()));

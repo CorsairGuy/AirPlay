@@ -413,7 +413,7 @@ fn realtime_format(s: &Dictionary) -> Result<Format, String> {
 }
 
 fn update_info(ctx: &Context) -> Vec<u8> {
-    let dev = &ctx.device;
+    let dev = &ctx.device();
     let mut value = Dictionary::new();
     value.insert(
         "statusFlags".into(),

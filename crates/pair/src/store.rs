@@ -6,6 +6,11 @@ use std::sync::Mutex;
 pub trait PairingStore: Send + Sync {
     fn get(&self, id: &[u8]) -> Option<[u8; 32]>;
     fn add(&self, id: &[u8], public_key: [u8; 32]);
+    /// Сколько контроллеров сопряжено.
+    fn len(&self) -> usize;
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 #[derive(Default)]
@@ -25,5 +30,9 @@ impl PairingStore for MemoryStore {
 
     fn add(&self, id: &[u8], public_key: [u8; 32]) {
         self.0.lock().unwrap().insert(id.to_vec(), public_key);
+    }
+
+    fn len(&self) -> usize {
+        self.0.lock().unwrap().len()
     }
 }

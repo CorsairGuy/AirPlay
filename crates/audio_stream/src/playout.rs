@@ -33,6 +33,8 @@ pub struct Config {
     pub output_latency: Duration,
     /// Задержка, с которой играем, если часов отправителя нет (без PTP).
     pub fallback_latency: Duration,
+    /// Свой вывод вместо `device`.
+    pub sink: Option<audio::SinkFactory>,
 }
 
 impl Default for Config {
@@ -41,6 +43,7 @@ impl Default for Config {
             device: "default".into(),
             output_latency: Duration::from_millis(100),
             fallback_latency: Duration::from_millis(250),
+            sink: None,
         }
     }
 }
@@ -85,7 +88,7 @@ struct State {
     local_anchor: bool,
     /// Формат из SETUP (realtime); буферизованный поток сообщает его в SSRC.
     format: Option<Format>,
-    gain_q15: i32,
+    volume_db: f32,
     /// Растёт при перемотке и смене якоря: поток вывода начинает заново.
     epoch: u64,
     stopped: bool,
@@ -100,7 +103,6 @@ impl Playout {
         let shared = Arc::new((
             Mutex::new(State {
                 format,
-                gain_q15: 32768,
                 ..State::default()
             }),
             Condvar::new(),
@@ -208,7 +210,7 @@ impl Playout {
     }
 
     pub fn set_volume(&self, db: f32) {
-        self.lock().gain_q15 = audio::gain_q15(db);
+        self.lock().volume_db = db;
     }
 
     pub fn stop(&self) {
@@ -237,6 +239,8 @@ struct Output {
     cursor: Option<i64>,
     epoch: u64,
     pcm: Vec<i16>,
+    /// Громкость, уже переданная выводу, и применил ли он её сам.
+    applied_volume: Option<(f32, bool)>,
 }
 
 impl Output {
@@ -250,6 +254,7 @@ impl Output {
             cursor: None,
             epoch: 0,
             pcm: Vec::new(),
+            applied_volume: None,
         }
     }
 
@@ -288,7 +293,7 @@ impl Output {
                 std::thread::sleep(Duration::from_millis(5));
                 continue;
             };
-            let gain = s.gain_q15;
+            let gain = self.gain(s.volume_db);
             drop(s);
             let mut samples = chunk;
             audio::apply_gain(&mut samples, gain);
@@ -384,12 +389,30 @@ impl Output {
         Some(out)
     }
 
+    /// Множитель для сэмплов: единица, если громкость взял на себя вывод.
+    fn gain(&mut self, db: f32) -> i32 {
+        let hardware = match self.applied_volume {
+            Some((applied, hw)) if applied == db => hw,
+            _ => {
+                let hw = self.sink.as_mut().is_some_and(|s| s.set_volume(db));
+                self.applied_volume = Some((db, hw));
+                hw
+            }
+        };
+        if hardware { 32768 } else { audio::gain_q15(db) }
+    }
+
     fn ensure_sink(&mut self, rate: u32) -> Option<()> {
         if self.sink.as_ref().is_some_and(|s| s.sample_rate() == rate) {
             return Some(());
         }
         self.sink = None;
-        match audio::open(&self.cfg.device, rate, self.cfg.output_latency) {
+        let opened = match &self.cfg.sink {
+            Some(factory) => factory.open(rate, self.cfg.output_latency),
+            None => audio::open(&self.cfg.device, rate, self.cfg.output_latency),
+        };
+        self.applied_volume = None;
+        match opened {
             Ok(sink) => {
                 info!(device = %self.cfg.device, rate, "вывод звука открыт");
                 self.sink = Some(sink);

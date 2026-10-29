@@ -5,7 +5,9 @@
 //! звуковой подсистемы бинарник всё равно запускается (с выводом в никуда).
 //! На Windows и macOS — cpal (WASAPI и CoreAudio).
 
+use std::fmt;
 use std::io;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[cfg(target_os = "linux")]
@@ -25,6 +27,38 @@ pub trait Sink: Send {
     fn delay_frames(&mut self) -> u32;
     /// Останавливает воспроизведение и выбрасывает буфер (пауза, перемотка).
     fn stop(&mut self);
+    /// Громкость AirPlay в дБ (−30…0, −144 — без звука). Вывод с аппаратной
+    /// громкостью применяет её сам и возвращает `true`; иначе плеер
+    /// масштабирует сэмплы.
+    fn set_volume(&mut self, _db: f32) -> bool {
+        false
+    }
+}
+
+/// Как открыть вывод для частоты `sample_rate` с буфером `latency`.
+/// Встраивающая программа (например, под конкретное железо) передаёт
+/// свою фабрику вместо имени устройства.
+#[derive(Clone)]
+pub struct SinkFactory(Arc<OpenFn>);
+
+type OpenFn = dyn Fn(u32, Duration) -> io::Result<Box<dyn Sink>> + Send + Sync;
+
+impl SinkFactory {
+    pub fn new(
+        f: impl Fn(u32, Duration) -> io::Result<Box<dyn Sink>> + Send + Sync + 'static,
+    ) -> Self {
+        Self(Arc::new(f))
+    }
+
+    pub fn open(&self, sample_rate: u32, latency: Duration) -> io::Result<Box<dyn Sink>> {
+        (self.0)(sample_rate, latency)
+    }
+}
+
+impl fmt::Debug for SinkFactory {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SinkFactory")
+    }
 }
 
 /// Открывает устройство: `null` — вывод в никуда с темпом реального времени,

@@ -21,5 +21,6 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+audio.workspace = true
 socket2.workspace = true
 tokio.workspace = true
