@@ -1,6 +1,6 @@
 [package]
 name = "ap_ipc"
-description = "Локальный API демона для airplayutil, приложения и платформенных хуков."
+description = "Локальный API демона для подкоманд airplay, приложения и платформенных хуков."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

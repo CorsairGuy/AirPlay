@@ -8,8 +8,7 @@
 
 | Путь | Пакет | Что это |
 | --- | --- | --- |
-| `bin/airplay` | `airplay` | демон: RTSP, сопряжение, шифрование, сессии приёма и отправки |
-| `bin/airplayutil` | `airplayutil` | утилита командной строки |
+| `bin/airplay` | `airplay` | демон (`airplay serve`) и утилита управления (`airplay status`, `list`, `send`…) в одном бинарнике |
 | `services/timesync` | `timesync` | единые часы PTP/NTP |
 | `services/mediaserver` | `mediaserver` | конвейеры звука и видео |
 | `services/mediaremote` | `mediaremote` | «Сейчас играет», пульт |

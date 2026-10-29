@@ -24,14 +24,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "airplayutil"
-version = "0.1.0"
-dependencies = [
- "ap_base",
- "ap_ipc",
-]
-
-[[package]]
 name = "ap_audio"
 version = "0.1.0"
 
