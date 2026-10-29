@@ -11,3 +11,5 @@ pub mod state;
 
 pub use audio;
 pub use audio_stream;
+pub use device;
+pub use mirror;

@@ -1,7 +1,7 @@
 //! Одно соединение с отправителем на порту 7000: RTSP-запросы, сопряжение,
 //! переход на шифрованный канал. Без ввода-вывода — байты на вход и выход.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -34,6 +34,8 @@ pub struct Context {
     /// Объявление в Bonjour; обновляется, когда меняется состояние сопряжения.
     pub mdns: std::sync::Mutex<Option<mdns::Advertiser>>,
     pub port: u16,
+    /// Зеркалирование экрана: куда отдавать видео.
+    pub mirror: Option<mirror::VideoSinkFactory>,
 }
 
 impl Context {
@@ -93,11 +95,11 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn new(ctx: Arc<Context>, peer: String, local: IpAddr) -> Self {
+    pub fn new(ctx: Arc<Context>, peer: SocketAddr, local: IpAddr) -> Self {
         Self {
-            media: Media::new(&ctx, local),
+            media: Media::new(&ctx, local, peer.ip()),
+            peer: peer.to_string(),
             ctx,
-            peer,
             wire: Vec::new(),
             plain: Vec::new(),
             channel: None,
@@ -272,8 +274,9 @@ impl Session {
             .get_or_insert_with(|| LegacyServer::new(ctx.identity.clone()));
         match legacy.pair_verify(&req.body) {
             Ok(LegacyOutcome::Continue(body)) => Response::to(req, 200).with_body(OCTETS, body),
-            Ok(LegacyOutcome::Verified { .. }) => {
+            Ok(LegacyOutcome::Verified { shared }) => {
                 info!(peer = %self.peer, "legacy pair-verify выполнен");
+                self.media.set_legacy_shared(shared);
                 Response::to(req, 200)
             }
             Err(e) => {
@@ -314,6 +317,7 @@ mod tests {
                 pairing_id: identity.pairing_id.clone(),
                 public_key: identity.public_key(),
                 source_version: "366.0".into(),
+                display: None,
             },
             identity,
             store: Box::new(MemoryStore::default()),
@@ -321,6 +325,7 @@ mod tests {
             require_pin: false,
             mdns: std::sync::Mutex::new(None),
             port: 7000,
+            mirror: None,
             player: Arc::new(Player::new(
                 audio_stream::Config {
                     device: "null".into(),
@@ -341,7 +346,11 @@ mod tests {
     impl Client {
         fn new(ctx: Arc<Context>) -> Self {
             Self {
-                session: Session::new(ctx, "test".into(), IpAddr::from([127, 0, 0, 1])),
+                session: Session::new(
+                    ctx,
+                    "127.0.0.1:50000".parse().unwrap(),
+                    IpAddr::from([127, 0, 0, 1]),
+                ),
                 channel: None,
                 cseq: 0,
             }
@@ -524,6 +533,131 @@ mod tests {
             data = &data[len..];
         }
         frames
+    }
+
+    /// Видео сохраняется для проверки в тесте.
+    #[derive(Default, Clone)]
+    struct Recorded(Arc<std::sync::Mutex<Vec<Packet>>>);
+
+    /// `true` — параметры декодера, `false` — кадр.
+    type Packet = (bool, Vec<u8>);
+
+    impl mirror::VideoSink for Recorded {
+        fn config(&mut self, _codec: mirror::Codec, record: &[u8]) {
+            self.0.lock().unwrap().push((true, record.to_vec()));
+        }
+        fn frame(&mut self, _pts_ns: u64, nals: &[u8]) {
+            self.0.lock().unwrap().push((false, nals.to_vec()));
+        }
+    }
+
+    /// Зеркалирование: FairPlay → SETUP с ekey и NTP → поток 110 → кадры,
+    /// расшифрованные ключом, выведенным из ekey.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mirroring_end_to_end() {
+        use plist::{Dictionary, Value};
+        use tokio::io::AsyncWriteExt;
+
+        let recorded = Recorded::default();
+        let sink = recorded.clone();
+        let mut ctx = ctx();
+        Arc::get_mut(&mut ctx).unwrap().mirror = Some(mirror::VideoSinkFactory::new(move || {
+            Box::new(sink.clone())
+        }));
+        let mut c = Client::new(ctx);
+
+        // FairPlay: векторы из тестов ap_fairplay, ekey → 51e601d6...
+        let mut m1 = [0u8; 16];
+        m1[4] = 3;
+        m1[14] = 1;
+        assert_eq!(c.call("POST", "/fp-setup", &[], m1.to_vec()).status, 200);
+        let mut keymsg = [0x41u8; 164];
+        keymsg[..5].copy_from_slice(b"FPLY\x03");
+        keymsg[12] = 1;
+        assert_eq!(
+            c.call("POST", "/fp-setup", &[], keymsg.to_vec()).status,
+            200
+        );
+        let mut ekey = [0x42u8; 72];
+        ekey[..4].copy_from_slice(b"FPLY");
+        let aes: [u8; 16] = hex::decode("51e601d65942f9bd660b57bf98800cdf")
+            .unwrap()
+            .try_into()
+            .unwrap();
+
+        let to_plist = |d: Dictionary| {
+            let mut out = Vec::new();
+            Value::Dictionary(d).to_writer_binary(&mut out).unwrap();
+            out
+        };
+        let mut d = Dictionary::new();
+        d.insert("ekey".into(), Value::Data(ekey.to_vec()));
+        d.insert("eiv".into(), Value::Data(vec![0; 16]));
+        d.insert("timingProtocol".into(), "NTP".into());
+        d.insert("timingPort".into(), Value::Integer(0.into()));
+        let r = c.call("SETUP", "rtsp://x/1", &[], to_plist(d));
+        assert_eq!(r.status, 200);
+        let session = plist::from_bytes::<Value>(&r.body)
+            .unwrap()
+            .into_dictionary()
+            .unwrap();
+        assert!(session["timingPort"].as_unsigned_integer().unwrap() > 0);
+
+        let id = 7_u64;
+        let mut s = Dictionary::new();
+        s.insert("type".into(), Value::Integer(110.into()));
+        s.insert("streamConnectionID".into(), Value::Integer(id.into()));
+        let mut d = Dictionary::new();
+        d.insert("streams".into(), Value::Array(vec![s.into()]));
+        let r = c.call("SETUP", "rtsp://x/1", &[], to_plist(d));
+        assert_eq!(r.status, 200);
+        let streams = plist::from_bytes::<Value>(&r.body)
+            .unwrap()
+            .into_dictionary()
+            .unwrap();
+        let port = streams["streams"].as_array().unwrap()[0]
+            .as_dictionary()
+            .unwrap()["dataPort"]
+            .as_unsigned_integer()
+            .unwrap() as u16;
+
+        let packet = |kind: u16, body: &[u8]| {
+            let mut p = vec![0u8; mirror::HEADER_LEN];
+            p[0..4].copy_from_slice(&(body.len() as u32).to_le_bytes());
+            p[4..6].copy_from_slice(&kind.to_le_bytes());
+            p.extend_from_slice(body);
+            p
+        };
+        let config = [
+            1u8, 0x64, 0, 0x28, 0xFF, 0xE1, 0, 2, 0x67, 0x64, 1, 0, 1, 0x68,
+        ];
+        let frames: Vec<Vec<u8>> = vec![
+            vec![0, 0, 0, 3, 0x65, 1, 2],
+            vec![0, 0, 0, 20, 0x41].into_iter().chain(0..20).collect(),
+        ];
+        let (key, iv) = mirror::stream_key_iv(&aes, id);
+        let mut cipher = crypto::ctr::aes128_ctr(&key, &iv);
+        let mut wire = packet(1, &config);
+        for f in &frames {
+            let mut enc = f.clone();
+            crypto::ctr::apply(&mut cipher, &mut enc);
+            wire.extend(packet(0, &enc));
+        }
+        let mut conn = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        conn.write_all(&wire).await.unwrap();
+        drop(conn);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while recorded.0.lock().unwrap().len() < 3 {
+            assert!(std::time::Instant::now() < deadline, "видео не дошло");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let got = recorded.0.lock().unwrap().clone();
+        assert_eq!(got[0], (true, config.to_vec()));
+        assert_eq!(got[1], (false, frames[0].clone()));
+        assert_eq!(got[2], (false, frames[1].clone()));
     }
 
     #[test]

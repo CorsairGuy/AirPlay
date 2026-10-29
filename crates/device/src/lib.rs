@@ -48,6 +48,11 @@ impl Features {
             | Self::COREUTILS_PAIRING_AND_ENCRYPTION,
     );
 
+    /// Зеркалирование экрана: набор UxPlay без битов AirPlay 2 (40, 41, 46,
+    /// 48) и без legacy-сопряжения (бит 27). Только с ним iOS 18 присылает
+    /// ключ видео `ekey` (проверено shairplay-rust).
+    pub const MIRROR_RECEIVER: Features = Features(0x527F_FEE6);
+
     /// Запись для TXT: `0xНИЖНИЕ32,0xВЕРХНИЕ32`.
     pub fn to_txt(self) -> String {
         format!("0x{:X},0x{:X}", self.0 as u32, (self.0 >> 32) as u32)
@@ -68,6 +73,15 @@ pub struct DeviceInfo {
     /// Публичный ключ Ed25519 (`pk`).
     pub public_key: [u8; 32],
     pub source_version: String,
+    /// Экран для зеркалирования; без него iOS не предлагает «Повтор экрана».
+    pub display: Option<Display>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Display {
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
 }
 
 impl DeviceInfo {
@@ -110,6 +124,15 @@ impl DeviceInfo {
         d.insert("sourceVersion".into(), self.source_version.clone().into());
         d.insert("keepAliveLowPower".into(), true.into());
         d.insert("keepAliveSendStatsAsBody".into(), true.into());
+        if let Some(display) = self.display {
+            let mut s = Dictionary::new();
+            s.insert("widthPixels".into(), Value::Integer(display.width.into()));
+            s.insert("heightPixels".into(), Value::Integer(display.height.into()));
+            s.insert("maxFPS".into(), Value::Integer(display.fps.into()));
+            s.insert("uuid".into(), format!("{}-display", self.pairing_id).into());
+            s.insert("features".into(), Value::Integer(2.into()));
+            d.insert("displays".into(), Value::Array(vec![s.into()]));
+        }
         let mut out = Vec::new();
         Value::Dictionary(d)
             .to_writer_binary(&mut out)
@@ -182,6 +205,7 @@ mod tests {
             pairing_id: "b6a2c8d0-0000-4000-8000-000000000001".into(),
             public_key: [9; 32],
             source_version: "366.0".into(),
+            display: None,
         }
     }
 
@@ -198,6 +222,32 @@ mod tests {
         assert_eq!(d["deviceID"].as_string(), Some("02:11:22:33:44:55"));
         assert_eq!(d["features"].as_signed_integer(), Some(0x1C340405D4A00));
         assert_eq!(d["pk"].as_data(), Some(&[9u8; 32][..]));
+    }
+
+    #[test]
+    fn mirroring_advertises_display() {
+        let mut dev = info();
+        assert!(
+            !Value::from_reader(std::io::Cursor::new(dev.info_plist()))
+                .unwrap()
+                .as_dictionary()
+                .unwrap()
+                .contains_key("displays")
+        );
+        dev.features = Features::MIRROR_RECEIVER;
+        dev.display = Some(Display {
+            width: 1280,
+            height: 720,
+            fps: 60,
+        });
+        let v = Value::from_reader(std::io::Cursor::new(dev.info_plist())).unwrap();
+        let d = v.as_dictionary().unwrap();
+        let display = d["displays"].as_array().unwrap()[0]
+            .as_dictionary()
+            .unwrap();
+        assert_eq!(display["widthPixels"].as_unsigned_integer(), Some(1280));
+        assert_eq!(display["maxFPS"].as_unsigned_integer(), Some(60));
+        assert_eq!(dev.features.to_txt(), "0x527FFEE6,0x0");
     }
 
     #[test]

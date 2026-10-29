@@ -23,6 +23,11 @@ pub struct Options {
     pub audio: audio_stream::Config,
     /// Только постоянное сопряжение по PIN.
     pub require_pin: bool,
+    /// Зеркалирование экрана вместо звука AirPlay 2: набор возможностей
+    /// UxPlay, видео уходит в эту фабрику.
+    pub mirror: Option<mirror::VideoSinkFactory>,
+    /// Экран, который объявляем для зеркалирования.
+    pub display: device::Display,
 }
 
 pub async fn run(opts: Options) -> Result<()> {
@@ -32,15 +37,21 @@ pub async fn run(opts: Options) -> Result<()> {
     let pin = opts
         .pin
         .unwrap_or_else(|| format!("{:04}", rand::random::<u16>() % 10_000));
+    let mirroring = opts.mirror.is_some();
     let device = DeviceInfo {
         name: opts.name.clone(),
         device_id: device_id.clone(),
         model: opts.model,
-        features: Features::AUDIO_RECEIVER,
+        features: if mirroring {
+            Features::MIRROR_RECEIVER
+        } else {
+            Features::AUDIO_RECEIVER
+        },
         status_flags: 0x4,
         pairing_id: identity.pairing_id.clone(),
         public_key: identity.public_key(),
         source_version: "366.0".into(),
+        display: mirroring.then_some(opts.display),
     };
 
     // [::] на Linux и macOS принимает и IPv4; на Windows сокет IPv6 отдельный,
@@ -56,7 +67,13 @@ pub async fn run(opts: Options) -> Result<()> {
     }
     info!(name = %opts.name, %device_id, port = opts.port, state = %opts.state_dir.display(), "приёмник запущен");
 
-    let time = timesync::TimeSync::start(clock_id(&device_id));
+    // Зеркалирование идёт по часам NTP, PTP ему не нужен (и не нужен root).
+    let time = if mirroring {
+        info!("режим зеркалирования экрана");
+        timesync::TimeSync::idle(clock_id(&device_id))
+    } else {
+        timesync::TimeSync::start(clock_id(&device_id))
+    };
     info!(device = %opts.audio.device, buffer_ms = opts.audio.output_latency.as_millis(), "вывод звука");
     let player = Arc::new(Player::new(opts.audio, time));
 
@@ -69,6 +86,7 @@ pub async fn run(opts: Options) -> Result<()> {
         player,
         mdns: std::sync::Mutex::new(None),
         port: opts.port,
+        mirror: opts.mirror,
     });
     if opts.mdns {
         let host = format!("airplay-{}", device_id.replace(':', "").to_lowercase());
@@ -98,7 +116,7 @@ async fn accept_loop(listener: TcpListener, ctx: Arc<Context>) {
         tokio::spawn(async move {
             let peer = addr.to_string();
             info!(%peer, "подключение");
-            match serve_connection(stream, ctx, peer.clone()).await {
+            match serve_connection(stream, ctx, addr).await {
                 Ok(()) => info!(%peer, "отключение"),
                 Err(e) => warn!(%peer, "соединение закрыто: {e:#}"),
             }
@@ -106,7 +124,11 @@ async fn accept_loop(listener: TcpListener, ctx: Arc<Context>) {
     }
 }
 
-async fn serve_connection(mut stream: TcpStream, ctx: Arc<Context>, peer: String) -> Result<()> {
+async fn serve_connection(
+    mut stream: TcpStream,
+    ctx: Arc<Context>,
+    peer: std::net::SocketAddr,
+) -> Result<()> {
     stream.set_nodelay(true)?;
     let local = stream.local_addr()?.ip();
     let mut session = Session::new(ctx, peer, local);
