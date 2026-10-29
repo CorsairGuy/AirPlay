@@ -26,6 +26,30 @@ cargo build --release
 cargo build --profile release-small
 ```
 
+## Что уже работает
+
+Этап 2: приёмник виден в списке AirPlay и проходит сопряжение (transient с PIN 3939, постоянное по PIN, legacy для зеркалирования). Отвечает на `/info`, после сопряжения канал шифруется. `SETUP` и дальше пока отвечают 501, звука ещё нет.
+
+Проверка на iPhone:
+
+```sh
+RUST_LOG=debug cargo run --release -p airplay -- serve --name "airplay"
+```
+
+Откройте Пункт управления → AirPlay: устройство «airplay» должно появиться в списке. При выборе в логе будет «transient-сопряжение выполнено», затем iPhone получит 501 на `SETUP` и отключится.
+
+Ключ устройства и список сопряжённых контроллеров лежат в `~/.local/state/airplay` (или в `AIRPLAY_STATE_DIR`).
+
+## Тесты
+
+```sh
+cargo test --workspace
+# независимый клиент: криптография и сопряжение pyatv против живого сервера
+pip install pyatv "srptools==1.0.1"
+cargo run -p airplay -- serve --port 7123 --pin 1234 --no-mdns &
+python tests/interop/pyatv_client.py 127.0.0.1 7123 1234
+```
+
 ## Лицензия
 
 GPL-3.0-or-later: приём зеркалирования и FairPlay основаны на подходе UxPlay (GPL-3.0).
