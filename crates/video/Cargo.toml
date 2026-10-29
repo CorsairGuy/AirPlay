@@ -1,6 +1,6 @@
 [package]
 name = "ap_video"
-description = "Вывод видео: KMS, GL/EGL, D3D11, показ по vsync с регулируемым буфером."
+description = "Видео зеркалирования: декодер на libavcodec и выдача кадров по часам отправителя. Показ — в программе, которая встраивает приёмник."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,3 +10,18 @@ publish = false
 
 [lints]
 workspace = true
+
+[dependencies]
+clock.workspace = true
+codec.workspace = true
+mirror.workspace = true
+tokio = { workspace = true, optional = true }
+tracing.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+
+[features]
+# Декодирование H.264/H.265 через libavcodec. Без неё остаётся только
+# планировщик показа [`Pacer`].
+ffmpeg = ["codec/ffmpeg", "dep:tokio"]

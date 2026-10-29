@@ -5,6 +5,8 @@
 
 use std::process::ExitCode;
 
+#[cfg(feature = "ffmpeg")]
+use airplay::video;
 use airplay::{audio_stream, device, mirror, serve, state};
 
 use tracing_subscriber::EnvFilter;
@@ -32,8 +34,16 @@ const USAGE: &str = "\
   --require-pin   пускать только после сопряжения по PIN (без transient)
   --mirror        режим зеркалирования экрана вместо звука AirPlay 2
   --video-dump ПУТЬ
-                  писать видео зеркалирования в файл H.264 (Annex B);
+                  писать видео зеркалирования в файл H.264 или H.265 (Annex B);
                   «-» — в stdout: airplay serve --mirror --video-dump - | ffplay -f h264 -
+                  (H.265: ffplay -f hevc -)
+  --video-decoder ДЕКОДЕР
+                  декодировать видео зеркалирования и писать в лог к/с и
+                  время декодера: auto — встроенный декодер libavcodec,
+                  или имя, например h264_v4l2m2m (сборка с --features ffmpeg)
+  --video-delay МС
+                  выдавать кадры по часам iPhone с этой задержкой, вровень
+                  со звуком; без параметра — сразу после декодирования
   --display ШxВ@К экран для зеркалирования (по умолчанию 1920x1080@60)
   --audio ВЫВОД   куда играть: default, null (никуда) или устройство ALSA,
                   например hw:0,0 (по умолчанию default)
@@ -71,6 +81,8 @@ fn parse_serve(args: &[String]) -> Result<serve::Options, String> {
     };
     let mut mirror = false;
     let mut dump: Option<String> = None;
+    let mut decoder: Option<String> = None;
+    let mut delay = None;
     let ms = |v: String, name: &str| {
         v.parse::<u64>()
             .map(std::time::Duration::from_millis)
@@ -93,6 +105,8 @@ fn parse_serve(args: &[String]) -> Result<serve::Options, String> {
             "--require-pin" => opts.require_pin = true,
             "--mirror" => mirror = true,
             "--video-dump" => dump = Some(value()?),
+            "--video-decoder" => decoder = Some(value()?),
+            "--video-delay" => delay = Some(ms(value()?, "--video-delay")?),
             "--display" => opts.display = parse_display(&value()?)?,
             "--audio" => opts.audio.device = value()?,
             "--buffer" => opts.audio.output_latency = ms(value()?, "--buffer")?,
@@ -100,17 +114,26 @@ fn parse_serve(args: &[String]) -> Result<serve::Options, String> {
             other => return Err(format!("неизвестный параметр {other}")),
         }
     }
-    if dump.is_some() && !mirror {
-        return Err("--video-dump только вместе с --mirror".into());
+    if (dump.is_some() || decoder.is_some() || delay.is_some()) && !mirror {
+        return Err(
+            "--video-dump, --video-decoder и --video-delay только вместе с --mirror".into(),
+        );
+    }
+    if dump.is_some() && decoder.is_some() {
+        return Err("--video-dump и --video-decoder вместе нельзя".into());
+    }
+    if delay.is_some() && decoder.is_none() {
+        return Err("--video-delay только вместе с --video-decoder".into());
     }
     if mirror {
         if opts.model == "AirPlay" {
             // Как у UxPlay: под этой моделью iOS предлагает «Повтор экрана».
             opts.model = "AppleTV3,2".into();
         }
-        opts.mirror = Some(match dump {
-            Some(path) => mirror::VideoSinkFactory::new(move || dump_sink(&path)),
-            None => mirror::VideoSinkFactory::new(|| Box::new(mirror::CountingSink(0))),
+        opts.mirror = Some(match (dump, decoder) {
+            (Some(path), _) => mirror::VideoSinkFactory::new(move |_| dump_sink(&path)),
+            (None, Some(name)) => decode_factory(name, delay)?,
+            (None, None) => mirror::VideoSinkFactory::new(|_| Box::new(mirror::CountingSink(0))),
         });
     }
     Ok(opts)
@@ -175,6 +198,36 @@ fn parse_display(v: &str) -> Result<device::Display, String> {
         height: h.parse().map_err(|_| err())?,
         fps: fps.parse().map_err(|_| err())?,
     })
+}
+
+/// Декодирование без показа: проверить, тянет ли железо поток.
+#[cfg(feature = "ffmpeg")]
+fn decode_factory(
+    name: String,
+    delay: Option<std::time::Duration>,
+) -> Result<mirror::VideoSinkFactory, String> {
+    let opts = video::Options {
+        decoder: video::VideoOptions {
+            decoder: (name != "auto").then_some(name),
+            low_delay: false,
+        },
+        delay,
+    };
+    Ok(mirror::VideoSinkFactory::new(move |info| {
+        Box::new(video::DecodingSink::new(
+            info,
+            opts.clone(),
+            Box::new(video::Discard),
+        ))
+    }))
+}
+
+#[cfg(not(feature = "ffmpeg"))]
+fn decode_factory(
+    _name: String,
+    _delay: Option<std::time::Duration>,
+) -> Result<mirror::VideoSinkFactory, String> {
+    Err("--video-decoder: соберите с --features ffmpeg".into())
 }
 
 /// Каждый новый видеопоток пишется в файл заново.

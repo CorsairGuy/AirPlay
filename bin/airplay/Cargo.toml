@@ -23,6 +23,7 @@ plist.workspace = true
 audio.workspace = true
 audio_stream.workspace = true
 mirror.workspace = true
+video.workspace = true
 hls.workspace = true
 ipc.workspace = true
 timesync.workspace = true
@@ -37,8 +38,8 @@ sha2.workspace = true
 hex.workspace = true
 
 [features]
-# Звук зеркалирования (AAC-ELD) через libavcodec.
-ffmpeg = ["codec/ffmpeg"]
+# Звук (AAC-ELD) и видео (H.264/H.265) зеркалирования через libavcodec.
+ffmpeg = ["codec/ffmpeg", "video/ffmpeg"]
 
 [lints]
 workspace = true

@@ -52,6 +52,7 @@ dependencies = [
  "ap_pair",
  "ap_rtp",
  "ap_rtsp",
+ "ap_video",
  "hex",
  "mediaremote",
  "mediaserver",
@@ -190,6 +191,7 @@ dependencies = [
 name = "ap_mirror"
 version = "0.1.0"
 dependencies = [
+ "ap_clock",
  "ap_crypto",
  "sha2",
  "tokio",
@@ -229,6 +231,13 @@ dependencies = [
 [[package]]
 name = "ap_video"
 version = "0.1.0"
+dependencies = [
+ "ap_clock",
+ "ap_codec",
+ "ap_mirror",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "autocfg"
