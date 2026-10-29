@@ -6,6 +6,7 @@
 //! `video::DecodingSink` и своим `video::FrameSink`), затем вызывают
 //! [`serve::run`].
 
+pub mod events;
 pub mod media;
 pub mod remote;
 pub mod serve;

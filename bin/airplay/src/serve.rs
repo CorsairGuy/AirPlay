@@ -34,6 +34,16 @@ pub struct Options {
     /// расшифрованный канал потока 130. `None` — поток 130 только
     /// регистрируется.
     pub mrp_bridge: Option<std::net::SocketAddr>,
+    /// Что приёмник сообщает наружу (громкость, метаданные, позиция).
+    pub events: Arc<dyn crate::events::Events>,
+    /// Шкала громкости, дБ (по умолчанию 30, как ползунок iPhone).
+    pub volume_range_db: f32,
+    /// `false` — громкость не применять, только сообщать в `events`.
+    pub apply_volume: bool,
+    /// `sourceVersion` в `/info` и Bonjour, например 366.0 или 550.10.
+    pub source_version: String,
+    /// `deviceEnclosureColor` в `/info`.
+    pub enclosure_color: Option<String>,
 }
 
 pub async fn run(opts: Options) -> Result<()> {
@@ -56,8 +66,11 @@ pub async fn run(opts: Options) -> Result<()> {
         status_flags: 0x4,
         pairing_id: identity.pairing_id.clone(),
         public_key: identity.public_key(),
-        source_version: "366.0".into(),
+        source_version: opts.source_version,
         display: mirroring.then_some(opts.display),
+        // Карточку «Сейчас играет» рисует служба MRP: без неё не обещаем.
+        audio_only_ui: opts.mrp_bridge.is_some(),
+        enclosure_color: opts.enclosure_color,
     };
 
     // [::] на Linux и macOS принимает и IPv4; на Windows сокет IPv6 отдельный,
@@ -81,7 +94,11 @@ pub async fn run(opts: Options) -> Result<()> {
         timesync::TimeSync::start(clock_id(&device_id))
     };
     info!(device = %opts.audio.device, buffer_ms = opts.audio.output_latency.as_millis(), "вывод звука");
-    let player = Arc::new(Player::new(opts.audio, time));
+    let mut player = Player::new(opts.audio, time);
+    player.volume_range_db = opts.volume_range_db;
+    player.apply_volume = opts.apply_volume;
+    player.events = opts.events;
+    let player = Arc::new(player);
 
     let ctx = Arc::new(Context {
         identity,

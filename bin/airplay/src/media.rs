@@ -22,6 +22,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
+use crate::events::{Events, Metadata, NoEvents, Progress};
 use crate::remote::{self, Command, Remote};
 use crate::session::{BPLIST, Context, OCTETS};
 
@@ -33,7 +34,15 @@ const AUDIO_BUFFER_SIZE: u64 = 1 << 20;
 pub struct Player {
     pub audio: audio_stream::Config,
     pub time: TimeSync,
+    /// Шкала громкости: ползунок iPhone (-30..0 дБ) растягивается на
+    /// столько дБ (как `volume_range_db` в shairport-sync).
+    pub volume_range_db: f32,
+    /// Громкость не применять к звуку, только сообщать в [`Events`]: её
+    /// ведёт внешний микшер.
+    pub apply_volume: bool,
+    pub events: Arc<dyn Events>,
     active: Mutex<Option<(u64, Stream)>>,
+    /// Громкость AirPlay, как прислал отправитель.
     volume_db: Mutex<f32>,
     next_id: AtomicU64,
 }
@@ -43,9 +52,23 @@ impl Player {
         Self {
             audio,
             time,
+            volume_range_db: 30.0,
+            apply_volume: true,
+            events: Arc::new(NoEvents),
             active: Mutex::new(None),
             volume_db: Mutex::new(0.0),
             next_id: AtomicU64::new(1),
+        }
+    }
+
+    /// Громкость AirPlay в усиление вывода, дБ.
+    fn output_db(&self, airplay_db: f32) -> f32 {
+        if !self.apply_volume {
+            0.0
+        } else if airplay_db <= -100.0 {
+            -144.0
+        } else {
+            airplay_db.clamp(-30.0, 0.0) * self.volume_range_db / 30.0
         }
     }
 
@@ -60,7 +83,7 @@ impl Player {
     fn replace(&self, owner: u64, stream: Stream) {
         stream
             .playout()
-            .set_volume(*self.volume_db.lock().unwrap_or_else(|e| e.into_inner()));
+            .set_volume(self.output_db(*self.volume_db.lock().unwrap_or_else(|e| e.into_inner())));
         if let Some((old, _)) = self.lock().replace((owner, stream))
             && old != owner
         {
@@ -84,7 +107,8 @@ impl Player {
 
     fn set_volume(&self, owner: u64, db: f32) {
         *self.volume_db.lock().unwrap_or_else(|e| e.into_inner()) = db;
-        self.with(owner, |s| s.playout().set_volume(db));
+        let out = self.output_db(db);
+        self.with(owner, |s| s.playout().set_volume(out));
     }
 
     #[cfg(test)]
@@ -126,6 +150,10 @@ pub struct Media {
     /// Куда пересылать канал MRP (поток 130).
     mrp_bridge: Option<SocketAddr>,
     mrp: Option<JoinHandle<()>>,
+    /// Адреса отправителя из `timingPeerInfo`.
+    sender_addrs: Vec<IpAddr>,
+    /// В сессии есть другие приёмники (мультирум).
+    grouped: bool,
 }
 
 impl Media {
@@ -149,6 +177,8 @@ impl Media {
             rc_only: false,
             mrp_bridge: ctx.mrp_bridge,
             mrp: None,
+            sender_addrs: vec![remote.to_canonical()],
+            grouped: false,
         }
     }
 
@@ -188,6 +218,10 @@ impl Media {
             ("FLUSH", _) => ok(),
             ("SETPEERS", _) | ("SETPEERSX", _) => {
                 let peers = parse_peers(&req.body);
+                let grouped = other_receivers(&req.body, &self.sender_addrs) > 0;
+                self.grouped = grouped;
+                self.player
+                    .with(self.id, |s| s.playout().set_grouped(grouped));
                 self.player.time.set_peers(peers);
                 ok()
             }
@@ -211,7 +245,9 @@ impl Media {
             ("TEARDOWN", _) => {
                 let streams_only = plist_dict(&req.body).is_some_and(|d| d.contains_key("streams"));
                 self.player.release(self.id);
-                self.anchor = None;
+                if self.anchor.take().is_some_and(|a| a.playing) {
+                    self.player.events.playing(false);
+                }
                 if !streams_only {
                     if let Some(events) = self.events.take() {
                         events.abort();
@@ -282,6 +318,9 @@ impl Media {
         }
         if timing == "PTP" {
             if let Some(info) = body.get("timingPeerInfo").and_then(Value::as_dictionary) {
+                // Адреса самого отправителя: в SETPEERS они не «другие приёмники».
+                self.sender_addrs = addresses(info);
+                self.sender_addrs.push(self.remote);
                 self.player.time.set_peers(addresses(info));
             }
             let ip = self.local.to_string();
@@ -503,6 +542,7 @@ impl Media {
                         );
                     }
                     self.anchor = None;
+                    stream.playout().set_grouped(self.grouped);
                     self.player.replace(self.id, stream);
                 }
                 130 => self.setup_remote_control(s, &mut r)?,
@@ -574,6 +614,9 @@ impl Media {
             },
         };
         debug!(?anchor, rate, "SETRATEANCHORTIME");
+        if self.anchor.is_none_or(|a| a.playing != anchor.playing) {
+            self.player.events.playing(anchor.playing);
+        }
         self.anchor = Some(anchor);
         self.player
             .with(self.id, |s| s.playout().set_anchor(anchor));
@@ -591,7 +634,24 @@ impl Media {
             .with(self.id, |s| s.playout().flush(from, until as u32));
     }
 
+    /// Громкость и позиция (`text/parameters`), метаданные (DMAP) и
+    /// обложка (картинка).
     fn set_parameter(&mut self, req: &Request) {
+        let events = &self.player.events;
+        let ct = req.headers.get("Content-Type").unwrap_or("text/parameters");
+        if ct.starts_with("application/x-dmap-tagged") {
+            let m = Metadata::from_dmap(&req.body);
+            debug!(?m, "метаданные");
+            events.metadata(&m);
+            return;
+        }
+        if ct.starts_with("image") {
+            debug!(ct, len = req.body.len(), "обложка");
+            if !req.body.is_empty() {
+                events.artwork(ct, &req.body);
+            }
+            return;
+        }
         let text = String::from_utf8_lossy(&req.body);
         for line in text.lines() {
             if let Some(v) = line.strip_prefix("volume:")
@@ -599,6 +659,9 @@ impl Media {
             {
                 info!(db, "громкость");
                 self.player.set_volume(self.id, db);
+                events.volume(db);
+            } else if let Some(p) = line.strip_prefix("progress:").and_then(Progress::parse) {
+                events.progress(p);
             }
         }
     }
@@ -708,6 +771,32 @@ fn addresses(d: &Dictionary) -> Vec<IpAddr> {
         .collect()
 }
 
+/// Сколько в SETPEERS/SETPEERSX приёмников, кроме нас и отправителя.
+/// SETPEERS — плоский список адресов, SETPEERSX — участник на словарь.
+fn other_receivers(body: &[u8], sender: &[IpAddr]) -> usize {
+    let Ok(Value::Array(items)) = plist::from_bytes::<Value>(body) else {
+        return 0;
+    };
+    let local: Vec<IpAddr> = if_addrs::get_if_addrs()
+        .map(|a| a.into_iter().map(|i| i.ip().to_canonical()).collect())
+        .unwrap_or_default();
+    let known = |ip: &IpAddr| {
+        let ip = ip.to_canonical();
+        sender.contains(&ip) || local.contains(&ip) || ip.is_loopback()
+    };
+    items
+        .iter()
+        .filter(|item| match item {
+            Value::String(s) => s.parse::<IpAddr>().is_ok_and(|ip| !known(&ip)),
+            Value::Dictionary(d) => {
+                let addrs = addresses(d);
+                !addrs.is_empty() && !addrs.iter().any(known)
+            }
+            _ => false,
+        })
+        .count()
+}
+
 /// SETPEERS — массив адресов, SETPEERSX — массив словарей с `Addresses`.
 fn parse_peers(body: &[u8]) -> Vec<IpAddr> {
     let Ok(Value::Array(items)) = plist::from_bytes::<Value>(body) else {
@@ -722,4 +811,57 @@ fn parse_peers(body: &[u8]) -> Vec<IpAddr> {
         }
     }
     peers
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn plist(v: Value) -> Vec<u8> {
+        let mut out = Vec::new();
+        v.to_writer_binary(&mut out).unwrap();
+        out
+    }
+
+    #[test]
+    fn other_receivers_exclude_sender_and_self() {
+        let sender: Vec<IpAddr> =
+            vec!["192.168.1.10".parse().unwrap(), "fd00::10".parse().unwrap()];
+        let flat = |a: &[&str]| plist(Value::Array(a.iter().map(|s| (*s).into()).collect()));
+        assert_eq!(
+            other_receivers(&flat(&["192.168.1.10", "fd00::10", "127.0.0.1"]), &sender),
+            0
+        );
+        assert_eq!(
+            other_receivers(&flat(&["192.168.1.10", "192.168.1.20"]), &sender),
+            1
+        );
+
+        let peer = |a: &[&str]| {
+            let mut d = Dictionary::new();
+            d.insert(
+                "Addresses".into(),
+                Value::Array(a.iter().map(|s| (*s).into()).collect()),
+            );
+            Value::Dictionary(d)
+        };
+        let x = plist(Value::Array(vec![
+            peer(&["192.168.1.10", "fe80::1"]),
+            peer(&["192.168.1.30"]),
+        ]));
+        assert_eq!(other_receivers(&x, &sender), 1);
+        assert_eq!(other_receivers(b"garbage", &sender), 0);
+    }
+
+    #[test]
+    fn volume_scale() {
+        let mut p = Player::new(audio_stream::Config::default(), TimeSync::idle(1));
+        assert_eq!(p.output_db(-15.0), -15.0);
+        p.volume_range_db = 60.0;
+        assert_eq!(p.output_db(-15.0), -30.0);
+        assert_eq!(p.output_db(-144.0), -144.0);
+        assert_eq!(p.output_db(0.0), 0.0);
+        p.apply_volume = false;
+        assert_eq!(p.output_db(-15.0), 0.0);
+    }
 }

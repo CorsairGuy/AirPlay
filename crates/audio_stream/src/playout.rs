@@ -35,6 +35,13 @@ pub struct Config {
     pub fallback_latency: Duration,
     /// Свой вывод вместо `device`.
     pub sink: Option<audio::SinkFactory>,
+    /// Сдвиг момента воспроизведения, нс: меньше нуля — играть раньше
+    /// (компенсирует задержку после звуковой карты), больше — позже. Как
+    /// `audio_backend_latency_offset_in_seconds` в shairport-sync.
+    pub latency_offset_ns: i64,
+    /// Тот же сдвиг, когда в сессии есть другие приёмники (мультирум);
+    /// `None` — как `latency_offset_ns`.
+    pub group_latency_offset_ns: Option<i64>,
 }
 
 impl Default for Config {
@@ -44,6 +51,8 @@ impl Default for Config {
             output_latency: Duration::from_millis(100),
             fallback_latency: Duration::from_millis(250),
             sink: None,
+            latency_offset_ns: 0,
+            group_latency_offset_ns: None,
         }
     }
 }
@@ -89,6 +98,8 @@ struct State {
     /// Формат из SETUP (realtime); буферизованный поток сообщает его в SSRC.
     format: Option<Format>,
     volume_db: f32,
+    /// Действующий сдвиг воспроизведения, нс.
+    latency_offset_ns: i64,
     /// Растёт при перемотке и смене якоря: поток вывода начинает заново.
     epoch: u64,
     stopped: bool,
@@ -96,6 +107,7 @@ struct State {
 
 pub struct Playout {
     shared: Arc<(Mutex<State>, Condvar)>,
+    offsets: (i64, Option<i64>),
 }
 
 impl Playout {
@@ -103,18 +115,20 @@ impl Playout {
         let shared = Arc::new((
             Mutex::new(State {
                 format,
+                latency_offset_ns: cfg.latency_offset_ns,
                 ..State::default()
             }),
             Condvar::new(),
         ));
         let thread_shared = shared.clone();
+        let offsets = (cfg.latency_offset_ns, cfg.group_latency_offset_ns);
         let spawned = std::thread::Builder::new()
             .name("playout".into())
             .spawn(move || Output::new(cfg, time, thread_shared).run());
         if let Err(e) = spawned {
             warn!("поток вывода не запущен: {e}");
         }
-        Playout { shared }
+        Playout { shared, offsets }
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -211,6 +225,20 @@ impl Playout {
 
     pub fn set_volume(&self, db: f32) {
         self.lock().volume_db = db;
+    }
+
+    /// В сессии есть другие приёмники: сдвиг для мультирума.
+    pub fn set_grouped(&self, grouped: bool) {
+        let (solo, group) = self.offsets;
+        let offset = if grouped { group.unwrap_or(solo) } else { solo };
+        let mut s = self.lock();
+        if s.latency_offset_ns != offset {
+            info!(
+                offset_ms = offset / 1_000_000,
+                grouped, "сдвиг воспроизведения"
+            );
+            s.latency_offset_ns = offset;
+        }
     }
 
     pub fn stop(&self) {
@@ -326,7 +354,7 @@ impl Output {
         let anchor_local = match offset {
             Some(offset) => anchor.network_ns as i64 - offset,
             None => s.fallback_local_ns + self.cfg.fallback_latency.as_nanos() as i64,
-        };
+        } + s.latency_offset_ns;
         let due = anchor_ext + (heard_at - anchor_local) * rate as i64 / 1_000_000_000;
 
         let cursor = *self.cursor.get_or_insert_with(|| {

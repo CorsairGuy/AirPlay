@@ -53,6 +53,18 @@ const USAGE: &str = "\
   --buffer МС     буфер звуковой карты, мс (по умолчанию 100; меньше —
                   быстрее отклик, больше — устойчивее на слабом железе)
   --latency МС    задержка, если часов отправителя нет (по умолчанию 250)
+  --latency-offset МС
+                  сдвиг воспроизведения: меньше нуля — раньше (задержка после
+                  звуковой карты), больше — позже (по умолчанию 0)
+  --group-latency-offset МС
+                  тот же сдвиг, когда в сессии есть другие приёмники
+  --volume-range ДБ
+                  на сколько дБ растянуть ползунок громкости (по умолчанию 30)
+  --ignore-volume громкость не менять, только сообщать (её ведёт внешний микшер)
+  --source-version В
+                  версия AirPlay в /info и Bonjour (по умолчанию 366.0)
+  --enclosure-color Ц
+                  цвет корпуса для значка в iOS: 1 — белый, 2 — чёрный
 
 Подробность логов задаёт RUST_LOG, например RUST_LOG=debug.";
 
@@ -78,6 +90,11 @@ fn parse_serve(args: &[String]) -> Result<serve::Options, String> {
         mirror: None,
         remote: Default::default(),
         mrp_bridge: None,
+        events: std::sync::Arc::new(airplay::events::NoEvents),
+        volume_range_db: 30.0,
+        apply_volume: true,
+        source_version: "366.0".into(),
+        enclosure_color: None,
         display: device::Display {
             width: 1920,
             height: 1080,
@@ -108,6 +125,23 @@ fn parse_serve(args: &[String]) -> Result<serve::Options, String> {
             "--model" => opts.model = value()?,
             "--no-mdns" => opts.mdns = false,
             "--require-pin" => opts.require_pin = true,
+            "--source-version" => opts.source_version = value()?,
+            "--enclosure-color" => opts.enclosure_color = Some(value()?),
+            "--volume-range" => {
+                opts.volume_range_db = value()?
+                    .parse()
+                    .ok()
+                    .filter(|v: &f32| (1.0..=144.0).contains(v))
+                    .ok_or("--volume-range: нужно число дБ от 1 до 144".to_string())?
+            }
+            "--ignore-volume" => opts.apply_volume = false,
+            "--latency-offset" => {
+                opts.audio.latency_offset_ns = signed_ms(&value()?, "--latency-offset")?
+            }
+            "--group-latency-offset" => {
+                opts.audio.group_latency_offset_ns =
+                    Some(signed_ms(&value()?, "--group-latency-offset")?)
+            }
             "--mrp-bridge" => {
                 opts.mrp_bridge = Some(value()?.parse().map_err(|_| {
                     "--mrp-bridge: нужен адрес, например 127.0.0.1:18902".to_string()
@@ -197,6 +231,13 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+/// Миллисекунды со знаком в наносекунды.
+fn signed_ms(v: &str, name: &str) -> Result<i64, String> {
+    v.parse::<i64>()
+        .map(|ms| ms * 1_000_000)
+        .map_err(|_| format!("{name}: нужно число миллисекунд, можно отрицательное"))
 }
 
 fn parse_display(v: &str) -> Result<device::Display, String> {

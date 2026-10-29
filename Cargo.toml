@@ -57,6 +57,7 @@ libloading = "0.8"
 cpal = "0.18"
 subtle = "2"
 socket2 = "0.6"
+if-addrs = "0.15"
 ffmpeg-next = { version = "9", default-features = false, features = ["codec", "format"] }
 
 [workspace.lints.rust]
