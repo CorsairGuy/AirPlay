@@ -75,6 +75,12 @@ pub struct DeviceInfo {
     pub source_version: String,
     /// Экран для зеркалирования; без него iOS не предлагает «Повтор экрана».
     pub display: Option<Display>,
+    /// `playbackCapabilities.supportsUIForAudioOnlyContent`: iPhone
+    /// показывает для приёмника карточку «Сейчас играет» (нужен канал MRP).
+    pub audio_only_ui: bool,
+    /// `deviceEnclosureColor`: цвет корпуса для значка в iOS, например «1»
+    /// — белый, «2» — чёрный (как у HomePod).
+    pub enclosure_color: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,11 +125,25 @@ impl DeviceInfo {
         d.insert("name".into(), self.name.clone().into());
         d.insert("model".into(), self.model.clone().into());
         d.insert("pi".into(), self.pairing_id.clone().into());
+        // Те же группа и роль, что в TXT: с `igl`/`gcgl` = 0 iPhone не даёт
+        // нажать кнопку устройств в карточке (проверено на станции).
+        d.insert("psi".into(), self.pairing_id.clone().into());
+        d.insert("gid".into(), self.pairing_id.clone().into());
+        d.insert("igl".into(), true.into());
+        d.insert("gcgl".into(), true.into());
         d.insert("pk".into(), Value::Data(self.public_key.to_vec()));
         d.insert("protocolVersion".into(), Self::PROTOCOL_VERSION.into());
         d.insert("sourceVersion".into(), self.source_version.clone().into());
         d.insert("keepAliveLowPower".into(), true.into());
         d.insert("keepAliveSendStatsAsBody".into(), true.into());
+        if self.audio_only_ui {
+            let mut caps = Dictionary::new();
+            caps.insert("supportsUIForAudioOnlyContent".into(), true.into());
+            d.insert("playbackCapabilities".into(), caps.into());
+        }
+        if let Some(color) = &self.enclosure_color {
+            d.insert("deviceEnclosureColor".into(), color.clone().into());
+        }
         if let Some(display) = self.display {
             let mut s = Dictionary::new();
             s.insert("widthPixels".into(), Value::Integer(display.width.into()));
@@ -206,6 +226,8 @@ mod tests {
             public_key: [9; 32],
             source_version: "366.0".into(),
             display: None,
+            audio_only_ui: false,
+            enclosure_color: None,
         }
     }
 
@@ -222,6 +244,9 @@ mod tests {
         assert_eq!(d["deviceID"].as_string(), Some("02:11:22:33:44:55"));
         assert_eq!(d["features"].as_signed_integer(), Some(0x1C340405D4A00));
         assert_eq!(d["pk"].as_data(), Some(&[9u8; 32][..]));
+        assert_eq!(d["psi"].as_string(), d["pi"].as_string());
+        assert_eq!(d["igl"].as_boolean(), Some(true));
+        assert_eq!(d["gcgl"].as_boolean(), Some(true));
     }
 
     #[test]

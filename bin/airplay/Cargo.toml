@@ -36,6 +36,7 @@ tracing-subscriber.workspace = true
 rand.workspace = true
 sha2.workspace = true
 hex.workspace = true
+if-addrs.workspace = true
 
 [features]
 # Звук (AAC-ELD) и видео (H.264/H.265) зеркалирования через libavcodec.

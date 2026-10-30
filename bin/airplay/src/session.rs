@@ -16,7 +16,6 @@ use tracing::{debug, info, warn};
 
 use crate::media::{Media, Player};
 
-pub const SERVER: &str = "AirTunes/366.0";
 const PUBLIC: &str = "ANNOUNCE, SETUP, RECORD, PAUSE, FLUSH, TEARDOWN, OPTIONS, GET_PARAMETER, SET_PARAMETER, POST, GET";
 pub(crate) const BPLIST: &str = "application/x-apple-binary-plist";
 pub(crate) const OCTETS: &str = "application/octet-stream";
@@ -130,7 +129,10 @@ impl Session {
                 return Ok(());
             };
             let (mut resp, keys) = self.handle(&req);
-            resp.headers.insert("Server", SERVER);
+            resp.headers.insert(
+                "Server",
+                format!("AirTunes/{}", self.ctx.device.source_version),
+            );
             let mut bytes = Vec::new();
             resp.encode(&mut bytes);
             match &mut self.channel {
@@ -322,6 +324,8 @@ mod tests {
                 public_key: identity.public_key(),
                 source_version: "366.0".into(),
                 display: None,
+                audio_only_ui: false,
+                enclosure_color: None,
             },
             identity,
             store: Box::new(MemoryStore::default()),
@@ -801,6 +805,111 @@ mod tests {
             ch.open(&mut sealed, &mut opened).unwrap();
         }
         assert_eq!(opened, b"pong");
+    }
+
+    #[derive(Default)]
+    struct EventLog(std::sync::Mutex<Vec<String>>);
+
+    impl crate::events::Events for EventLog {
+        fn volume(&self, db: f32) {
+            self.0.lock().unwrap().push(format!("volume {db}"));
+        }
+        fn playing(&self, playing: bool) {
+            self.0.lock().unwrap().push(format!("playing {playing}"));
+        }
+        fn metadata(&self, m: &crate::events::Metadata) {
+            let title = m.title.clone().unwrap_or_default();
+            self.0.lock().unwrap().push(format!("title {title}"));
+        }
+        fn artwork(&self, mime: &str, data: &[u8]) {
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("artwork {mime} {}", data.len()));
+        }
+        fn progress(&self, p: crate::events::Progress) {
+            self.0.lock().unwrap().push(format!(
+                "progress {}/{}",
+                p.position.as_secs(),
+                p.duration.as_secs()
+            ));
+        }
+    }
+
+    /// SET_PARAMETER и SETRATEANCHORTIME доходят до Events; громкость
+    /// сообщается, но (с apply_volume = false) не применяется.
+    #[test]
+    fn events_from_sender() {
+        let events = Arc::new(EventLog::default());
+        let mut ctx = ctx();
+        {
+            let player = Arc::get_mut(&mut Arc::get_mut(&mut ctx).unwrap().player).unwrap();
+            player.events = events.clone();
+            player.apply_volume = false;
+        }
+        let mut c = Client::new(ctx);
+        let text = [("Content-Type", "text/parameters")];
+        assert_eq!(
+            c.call(
+                "SET_PARAMETER",
+                "rtsp://x/1",
+                &text,
+                b"volume: -15.0\r\n".to_vec()
+            )
+            .status,
+            200
+        );
+        assert_eq!(
+            c.call("GET_PARAMETER", "rtsp://x/1", &[], b"volume\r\n".to_vec())
+                .body,
+            b"volume: -15.000000\r\n"
+        );
+        c.call(
+            "SET_PARAMETER",
+            "rtsp://x/1",
+            &text,
+            b"progress: 0/88200/441000\r\n".to_vec(),
+        );
+        let mut dmap = b"mlit".to_vec();
+        dmap.extend_from_slice(&12u32.to_be_bytes());
+        dmap.extend_from_slice(b"minm");
+        dmap.extend_from_slice(&4u32.to_be_bytes());
+        dmap.extend_from_slice(b"Song");
+        c.call(
+            "SET_PARAMETER",
+            "rtsp://x/1",
+            &[("Content-Type", "application/x-dmap-tagged")],
+            dmap,
+        );
+        c.call(
+            "SET_PARAMETER",
+            "rtsp://x/1",
+            &[("Content-Type", "image/jpeg")],
+            vec![0xFF, 0xD8, 0xFF],
+        );
+
+        let mut d = plist::Dictionary::new();
+        d.insert("rate".into(), plist::Value::Real(1.0));
+        d.insert("rtpTime".into(), plist::Value::Integer(1.into()));
+        d.insert("networkTimeSecs".into(), plist::Value::Integer(1.into()));
+        let mut body = Vec::new();
+        plist::Value::Dictionary(d)
+            .to_writer_binary(&mut body)
+            .unwrap();
+        c.call("SETRATEANCHORTIME", "rtsp://x/1", &[], body);
+        c.call("TEARDOWN", "rtsp://x/1", &[], Vec::new());
+
+        assert_eq!(
+            *events.0.lock().unwrap(),
+            [
+                "volume -15",
+                "progress 2/10",
+                "title Song",
+                "artwork image/jpeg 3",
+                "playing true",
+                "playing false"
+            ]
+        );
     }
 
     #[test]

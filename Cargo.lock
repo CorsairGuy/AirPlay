@@ -54,6 +54,7 @@ dependencies = [
  "ap_rtsp",
  "ap_video",
  "hex",
+ "if-addrs",
  "mediaremote",
  "mediaserver",
  "plist",
