@@ -148,7 +148,7 @@ pub struct Media {
     /// нет, команды через него не шлём.
     rc_only: bool,
     /// Куда пересылать канал MRP (поток 130).
-    mrp_bridge: Option<SocketAddr>,
+    mrp_service: Option<remote::MrpService>,
     mrp: Option<JoinHandle<()>>,
     /// Адреса отправителя из `timingPeerInfo`.
     sender_addrs: Vec<IpAddr>,
@@ -175,7 +175,7 @@ impl Media {
             tasks: Vec::new(),
             control: ctx.remote.clone(),
             rc_only: false,
-            mrp_bridge: ctx.mrp_bridge,
+            mrp_service: ctx.mrp.clone(),
             mrp: None,
             sender_addrs: vec![remote.to_canonical()],
             grouped: false,
@@ -565,7 +565,7 @@ impl Media {
     fn setup_remote_control(&mut self, s: &Dictionary, r: &mut Dictionary) -> Result<(), String> {
         r.insert("streamID".into(), Value::Integer(1.into()));
         let seed = uint(s, "seed");
-        let (Some(seed), Some(backend)) = (seed, self.mrp_bridge) else {
+        let (Some(seed), Some(service)) = (seed, self.mrp_service.clone()) else {
             debug!(seed = seed.is_some(), "MRP: логическая регистрация");
             return Ok(());
         };
@@ -579,9 +579,9 @@ impl Media {
             listener,
             self.remote,
             ControlKeys::accessory_data(shared, seed),
-            backend,
+            service,
         )));
-        info!(port, %backend, "канал MRP");
+        info!(port, "канал MRP");
         r.insert("dataPort".into(), Value::Integer(port.into()));
         Ok(())
     }

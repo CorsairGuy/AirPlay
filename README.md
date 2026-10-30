@@ -11,7 +11,7 @@
 | `bin/airplay` | `airplay` | демон (`airplay serve`) и утилита управления (`airplay status`, `list`, `send`…) в одном бинарнике |
 | `services/timesync` | `timesync` | единые часы PTP/NTP |
 | `services/mediaserver` | `mediaserver` | конвейеры звука и видео |
-| `services/mediaremote` | `mediaremote` | «Сейчас играет», пульт |
+| `services/mediaremote` | `mediaremote` | карточка «Сейчас играет», пульт и громкость по MRP |
 | `crates/<имя>` | `ap_<имя>` | библиотеки протоколов и медиа |
 
 Библиотеки называются `ap_<имя>`, а в коде подключаются без префикса: `use rtsp::…`. По умолчанию все службы работают в одном процессе `airplay`.
@@ -55,9 +55,11 @@ sudo RUST_LOG=info ./target/release/airplay serve --name "airplay"
 
 Программа, которая встраивает приёмник, получает `events::Events` в `serve::Options::events`: громкость с iPhone, игру и паузу, метаданные трека (DMAP: название, исполнитель, альбом, жанр, длительность), обложку и позицию. Так строится MPRIS, своя карточка или экран.
 
-### Пульт
+### Пульт и карточка «Сейчас играет»
 
-Программа, которая встраивает приёмник, управляет отправителем через `remote::Remote` в `serve::Options`: play, pause, next, previous, перемотка и громкость уходят plist-ом `sendMediaRemoteCommand` по каналу событий (DACP в AirPlay 2 не работает). Канал MediaRemote (поток 130) расшифровывается и пересылается по TCP в службу MRP: `--mrp-bridge 127.0.0.1:18902`. Сам протокол MRP (карточка «Сейчас играет» на iPhone) разбирает она.
+Программа, которая встраивает приёмник, управляет отправителем через `remote::Remote` в `serve::Options`: play, pause, next, previous, перемотка и громкость уходят plist-ом `sendMediaRemoteCommand` по каналу событий (DACP в AirPlay 2 не работает).
+
+`--mrp` включает карточку самого приёмника, как у HomePod: по каналу MediaRemote (поток 130) iPhone и другие контроллеры видят трек, обложку и позицию текущего отправителя и управляют им (кнопки, перемотка, громкость). Протокол — в `crates/mrp` (кадры канала, protobuf, сообщения; номера полей генерирует `crates/mrp/tools/schema.py` из описаний pyatv в `crates/mrp/proto`), обработка запросов — в службе `mediaremote`. Сообщения и поля те же, что у airplay_mrp на станции, проверенные на iPhone. `--mrp-bridge 127.0.0.1:18902` вместо этого пересылает расшифрованный канал в свою службу MRP по TCP (на станции карточку собирает airplay_mrp из своих источников).
 
 ### Зеркалирование экрана
 
@@ -75,12 +77,12 @@ sudo RUST_LOG=info ./target/release/airplay serve --name "airplay"
 
 ```sh
 cargo test --workspace
-# независимый клиент: криптография и сопряжение pyatv против живого сервера
+# независимый клиент: криптография, сопряжение и MRP pyatv против живого сервера
 pip install pyatv "srptools==1.0.1"
-cargo run -p airplay -- serve --port 7123 --pin 1234 --no-mdns &
+cargo run -p airplay -- serve --port 7123 --pin 1234 --no-mdns --mrp --audio null &
 python tests/interop/pyatv_client.py 127.0.0.1 7123 1234
 ```
 
 ## Лицензия
 
-GPL-3.0-or-later: приём зеркалирования и FairPlay основаны на подходе UxPlay (GPL-3.0).
+GPL-3.0-or-later: приём зеркалирования и FairPlay основаны на подходе UxPlay (GPL-3.0). Описания MRP в `crates/mrp/proto` взяты из pyatv (MIT, `crates/mrp/proto/LICENSE-pyatv.md`).

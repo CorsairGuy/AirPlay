@@ -37,8 +37,8 @@ pub struct Context {
     pub mirror: Option<mirror::VideoSinkFactory>,
     /// Команды отправителю.
     pub remote: crate::remote::Remote,
-    /// Служба MRP, куда пересылается канал потока 130.
-    pub mrp_bridge: Option<SocketAddr>,
+    /// Кто разбирает канал потока 130; `None` — поток только регистрируется.
+    pub mrp: Option<crate::remote::MrpService>,
 }
 
 impl Context {
@@ -335,7 +335,7 @@ mod tests {
             port: 7000,
             mirror: None,
             remote: Default::default(),
-            mrp_bridge: None,
+            mrp: None,
             player: Arc::new(Player::new(
                 audio_stream::Config {
                     device: "null".into(),
@@ -683,7 +683,9 @@ mod tests {
         let mut ctx = ctx();
         {
             let c = Arc::get_mut(&mut ctx).unwrap();
-            c.mrp_bridge = Some(backend.local_addr().unwrap());
+            c.mrp = Some(crate::remote::MrpService::Bridge(
+                backend.local_addr().unwrap(),
+            ));
             c.remote = remote.clone();
         }
         let mut c = Client::new(ctx);
@@ -805,6 +807,125 @@ mod tests {
             ch.open(&mut sealed, &mut opened).unwrap();
         }
         assert_eq!(opened, b"pong");
+    }
+
+    /// Карточка приёмника: MRP по шифрованному каналу потока 130.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn card_over_stream_130() {
+        use mrp::frame::{self, Decoder, Frame};
+        use mrp::schema::{field as f, kind};
+        use plist::{Dictionary, Value};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let mut ctx = ctx();
+        let card = {
+            let c = Arc::get_mut(&mut ctx).unwrap();
+            let card = crate::card::Card::new(
+                crate::card::Card::device(&c.device),
+                c.remote.clone(),
+                Arc::new(crate::events::NoEvents),
+            );
+            c.mrp = Some(crate::remote::MrpService::Card(card.clone()));
+            card
+        };
+        let mut c = Client::new(ctx);
+        let mut setup = ControllerSetup::new(Identity::from_seed("ctl", &[7; 32]), "", true);
+        let hkp = [("X-Apple-HKP", "4")];
+        let m2 = c.call("POST", "/pair-setup", &hkp, setup.m1()).body;
+        let m4 = c
+            .call("POST", "/pair-setup", &hkp, setup.m3(&m2).unwrap())
+            .body;
+        c.encrypt(setup.check_m4(&m4).unwrap().unwrap());
+        let shared = setup.session_key().unwrap().to_vec();
+        let to_plist = |d: Dictionary| {
+            let mut out = Vec::new();
+            Value::Dictionary(d).to_writer_binary(&mut out).unwrap();
+            out
+        };
+        assert_eq!(
+            c.call("SETUP", "rtsp://x/1", &[], to_plist(Dictionary::new()))
+                .status,
+            200
+        );
+        let seed = 42u64;
+        let mut s = Dictionary::new();
+        s.insert("type".into(), Value::Integer(130.into()));
+        s.insert("seed".into(), Value::Integer(seed.into()));
+        let mut d = Dictionary::new();
+        d.insert("streams".into(), Value::Array(vec![s.into()]));
+        let r = c.call("SETUP", "rtsp://x/1", &[], to_plist(d));
+        let r = plist::from_bytes::<Value>(&r.body).unwrap();
+        let port = r.as_dictionary().unwrap()["streams"].as_array().unwrap()[0]
+            .as_dictionary()
+            .unwrap()["dataPort"]
+            .as_unsigned_integer()
+            .unwrap() as u16;
+
+        let mut conn = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        let mut ch = Channel::new(ControlKeys::controller_data(&shared, seed));
+        let send = |ch: &mut Channel, messages: &[mrp::wire::Node]| {
+            let mut out = Vec::new();
+            ch.seal(&frame::sync(1, messages), &mut out);
+            out
+        };
+        let info = mrp::messages::envelope(
+            kind::DEVICE_INFO_MESSAGE,
+            &mrp::wire::Node::default(),
+            Some("1"),
+        );
+        let subscribe = mrp::messages::envelope(
+            kind::CLIENT_UPDATES_CONFIG_MESSAGE,
+            &mrp::wire::Node::default(),
+            Some("2"),
+        );
+        conn.write_all(&send(&mut ch, &[info, subscribe]))
+            .await
+            .unwrap();
+
+        let (mut sealed, mut plain, mut decoder) = (Vec::new(), Vec::new(), Decoder::new());
+        let mut next = async || loop {
+            while let Some(frame) = decoder.next_frame().unwrap() {
+                if let Frame::Sync { messages, .. } = frame {
+                    return messages;
+                }
+            }
+            if !plain.is_empty() {
+                decoder.push(&plain);
+                plain.clear();
+                continue;
+            }
+            let mut buf = [0u8; 8192];
+            let n = conn.read(&mut buf).await.unwrap();
+            assert!(n > 0, "канал MRP закрыт");
+            sealed.extend_from_slice(&buf[..n]);
+            ch.open(&mut sealed, &mut plain).unwrap();
+        };
+        let m = next().await;
+        let body = m[0].nested(f::ProtocolMessage::deviceInfoMessage).unwrap();
+        assert_eq!(body.string(f::DeviceInfoMessage::name), Some("Тест"));
+
+        // Трек от отправителя — карточка подписанному iPhone.
+        use crate::events::Events;
+        loop {
+            let m = next().await;
+            if m.iter()
+                .any(|m| m.string(f::ProtocolMessage::identifier) == Some("2"))
+            {
+                break;
+            }
+        }
+        card.metadata(&crate::events::Metadata {
+            title: Some("Песня".into()),
+            ..Default::default()
+        });
+        let m = next().await;
+        let state = m[0].nested(f::ProtocolMessage::setStateMessage).unwrap();
+        let queue = state.nested(f::SetStateMessage::playbackQueue).unwrap();
+        let item = queue.nested(f::PlaybackQueue::contentItems).unwrap();
+        let md = item.nested(f::ContentItem::metadata).unwrap();
+        assert_eq!(md.string(f::ContentItemMetadata::title), Some("Песня"));
     }
 
     #[derive(Default)]
