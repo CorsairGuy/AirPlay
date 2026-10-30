@@ -1,5 +1,5 @@
-//! Декодеры звука AirPlay: AAC-LC (буферизованный поток AirPlay 2) и ALAC
-//! (realtime-поток и AirPlay 1). Чистый Rust на symphonia. AAC-ELD (звук
+//! Декодеры звука AirPlay: AAC-LC (буферизованный поток AirPlay 2), ALAC и
+//! несжатый PCM (realtime-поток и AirPlay 1). Чистый Rust на symphonia. AAC-ELD (звук
 //! зеркалирования экрана) и видео H.264/H.265 ([`video`]) — через libavcodec
 //! с фичей `ffmpeg`.
 //!
@@ -36,6 +36,11 @@ pub enum Codec {
     },
     /// AAC-ELD, 480 сэмплов в пакете: звук зеркалирования экрана.
     AacEld,
+    /// Несжатый 16-битный PCM, big-endian (`ct=1`): так шлют отправители
+    /// без кодера, в том числе наш.
+    Pcm {
+        frames_per_packet: u32,
+    },
 }
 
 /// Формат потока. AirPlay 2 сообщает его в SSRC каждого RTP-пакета
@@ -88,7 +93,8 @@ impl Format {
             Codec::AacEld => 480,
             Codec::Alac {
                 frames_per_packet, ..
-            } => frames_per_packet,
+            }
+            | Codec::Pcm { frames_per_packet } => frames_per_packet,
         }
     }
 }
@@ -101,12 +107,20 @@ pub struct Decoder {
 
 enum Inner {
     Symphonia(Box<dyn AudioDecoder>),
+    Pcm,
     #[cfg(feature = "ffmpeg")]
     Ffmpeg(eld::Eld),
 }
 
 impl Decoder {
     pub fn new(format: Format) -> Result<Self, Error> {
+        if let Codec::Pcm { .. } = format.codec {
+            return Ok(Self {
+                format,
+                inner: Inner::Pcm,
+                scratch: Vec::new(),
+            });
+        }
         if format.codec == Codec::AacEld {
             #[cfg(feature = "ffmpeg")]
             return Ok(Self {
@@ -137,7 +151,7 @@ impl Decoder {
                     .for_codec(CODEC_ID_ALAC)
                     .with_extra_data(alac_cookie(format, bit_depth, frames_per_packet).into());
             }
-            Codec::AacEld => unreachable!("разобран выше"),
+            Codec::AacEld | Codec::Pcm { .. } => unreachable!("разобран выше"),
         }
         let inner = symphonia::default::get_codecs()
             .make_audio_decoder(&params, &AudioDecoderOptions::default())
@@ -155,10 +169,9 @@ impl Decoder {
 
     /// Декодирует пакет и дописывает стерео i16 в `out`. Возвращает число кадров.
     pub fn decode(&mut self, packet: &[u8], out: &mut Vec<i16>) -> Result<usize, Error> {
-        // Без фичи ffmpeg вариант один, и clippy предлагает `let`.
-        #[allow(clippy::infallible_destructuring_match)]
         let inner = match &mut self.inner {
             Inner::Symphonia(d) => d,
+            Inner::Pcm => return Ok(pcm(packet, self.format.channels, out)),
             #[cfg(feature = "ffmpeg")]
             Inner::Ffmpeg(d) => return d.decode(packet, out),
         };
@@ -183,10 +196,32 @@ impl Decoder {
     pub fn reset(&mut self) {
         match &mut self.inner {
             Inner::Symphonia(d) => d.reset(),
+            Inner::Pcm => {}
             #[cfg(feature = "ffmpeg")]
             Inner::Ffmpeg(d) => d.reset(),
         }
     }
+}
+
+/// PCM S16BE в стерео i16; лишние байты в конце пакета отбрасываются.
+fn pcm(packet: &[u8], channels: u8, out: &mut Vec<i16>) -> usize {
+    let channels = channels.max(1) as usize;
+    let mut frames = 0;
+    let mut frame = [0i16; 8];
+    for raw in packet.chunks_exact(2 * channels) {
+        let n = channels.min(frame.len());
+        for (i, s) in raw.chunks_exact(2).take(n).enumerate() {
+            frame[i] = i16::from_be_bytes([s[0], s[1]]);
+        }
+        let (l, r) = if channels == 2 {
+            (frame[0], frame[1])
+        } else {
+            downmix(&frame[..n])
+        };
+        out.extend_from_slice(&[l, r]);
+        frames += 1;
+    }
+    frames
 }
 
 /// Сведение в стерео: моно дублируется, у многоканального берём фронт
@@ -318,6 +353,25 @@ mod tests {
         assert_eq!(out.len(), frames * 2);
         assert_eq!(&out[..4], &[0, 0, 10, -10]);
         assert_eq!(out[2 * 351], 3510);
+    }
+
+    #[test]
+    fn pcm_big_endian() {
+        let mut d = Decoder::new(Format {
+            codec: Codec::Pcm {
+                frames_per_packet: 2,
+            },
+            sample_rate: 44100,
+            channels: 2,
+        })
+        .unwrap();
+        let mut out = Vec::new();
+        let n = d.decode(
+            &[0x01, 0x02, 0xff, 0xfe, 0x7f, 0xff, 0x80, 0x00, 0xaa],
+            &mut out,
+        );
+        assert_eq!(n.unwrap(), 2);
+        assert_eq!(out, [0x0102, -2, i16::MAX, i16::MIN]);
     }
 
     #[test]

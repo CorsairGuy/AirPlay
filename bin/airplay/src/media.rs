@@ -698,6 +698,9 @@ fn realtime_format(s: &Dictionary) -> Result<Format, String> {
     let frames = uint(s, "spf").unwrap_or(352) as u32;
     let bits = uint(s, "ss").unwrap_or(16) as u8;
     let codec = match uint(s, "ct").unwrap_or(2) {
+        1 if bits == 16 => Codec::Pcm {
+            frames_per_packet: frames,
+        },
         2 => Codec::Alac {
             bit_depth: bits,
             frames_per_packet: frames,
