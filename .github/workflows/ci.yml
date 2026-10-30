@@ -59,7 +59,7 @@ jobs:
           targets: ${{ matrix.target }}
       - run: cargo check --workspace --target ${{ matrix.target }}
 
-  # Независимая проверка: клиентская криптография pyatv против живого сервера.
+  # Независимая проверка: криптография, сопряжение и MRP pyatv против живого сервера.
   interop:
     runs-on: ubuntu-latest
     steps:
@@ -74,6 +74,6 @@ jobs:
         env:
           AIRPLAY_STATE_DIR: ${{ runner.temp }}/airplay-state
         run: |
-          ./target/debug/airplay serve --port 7123 --pin 1234 --no-mdns &
+          ./target/debug/airplay serve --port 7123 --pin 1234 --no-mdns --mrp --audio null &
           for i in $(seq 1 50); do (echo > /dev/tcp/127.0.0.1/7123) 2>/dev/null && break; sleep 0.1; done
           python tests/interop/pyatv_client.py 127.0.0.1 7123 1234

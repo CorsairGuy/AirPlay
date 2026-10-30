@@ -49,6 +49,7 @@ dependencies = [
  "ap_ipc",
  "ap_mdns",
  "ap_mirror",
+ "ap_mrp",
  "ap_pair",
  "ap_rtp",
  "ap_rtsp",
@@ -202,6 +203,13 @@ dependencies = [
 [[package]]
 name = "ap_mrp"
 version = "0.1.0"
+dependencies = [
+ "hex",
+ "plist",
+ "rand",
+ "sha2",
+ "thiserror 2.0.21",
+]
 
 [[package]]
 name = "ap_pair"
@@ -913,8 +921,10 @@ dependencies = [
 name = "mediaremote"
 version = "0.1.0"
 dependencies = [
- "ap_base",
  "ap_mrp",
+ "rand",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

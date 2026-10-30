@@ -32,9 +32,11 @@ const USAGE: &str = "\
   --model МОДЕЛЬ  модель для iOS (по умолчанию AirPlay)
   --no-mdns       не объявлять себя в Bonjour
   --require-pin   пускать только после сопряжения по PIN (без transient)
+  --mrp           карточка «Сейчас играет» на iPhone: трек, обложка, пульт
+                  и громкость текущего отправителя (MediaRemote, поток 130)
   --mrp-bridge АДРЕС
-                  пересылать канал MediaRemote (поток 130) в службу MRP по
-                  TCP, например 127.0.0.1:18902
+                  вместо этого пересылать канал MediaRemote в свою службу MRP
+                  по TCP, например 127.0.0.1:18902
   --mirror        режим зеркалирования экрана вместо звука AirPlay 2
   --video-dump ПУТЬ
                   писать видео зеркалирования в файл H.264 или H.265 (Annex B);
@@ -89,7 +91,7 @@ fn parse_serve(args: &[String]) -> Result<serve::Options, String> {
         require_pin: false,
         mirror: None,
         remote: Default::default(),
-        mrp_bridge: None,
+        mrp: serve::Mrp::Off,
         events: std::sync::Arc::new(airplay::events::NoEvents),
         volume_range_db: 30.0,
         apply_volume: true,
@@ -142,8 +144,9 @@ fn parse_serve(args: &[String]) -> Result<serve::Options, String> {
                 opts.audio.group_latency_offset_ns =
                     Some(signed_ms(&value()?, "--group-latency-offset")?)
             }
+            "--mrp" => opts.mrp = serve::Mrp::Card,
             "--mrp-bridge" => {
-                opts.mrp_bridge = Some(value()?.parse().map_err(|_| {
+                opts.mrp = serve::Mrp::Bridge(value()?.parse().map_err(|_| {
                     "--mrp-bridge: нужен адрес, например 127.0.0.1:18902".to_string()
                 })?)
             }
