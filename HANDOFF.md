@@ -1,15 +1,15 @@
 # Передача работы (WIP)
 
-Ветка `claude/project-thread-gdvx2x-wip` = PR #10 (`claude/project-thread-gdvx2x`) + два коммита сверху.
+Ветка `claude/project-thread-gdvx2x-wip` = main + WIP-коммит (PCM и эти заметки).
 
 ## Состояние
 
-1. **PR #10** (события приёмника, сдвиги задержки, igl/gcgl в /info) — CI зелёный, ждёт слияния.
+1. **PR #10** (события приёмника, сдвиги задержки, igl/gcgl в /info) — слит.
 2. **Коммит «Карточка „Сейчас играет“ по MRP»** — готов, все проверки проходили
    (fmt, clippy с ffmpeg и без, тесты, кросс-clippy armv7/windows/macos, interop pyatv `mrp()`).
    Состав: `crates/mrp` (кадры, protobuf без кодогенерации, схема из протоколов pyatv,
    `tools/schema.py`), `services/mediaremote` (служба MRP), `bin/airplay/src/card.rs`,
-   флаг `serve --mrp` (и прежний `--mrp-bridge`). После слияния #10 — отдельный PR.
+   флаг `serve --mrp` (и прежний `--mrp-bridge`). Слит как PR #11.
 3. **WIP: перенос airplay_sender со станции** (решение Кирилла: «он уже играл на HomePod»).
    Сделано: приёмник понимает PCM `ct=1` (`Codec::Pcm` в `crates/codec`, `realtime_format`
    в `bin/airplay/src/media.rs`), тест `pcm_big_endian`.
