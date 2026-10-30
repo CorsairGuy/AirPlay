@@ -29,6 +29,7 @@ ipc.workspace = true
 timesync.workspace = true
 mediaserver.workspace = true
 mediaremote.workspace = true
+mrp.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
 tracing.workspace = true

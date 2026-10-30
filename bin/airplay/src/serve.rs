@@ -9,7 +9,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{info, warn};
 
+use crate::card::Card;
 use crate::media::Player;
+use crate::remote::MrpService;
 use crate::session::{Context, Session};
 use crate::state;
 
@@ -30,10 +32,8 @@ pub struct Options {
     pub display: device::Display,
     /// Ручка команд отправителю (play/pause/next, громкость, перемотка).
     pub remote: crate::remote::Remote,
-    /// Служба MRP (например airplay_mrp на 127.0.0.1:18902): туда идёт
-    /// расшифрованный канал потока 130. `None` — поток 130 только
-    /// регистрируется.
-    pub mrp_bridge: Option<std::net::SocketAddr>,
+    /// Кто отвечает iPhone по MRP (поток 130).
+    pub mrp: Mrp,
     /// Что приёмник сообщает наружу (громкость, метаданные, позиция).
     pub events: Arc<dyn crate::events::Events>,
     /// Шкала громкости, дБ (по умолчанию 30, как ползунок iPhone).
@@ -44,6 +44,19 @@ pub struct Options {
     pub source_version: String,
     /// `deviceEnclosureColor` в `/info`.
     pub enclosure_color: Option<String>,
+}
+
+/// MediaRemote: карточка «Сейчас играет» на iPhone.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Mrp {
+    /// Поток 130 только регистрируется, карточки нет.
+    #[default]
+    Off,
+    /// Карточка самого приёмника: трек и пульт текущего отправителя.
+    Card,
+    /// Расшифрованный канал — в службу по TCP (например airplay_mrp на
+    /// станции, 127.0.0.1:18902): карточку собирает она.
+    Bridge(std::net::SocketAddr),
 }
 
 pub async fn run(opts: Options) -> Result<()> {
@@ -69,7 +82,7 @@ pub async fn run(opts: Options) -> Result<()> {
         source_version: opts.source_version,
         display: mirroring.then_some(opts.display),
         // Карточку «Сейчас играет» рисует служба MRP: без неё не обещаем.
-        audio_only_ui: opts.mrp_bridge.is_some(),
+        audio_only_ui: opts.mrp != Mrp::Off,
         enclosure_color: opts.enclosure_color,
     };
 
@@ -97,7 +110,20 @@ pub async fn run(opts: Options) -> Result<()> {
     let mut player = Player::new(opts.audio, time);
     player.volume_range_db = opts.volume_range_db;
     player.apply_volume = opts.apply_volume;
-    player.events = opts.events;
+    let mrp = match opts.mrp {
+        Mrp::Off => None,
+        Mrp::Bridge(addr) => Some(MrpService::Bridge(addr)),
+        Mrp::Card => Some(MrpService::Card(Card::new(
+            Card::device(&device),
+            opts.remote.clone(),
+            opts.events.clone(),
+        ))),
+    };
+    // Карточка узнаёт о треке из тех же событий и передаёт их дальше.
+    player.events = match &mrp {
+        Some(MrpService::Card(card)) => card.clone(),
+        _ => opts.events,
+    };
     let player = Arc::new(player);
 
     let ctx = Arc::new(Context {
@@ -111,7 +137,7 @@ pub async fn run(opts: Options) -> Result<()> {
         port: opts.port,
         mirror: opts.mirror,
         remote: opts.remote,
-        mrp_bridge: opts.mrp_bridge,
+        mrp,
     });
     if opts.mdns {
         let host = format!("airplay-{}", device_id.replace(':', "").to_lowercase());

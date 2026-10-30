@@ -1,12 +1,19 @@
 [package]
 name = "ap_mrp"
-description = "MediaRemote protocol: protobuf-сообщения и туннель через data stream."
+description = "MediaRemote protocol: кадры канала, protobuf и сообщения приёмника."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
+
+[dependencies]
+hex.workspace = true
+plist.workspace = true
+rand.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
 
 [lints]
 workspace = true

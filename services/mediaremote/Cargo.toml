@@ -1,6 +1,6 @@
 [package]
 name = "mediaremote"
-description = "Служба MediaRemote (аналог mediaremoted): «Сейчас играет», пульт."
+description = "Служба MediaRemote (аналог mediaremoted): карточка «Сейчас играет», пульт и громкость."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,8 +9,13 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-base.workspace = true
 mrp.workspace = true
+rand.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true

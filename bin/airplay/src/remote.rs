@@ -4,9 +4,9 @@
 //!   и громкость уходят plist-ом `sendMediaRemoteCommand` по каналу событий
 //!   звукового соединения. DACP для AirPlay 2 не работает: iOS не
 //!   присылает DACP-ID и не публикует `_dacp._tcp`.
-//! - Канал MediaRemote (поток 130): шифрованный канал данных, открытый
-//!   текст которого (протокол MRP) пересылается в отдельную службу по TCP
-//!   ([`bridge`]). Протокол MRP разбирает она.
+//! - Канал MediaRemote (поток 130): шифрованный канал данных с протоколом
+//!   MRP внутри ([`bridge`]). Открытый текст идёт в карточку самого
+//!   приёмника (`card`) или в отдельную службу по TCP.
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
@@ -15,12 +15,22 @@ use crypto::Channel;
 use crypto::kdf::ControlKeys;
 use plist::{Dictionary, Value};
 use rtsp::Request;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
+use crate::card::Card;
 use crate::session::BPLIST;
+
+/// Кто разбирает MRP из потока 130.
+#[derive(Clone)]
+pub enum MrpService {
+    /// Служба по TCP, например airplay_mrp на станции.
+    Bridge(SocketAddr),
+    /// Карточка самого приёмника.
+    Card(Arc<Card>),
+}
 
 /// Команда отправителю.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -160,8 +170,8 @@ pub(crate) fn command_body(command: Command) -> Dictionary {
 }
 
 /// Канал данных потока 130: принимает одно подключение с адреса
-/// отправителя, расшифровывает и пересылает в `backend`, ответы — обратно.
-pub async fn bridge(listener: TcpListener, sender: IpAddr, keys: ControlKeys, backend: SocketAddr) {
+/// отправителя, расшифровывает и отдаёт в `service`, ответы — обратно.
+pub async fn bridge(listener: TcpListener, sender: IpAddr, keys: ControlKeys, service: MrpService) {
     let (client, peer) = match listener.accept().await {
         Ok(c) => c,
         Err(e) => {
@@ -173,25 +183,39 @@ pub async fn bridge(listener: TcpListener, sender: IpAddr, keys: ControlKeys, ba
         warn!(%peer, "MRP: подключение не от отправителя");
         return;
     }
-    let backend_conn = match TcpStream::connect(backend).await {
-        Ok(b) => b,
-        Err(e) => {
-            warn!(%backend, "MRP: служба недоступна: {e}");
-            return;
+    let _ = client.set_nodelay(true);
+    let channel = Channel::new(keys);
+    let result = match service {
+        MrpService::Bridge(backend) => {
+            let conn = match TcpStream::connect(backend).await {
+                Ok(b) => b,
+                Err(e) => {
+                    warn!(%backend, "MRP: служба недоступна: {e}");
+                    return;
+                }
+            };
+            info!(%backend, "канал MRP подключён");
+            let _ = conn.set_nodelay(true);
+            forward(client, conn, channel).await
+        }
+        MrpService::Card(card) => {
+            info!("канал MRP: карточка приёмника");
+            let (ours, theirs) = tokio::io::duplex(64 * 1024);
+            let serving = tokio::spawn(card.serve(theirs));
+            let result = forward(client, ours, channel).await;
+            serving.abort();
+            result
         }
     };
-    info!(%backend, "канал MRP подключён");
-    let _ = client.set_nodelay(true);
-    let _ = backend_conn.set_nodelay(true);
-    match forward(client, backend_conn, Channel::new(keys)).await {
+    match result {
         Ok(()) => info!("канал MRP закрыт"),
         Err(e) => info!("канал MRP закрыт: {e}"),
     }
 }
 
-async fn forward(
+async fn forward<B: AsyncRead + AsyncWrite + Unpin>(
     mut client: TcpStream,
-    mut backend: TcpStream,
+    mut backend: B,
     mut channel: Channel,
 ) -> std::io::Result<()> {
     let mut from_client = vec![0u8; 16 * 1024];
