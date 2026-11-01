@@ -56,6 +56,44 @@ impl Control {
         if !self.remote.send(command) {
             bail!("AirPlay source rejected command")
         }
+        match command {
+            Command::Play => self.feed.send_modify(|feed| feed.set_playing(true)),
+            Command::Pause => self.feed.send_modify(|feed| feed.set_playing(false)),
+            _ => {}
+        }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+    #[tokio::test]
+    async fn accepted_pause_freezes_clock_immediately_and_play_resumes() {
+        let remote = Remote::new();
+        let mut commands = remote.attach(7);
+        let (feed, _) = watch::channel(Feed {
+            playing: true, position: 10.0,
+            position_sampled: Instant::now() - Duration::from_secs(5),
+            ..Default::default()
+        });
+        let control = Control::new(feed.clone(), remote);
+        control.action(2, None).await.unwrap();
+        assert_eq!(commands.recv().await, Some(Command::Pause));
+        let paused = feed.borrow().clone();
+        assert!(!paused.playing);
+        assert!((paused.position - 15.0).abs() < 0.2);
+        assert_eq!(paused.position_at(Instant::now() + Duration::from_secs(30)), paused.position);
+        control.action(1, None).await.unwrap();
+        assert_eq!(commands.recv().await, Some(Command::Play));
+        assert!(feed.borrow().playing);
+    }
+    #[tokio::test]
+    async fn rejected_command_does_not_change_card() {
+        let (feed, _) = watch::channel(Feed::default());
+        let control = Control::new(feed.clone(), Remote::new());
+        assert!(control.action(1, None).await.is_err());
+        assert!(!feed.borrow().playing);
     }
 }

@@ -127,7 +127,7 @@ impl Events for Card {
     }
 
     fn playing(&self, playing: bool) {
-        self.update(|feed| feed.playing = playing);
+        self.update(|feed| feed.set_playing(playing));
         self.inner.playing(playing);
     }
 
@@ -165,6 +165,7 @@ impl Events for Card {
     fn progress(&self, p: Progress) {
         self.update(|feed| {
             feed.position = p.position.as_secs_f64();
+            feed.position_sampled = std::time::Instant::now();
             if !p.duration.is_zero() {
                 feed.duration = Some(p.duration.as_secs_f64());
             }

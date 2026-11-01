@@ -3,7 +3,7 @@ use plist::{Dictionary, Uid, Value};
 use std::{
     io::Cursor,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
 /// Имя устройства. На станции это константа «Станция Мини»; здесь — имя приёмника.
@@ -42,6 +42,7 @@ pub struct Feed {
     pub album: String,
     pub content_id: String,
     pub position: f64,
+    pub position_sampled: Instant,
     pub duration: Option<f64>,
     pub playing: bool,
     pub volume: f32,
@@ -58,12 +59,31 @@ impl Default for Feed {
             album: String::new(),
             content_id: String::new(),
             position: 0.0,
+            position_sampled: Instant::now(),
             duration: None,
             playing: false,
             volume: 0.2,
             control_available: false,
             cover: None,
             route: None,
+        }
+    }
+}
+impl Feed {
+    pub fn position_at(&self, now: Instant) -> f64 {
+        let value = self.position + if self.playing {
+            now.saturating_duration_since(self.position_sampled).as_secs_f64()
+        } else { 0.0 };
+        let value = value.max(0.0);
+        self.duration.filter(|d| d.is_finite() && *d > 0.0)
+            .map_or(value, |duration| value.min(duration))
+    }
+    pub fn set_playing(&mut self, playing: bool) {
+        if self.playing != playing {
+            let now = Instant::now();
+            self.position = self.position_at(now);
+            self.position_sampled = now;
+            self.playing = playing;
         }
     }
 }
@@ -331,7 +351,7 @@ pub fn state(
         md.text(f(m, "title"), &feed.title)
             .text(f(m, "trackArtistName"), &feed.artist)
             .text(f(m, "albumName"), &feed.album)
-            .double(f(m, "elapsedTime"), feed.position.max(0.0))
+            .double(f(m, "elapsedTime"), feed.position_at(Instant::now()))
             .float(f(m, "playbackRate"), if feed.playing { 1.0 } else { 0.0 })
             .float(f(m, "defaultPlaybackRate"), 1.0)
             .double(f(m, "elapsedTimeTimestamp"), cocoa())
