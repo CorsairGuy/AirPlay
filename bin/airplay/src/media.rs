@@ -84,10 +84,16 @@ impl Player {
         stream
             .playout()
             .set_volume(self.output_db(*self.volume_db.lock().unwrap_or_else(|e| e.into_inner())));
+        let realtime = stream.kind == audio_stream::StreamKind::Realtime;
         if let Some((old, _)) = self.lock().replace((owner, stream))
             && old != owner
         {
             info!("новый отправитель, прежний поток остановлен");
+        }
+        // Realtime senders start with SETUP and pause with stream TEARDOWN;
+        // they need not send the buffered stream's SETRATEANCHORTIME.
+        if realtime {
+            self.events.playing(true);
         }
     }
 
@@ -101,7 +107,13 @@ impl Player {
     fn release(&self, owner: u64) {
         let mut active = self.lock();
         if active.as_ref().is_some_and(|(id, _)| *id == owner) {
+            let realtime = active.as_ref().is_some_and(|(_, stream)|
+                stream.kind == audio_stream::StreamKind::Realtime);
             *active = None;
+            drop(active);
+            if realtime {
+                self.events.playing(false);
+            }
         }
     }
 
@@ -844,5 +856,38 @@ mod tests {
         assert_eq!(p.output_db(0.0), 0.0);
         p.apply_volume = false;
         assert_eq!(p.output_db(-15.0), 0.0);
+    }
+}
+
+
+#[cfg(test)]
+mod realtime_state_tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct States(Mutex<Vec<bool>>);
+    impl Events for States {
+        fn playing(&self, value: bool) { self.0.lock().unwrap().push(value); }
+    }
+
+    #[tokio::test]
+    async fn realtime_state_follows_audio_owner_not_controller() {
+        let states = Arc::new(States::default());
+        let mut player = Player::new(audio_stream::Config {
+            device: "null".into(), ..Default::default()
+        }, TimeSync::idle(1));
+        player.events = states.clone();
+        let make_stream = || Stream::realtime(player.audio.clone(),
+            StreamKey::ChaCha([7; 32]), Format {
+                codec: Codec::Pcm { frames_per_packet: 352 }, sample_rate: 44100, channels: 2
+            }, Arc::new(clock::NoTime)).unwrap();
+        player.replace(1, make_stream());
+        player.release(2); // A controller closing must not pause the audio owner.
+        assert_eq!(*states.0.lock().unwrap(), vec![true]);
+        player.release(1);
+        player.release(1); // TEARDOWN followed by Drop is idempotent.
+        assert_eq!(*states.0.lock().unwrap(), vec![true, false]);
+        player.replace(1, make_stream());
+        assert_eq!(*states.0.lock().unwrap(), vec![true, false, true]);
     }
 }

@@ -55,3 +55,5 @@ Original in-process duplex path, no temporary TCP backend. Preserve plaintext MR
 Validation: cargo test --workspace --locked — 128 passed, 0 failed, 0 ignored, no compiler warnings. Ten read-only localhost reconnects received DeviceInfo and state. User confirmed second iPhone opens the card repeatedly and remains connected >=30 seconds. No playback/long soak coverage claimed.
 
 Only isolated Pi diagnostic was used, null audio. Physical Station and Bluetooth untouched. All commits local, no GitHub push. Detailed evidence and backups: outputs/MRP-INTEGRATION-2026-11-01.md and work/mrp-card-investigation-20261101 in the parent Codex workspace.
+
+Realtime state follow-up: media.rs now reports playing on realtime stream replacement and paused when its actual audio owner releases it. Unrelated controller closure and duplicate release do not pause active audio. Buffered anchors unchanged. cargo test -p airplay --locked: 28 passed, 0 failed, no warnings. Live pause/resume UI confirmation pending. No changes to RTP/codec/playout, Station or Bluetooth.
