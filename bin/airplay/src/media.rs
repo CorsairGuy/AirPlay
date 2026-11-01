@@ -80,21 +80,18 @@ impl Player {
         Arc::new(self.time.clone())
     }
 
-    fn replace(&self, owner: u64, stream: Stream) {
+    fn replace(&self, owner: u64, mut stream: Stream) {
         stream
             .playout()
             .set_volume(self.output_db(*self.volume_db.lock().unwrap_or_else(|e| e.into_inner())));
-        let realtime = stream.kind == audio_stream::StreamKind::Realtime;
+        let events = self.events.clone();
+        stream.on_realtime_started(move || events.playing(true));
         if let Some((old, _)) = self.lock().replace((owner, stream))
             && old != owner
         {
             info!("новый отправитель, прежний поток остановлен");
         }
-        // Realtime senders start with SETUP and pause with stream TEARDOWN;
-        // they need not send the buffered stream's SETRATEANCHORTIME.
-        if realtime {
-            self.events.playing(true);
-        }
+
     }
 
     fn with<R>(&self, owner: u64, f: impl FnOnce(&Stream) -> R) -> Option<R> {
@@ -863,31 +860,39 @@ mod tests {
 #[cfg(test)]
 mod realtime_state_tests {
     use super::*;
-
+    use std::time::Duration;
     #[derive(Default)]
     struct States(Mutex<Vec<bool>>);
     impl Events for States {
         fn playing(&self, value: bool) { self.0.lock().unwrap().push(value); }
     }
-
     #[tokio::test]
-    async fn realtime_state_follows_audio_owner_not_controller() {
+    async fn realtime_state_requires_audio_and_respects_owner() {
         let states = Arc::new(States::default());
         let mut player = Player::new(audio_stream::Config {
             device: "null".into(), ..Default::default()
         }, TimeSync::idle(1));
         player.events = states.clone();
-        let make_stream = || Stream::realtime(player.audio.clone(),
-            StreamKey::ChaCha([7; 32]), Format {
-                codec: Codec::Pcm { frames_per_packet: 352 }, sample_rate: 44100, channels: 2
-            }, Arc::new(clock::NoTime)).unwrap();
-        player.replace(1, make_stream());
-        player.release(2); // A controller closing must not pause the audio owner.
+        let stream = Stream::realtime(player.audio.clone(), StreamKey::ChaCha([7; 32]),
+            Format { codec: Codec::Pcm { frames_per_packet: 352 }, sample_rate: 44100, channels: 2 },
+            Arc::new(clock::NoTime)).unwrap();
+        let port = stream.data_port;
+        player.replace(1, stream);
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        socket.send_to(b"invalid", ("127.0.0.1", port)).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert!(states.0.lock().unwrap().is_empty(), "SETUP or invalid data must not announce playing");
+        let packet = rtp::AudioCipher::new(&[7; 32]).seal(&rtp::Header {
+            marker: false, payload_type: 96, seq: 1, timestamp: 0, ssrc: 0
+        }, &[0; 1408], 1);
+        socket.send_to(&packet, ("127.0.0.1", port)).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while states.0.lock().unwrap().is_empty() { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        player.release(2);
         assert_eq!(*states.0.lock().unwrap(), vec![true]);
         player.release(1);
-        player.release(1); // TEARDOWN followed by Drop is idempotent.
+        player.release(1);
         assert_eq!(*states.0.lock().unwrap(), vec![true, false]);
-        player.replace(1, make_stream());
-        assert_eq!(*states.0.lock().unwrap(), vec![true, false, true]);
     }
 }

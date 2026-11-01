@@ -13,6 +13,7 @@ use socket2::{Domain, Protocol, Socket, Type};
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::task::JoinHandle;
+use tokio::sync::watch;
 use tracing::{debug, warn};
 
 use crate::playout::{Config, Playout};
@@ -59,6 +60,7 @@ pub struct Stream {
     pub control_port: u16,
     playout: Arc<Playout>,
     tasks: Vec<JoinHandle<()>>,
+    started: Option<watch::Receiver<bool>>,
 }
 
 impl Stream {
@@ -77,6 +79,7 @@ impl Stream {
             tokio::spawn(drain(control)),
         ];
         Ok(Stream {
+            started: None,
             kind: StreamKind::Buffered,
             data_port,
             control_port,
@@ -100,17 +103,34 @@ impl Stream {
             StreamKey::ChaCha(shk) => Decrypt::ChaCha(AudioCipher::new(&shk)),
             StreamKey::AesCbc { key, iv } => Decrypt::Cbc(Box::new(AudioCbc::new(&key, &iv))),
         });
+        let (started_tx, started) = watch::channel(false);
         let tasks = vec![
-            tokio::spawn(receive_realtime(data, cipher.clone(), playout.clone())),
+            tokio::spawn(receive_realtime(data, cipher.clone(), playout.clone(), started_tx)),
             tokio::spawn(receive_control(control, cipher, playout.clone())),
         ];
         Ok(Stream {
+            started: Some(started),
             kind: StreamKind::Realtime,
             data_port,
             control_port,
             playout,
             tasks,
         })
+    }
+
+    /// Notify only after the first accepted realtime audio packet, not SETUP.
+    /// The observer is cancelled with this stream.
+    pub fn on_realtime_started(&mut self, callback: impl FnOnce() + Send + 'static) {
+        let Some(mut started) = self.started.clone() else { return };
+        self.tasks.push(tokio::spawn(async move {
+            loop {
+                if *started.borrow_and_update() {
+                    callback();
+                    return;
+                }
+                if started.changed().await.is_err() { return; }
+            }
+        }));
     }
 
     pub fn playout(&self) -> &Playout {
@@ -207,7 +227,7 @@ fn push(cipher: &Decrypt, playout: &Playout, packet: &mut [u8]) -> Option<u32> {
     }
 }
 
-async fn receive_realtime(socket: UdpSocket, cipher: Arc<Decrypt>, playout: Arc<Playout>) {
+async fn receive_realtime(socket: UdpSocket, cipher: Arc<Decrypt>, playout: Arc<Playout>, started: watch::Sender<bool>) {
     let mut buf = vec![0u8; 2048];
     loop {
         let n = match socket.recv(&mut buf).await {
@@ -219,6 +239,9 @@ async fn receive_realtime(socket: UdpSocket, cipher: Arc<Decrypt>, playout: Arc<
         };
         if let Some(ts) = push(&cipher, &playout, &mut buf[..n]) {
             playout.play_from(ts);
+            started.send_if_modified(|value| {
+                if *value { false } else { *value = true; true }
+            });
         }
     }
 }
