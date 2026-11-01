@@ -45,6 +45,7 @@ pub struct Player {
     /// Громкость AirPlay, как прислал отправитель.
     volume_db: Mutex<f32>,
     next_id: AtomicU64,
+    reported_owner: Arc<Mutex<Option<u64>>>,
 }
 
 impl Player {
@@ -58,6 +59,7 @@ impl Player {
             active: Mutex::new(None),
             volume_db: Mutex::new(0.0),
             next_id: AtomicU64::new(1),
+            reported_owner: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -85,7 +87,16 @@ impl Player {
             .playout()
             .set_volume(self.output_db(*self.volume_db.lock().unwrap_or_else(|e| e.into_inner())));
         let events = self.events.clone();
-        stream.on_realtime_started(move || events.playing(true));
+        let reported = self.reported_owner.clone();
+        {
+            let mut current = reported.lock().unwrap_or_else(|e| e.into_inner());
+            if current.is_some_and(|id| id != owner) { *current = None; }
+        }
+        stream.on_realtime_started(move || {
+            if *reported.lock().unwrap_or_else(|e| e.into_inner()) != Some(owner) {
+                events.playing(true);
+            }
+        });
         if let Some((old, _)) = self.lock().replace((owner, stream))
             && old != owner
         {
@@ -108,9 +119,23 @@ impl Player {
                 stream.kind == audio_stream::StreamKind::Realtime);
             *active = None;
             drop(active);
-            if realtime {
+            if realtime && *self.reported_owner.lock().unwrap_or_else(|e| e.into_inner()) != Some(owner) {
                 self.events.playing(false);
             }
+        }
+    }
+
+    fn report_state(&self, owner: u64, playing: bool) {
+        *self.reported_owner.lock().unwrap_or_else(|e| e.into_inner()) = Some(owner);
+        self.events.playing(playing);
+    }
+
+    fn forget_reported_state(&self, owner: u64) {
+        let mut reported = self.reported_owner.lock().unwrap_or_else(|e| e.into_inner());
+        if *reported == Some(owner) {
+            *reported = None;
+            drop(reported);
+            self.events.playing(false);
         }
     }
 
@@ -258,6 +283,7 @@ impl Media {
                     self.player.events.playing(false);
                 }
                 if !streams_only {
+                    self.player.forget_reported_state(self.id);
                     if let Some(events) = self.events.take() {
                         events.abort();
                     }
@@ -272,9 +298,28 @@ impl Media {
                 info!("TEARDOWN");
                 ok()
             }
-            ("POST", "/feedback") | ("POST", "/command") | ("POST", "/audioMode") => ok(),
+            ("POST", "/command") => {
+                self.sender_command(req);
+                ok()
+            }
+            ("POST", "/feedback") | ("POST", "/audioMode") => ok(),
             _ => return None,
         })
+    }
+
+    fn sender_command(&self, req: &Request) {
+        let Some(command) = plist_dict(&req.body) else { return };
+        let kind = command.get("type").and_then(Value::as_string).unwrap_or("");
+        debug!(kind, "sender command");
+        if kind != "updateMRPlaybackState" || self.rc_only { return; }
+        let state = command.get("params").and_then(Value::as_dictionary)
+            .and_then(|p| uint(p, "mrPlaybackState"));
+        match state {
+            Some(1) => self.player.report_state(self.id, true),
+            Some(2 | 3 | 4) => self.player.report_state(self.id, false),
+            _ => return,
+        }
+        debug!(?state, "sender playback state");
     }
 
     fn setup(&mut self, ctx: &Context, req: &Request) -> Response {
@@ -688,6 +733,7 @@ impl Media {
 impl Drop for Media {
     fn drop(&mut self) {
         self.player.release(self.id);
+        self.player.forget_reported_state(self.id);
         self.stop_tasks();
         if let Some(events) = self.events.take() {
             events.abort();

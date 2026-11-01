@@ -1153,4 +1153,23 @@ mod tests {
         let mut c = Client::new(ctx());
         assert_eq!(c.call("ANNOUNCE", "rtsp://x/1", &[], vec![]).status, 501);
     }
+    #[test]
+    fn sender_playback_commands_update_events_without_teardown() {
+        let events = Arc::new(EventLog::default());
+        let mut context = ctx();
+        Arc::get_mut(&mut Arc::get_mut(&mut context).unwrap().player).unwrap().events = events.clone();
+        let mut client = Client::new(context);
+        for state in [1u64, 2, 1, 99] {
+            let mut params = plist::Dictionary::new();
+            params.insert("mrPlaybackState".into(), plist::Value::Integer(state.into()));
+            let mut command = plist::Dictionary::new();
+            command.insert("type".into(), "updateMRPlaybackState".into());
+            command.insert("params".into(), params.into());
+            let mut body = Vec::new();
+            plist::Value::Dictionary(command).to_writer_binary(&mut body).unwrap();
+            assert_eq!(client.call("POST", "/command", &[], body).status, 200);
+        }
+        assert_eq!(*events.0.lock().unwrap(), vec!["playing true", "playing false", "playing true"]);
+    }
+
 }
