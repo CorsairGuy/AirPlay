@@ -450,7 +450,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn buffered_audio_end_to_end() {
         use plist::{Dictionary, Value};
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::io::AsyncWriteExt;
 
         let ctx = ctx();
         let mut c = Client::new(ctx.clone());
@@ -461,7 +461,6 @@ mod tests {
             .call("POST", "/pair-setup", &hkp, setup.m3(&m2).unwrap())
             .body;
         c.encrypt(setup.check_m4(&m4).unwrap().unwrap());
-        let shared = setup.session_key().unwrap().to_vec();
 
         let to_plist = |d: Dictionary| {
             let mut out = Vec::new();
@@ -476,24 +475,15 @@ mod tests {
                 .unwrap()
         };
 
-        // Сессия: канал событий присылает updateInfo.
+        // Сессия: открываем канал событий без начального updateInfo.
         let mut d = Dictionary::new();
         d.insert("timingProtocol".into(), "PTP".into());
         let session = reply(c.call("SETUP", "rtsp://x/1", &[], to_plist(d)));
         assert!(session.contains_key("timingPeerInfo"));
         let event_port = session["eventPort"].as_unsigned_integer().unwrap() as u16;
-        let mut events = tokio::net::TcpStream::connect(("127.0.0.1", event_port))
+        let _events = tokio::net::TcpStream::connect(("127.0.0.1", event_port))
             .await
             .unwrap();
-        let mut wire = vec![0u8; 4096];
-        let n = events.read(&mut wire).await.unwrap();
-        let mut wire = wire[..n].to_vec();
-        let mut plain = Vec::new();
-        Channel::new(ControlKeys::controller_events(&shared))
-            .open(&mut wire, &mut plain)
-            .unwrap();
-        let info = rtsp::decode_request(&mut plain).unwrap().unwrap();
-        assert_eq!(info.uri, "/command");
 
         // Поток AAC 44,1 кГц.
         let shk = [3u8; 32];
@@ -737,7 +727,7 @@ mod tests {
                 .unwrap()
         };
 
-        // Канал событий: после updateInfo — команды.
+        // Канал событий передаёт команды без начального updateInfo.
         assert!(!remote.send(Command::Next), "отправителя ещё нет");
         let session = reply(c.call("SETUP", "rtsp://x/1", &[], to_plist(Dictionary::new())));
         let event_port = session["eventPort"].as_unsigned_integer().unwrap() as u16;
@@ -757,7 +747,6 @@ mod tests {
             wire.extend_from_slice(&buf[..n]);
             channel.open(&mut wire, &mut plain).unwrap();
         };
-        assert_eq!(next_request().await.uri, "/command");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
         while !remote.connected() {
             assert!(
@@ -823,17 +812,18 @@ mod tests {
         let mut got = [0u8; 4];
         service.read_exact(&mut got).await.unwrap();
         assert_eq!(&got, b"ping");
-        service.write_all(b"pong").await.unwrap();
+        let pong = mrp::frame::reply(7);
+        service.write_all(&pong).await.unwrap();
         let mut sealed = Vec::new();
         let mut opened = Vec::new();
-        while opened.len() < 4 {
+        while opened.len() < pong.len() {
             let mut buf = [0u8; 256];
             let n = client.read(&mut buf).await.unwrap();
             assert!(n > 0);
             sealed.extend_from_slice(&buf[..n]);
             ch.open(&mut sealed, &mut opened).unwrap();
         }
-        assert_eq!(opened, b"pong");
+        assert_eq!(opened, pong);
     }
 
     /// Карточка приёмника: MRP по шифрованному каналу потока 130.

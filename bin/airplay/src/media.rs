@@ -443,9 +443,8 @@ impl Media {
         Ok(())
     }
 
-    /// Канал событий: отправитель подключается сам; первым сообщением
-    /// сообщаем о себе (`updateInfo`) — без него iOS дольше подключается.
-    fn start_events(&mut self, ctx: &Context) -> Option<u16> {
+    /// Канал событий: отправитель подключается сам; отправляем только команды.
+    fn start_events(&mut self, _ctx: &Context) -> Option<u16> {
         let shared = self.shared.as_ref()?;
         let listener = match audio_stream::bind_tcp() {
             Ok(l) => l,
@@ -456,8 +455,6 @@ impl Media {
         };
         let port = listener.local_addr().ok()?.port();
         let mut channel = Channel::new(ControlKeys::accessory_events(shared));
-        let mut hello = Vec::new();
-        channel.seal(&update_info(ctx), &mut hello);
         if let Some(old) = self.events.take() {
             old.abort();
         }
@@ -471,7 +468,6 @@ impl Media {
             debug!(%peer, "канал событий подключён");
             // shairport-sync на станции сам ничего не шлёт в канал событий
             // при подключении: только команды пульта. updateInfo не шлём.
-            let _ = &hello;
             let mut commands = control.as_ref().map(|c| c.attach(owner));
             let mut cseq = 0u32;
             let mut buf = [0u8; 1024];
@@ -726,36 +722,6 @@ fn realtime_format(s: &Dictionary) -> Result<Format, String> {
         sample_rate,
         channels: 2,
     })
-}
-
-fn update_info(ctx: &Context) -> Vec<u8> {
-    let dev = &ctx.device();
-    let mut value = Dictionary::new();
-    value.insert(
-        "statusFlags".into(),
-        Value::Integer(dev.status_flags.into()),
-    );
-    value.insert(
-        "features".into(),
-        Value::Integer((dev.features.0 as i64).into()),
-    );
-    value.insert("model".into(), dev.model.clone().into());
-    value.insert("sourceVersion".into(), dev.source_version.clone().into());
-    value.insert(
-        "protocolVersion".into(),
-        device::DeviceInfo::PROTOCOL_VERSION.into(),
-    );
-    let mut msg = Dictionary::new();
-    msg.insert("type".into(), "updateInfo".into());
-    msg.insert("value".into(), value.into());
-    let body = write_plist(msg);
-    let mut req = Request::new("POST", "/command", "RTSP/1.0");
-    req.headers.insert("CSeq", "0");
-    req.headers.insert("Content-Type", BPLIST);
-    req.body = body;
-    let mut out = Vec::new();
-    req.encode(&mut out);
-    out
 }
 
 fn plist_dict(body: &[u8]) -> Option<Dictionary> {

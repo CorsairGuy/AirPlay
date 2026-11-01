@@ -222,6 +222,7 @@ async fn forward<B: AsyncRead + AsyncWrite + Unpin>(
     let mut from_backend = vec![0u8; 16 * 1024];
     let mut sealed = Vec::new();
     let mut plain = Vec::new();
+    let mut outgoing = Vec::new();
     loop {
         tokio::select! {
             n = client.read(&mut from_client) => {
@@ -241,18 +242,47 @@ async fn forward<B: AsyncRead + AsyncWrite + Unpin>(
                 if n == 0 {
                     return Ok(());
                 }
-                let mut out = Vec::with_capacity(n + 64);
-                channel.seal(&from_backend[..n], &mut out);
-                client.write_all(&out).await?;
+                // Backend reads may split or coalesce MRP frames. Preserve each
+                // complete plaintext frame when creating encrypted records.
+                outgoing.extend_from_slice(&from_backend[..n]);
+                while let Some(frame) = take_mrp_frame(&mut outgoing)? {
+                    let mut out = Vec::with_capacity(frame.len() + 64);
+                    channel.seal(&frame, &mut out);
+                    client.write_all(&out).await?;
+                }
             }
         }
         debug!("MRP: пересылка");
     }
 }
 
+fn take_mrp_frame(bytes: &mut Vec<u8>) -> std::io::Result<Option<Vec<u8>>> {
+    if bytes.len() < 4 { return Ok(None); }
+    let len = u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize;
+    if !(32..=4*1024*1024).contains(&len) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,"invalid MRP output frame length"));
+    }
+    if bytes.len() < len { return Ok(None); }
+    let rest = bytes.split_off(len);
+    Ok(Some(std::mem::replace(bytes, rest)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mrp_output_boundaries_handle_fragmentation_and_coalescing() {
+        let a = mrp::frame::reply(1);
+        let b = mrp::frame::reply(2);
+        let mut bytes = a[..7].to_vec();
+        assert!(take_mrp_frame(&mut bytes).unwrap().is_none());
+        bytes.extend_from_slice(&a[7..]); bytes.extend_from_slice(&b);
+        assert_eq!(take_mrp_frame(&mut bytes).unwrap(),Some(a));
+        assert_eq!(take_mrp_frame(&mut bytes).unwrap(),Some(b));
+        assert!(bytes.is_empty());
+        assert!(take_mrp_frame(&mut vec![0,0,0,1]).is_err());
+    }
 
     #[test]
     fn command_plists() {

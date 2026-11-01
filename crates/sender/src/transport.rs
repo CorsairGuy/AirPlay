@@ -182,10 +182,13 @@ mod tests {
 
     #[test]
     fn sender_uses_the_shared_rtsp_codec() {
-        let req = rtsp::Request::new("POST", "/pair-pin-start", "HTTP/1.1");
+        let mut req = rtsp::Request::new("POST", "/pair-pin-start", "HTTP/1.1");
         let mut bytes = Vec::new();
         req.encode(&mut bytes);
+        // The shared encoder adds an explicit length even for an empty body.
+        req.headers.insert("Content-Length", "0");
         assert_eq!(rtsp::decode_request(&mut bytes).unwrap(), Some(req));
+        assert!(bytes.is_empty());
     }
 
     #[tokio::test]

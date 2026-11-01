@@ -47,3 +47,11 @@
 Общение с Кириллом по-русски. Один код на протокол, без дублей. Репозиторий станции только читать.
 На станции тестовый экземпляр только в /data, рядом с shairport, всегда `--audio null`.
 Процессы убивать по PID, не `pkill -f`. Без force-push.
+
+## MRP fix verified — 2026-11-01
+
+Original in-process duplex path, no temporary TCP backend. Preserve plaintext MRP frame boundaries before encryption; remove encryption of discarded updateInfo so the first event command uses the correct nonce. Tests cover ACK/DeviceInfo encrypted boundaries, fragmented input, TCP/duplex parity and first remote commands. Shared RTSP encoder test expects explicit Content-Length: 0.
+
+Validation: cargo test --workspace --locked — 128 passed, 0 failed, 0 ignored, no compiler warnings. Ten read-only localhost reconnects received DeviceInfo and state. User confirmed second iPhone opens the card repeatedly and remains connected >=30 seconds. No playback/long soak coverage claimed.
+
+Only isolated Pi diagnostic was used, null audio. Physical Station and Bluetooth untouched. All commits local, no GitHub push. Detailed evidence and backups: outputs/MRP-INTEGRATION-2026-11-01.md and work/mrp-card-investigation-20261101 in the parent Codex workspace.

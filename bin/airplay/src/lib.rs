@@ -7,6 +7,8 @@
 //! [`serve::run`].
 
 pub mod card;
+#[cfg(test)]
+mod mrp_path_tests;
 pub mod events;
 pub mod media;
 pub mod remote;
