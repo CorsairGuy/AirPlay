@@ -136,7 +136,7 @@ pub struct Media {
     /// Ключ AES из FairPlay `ekey` и IV `eiv` (зеркалирование).
     aes_key: Option<[u8; 16]>,
     eiv: Option<[u8; 16]>,
-    /// Часы отправителя по NTP (зеркалирование).
+    /// Часы отправителя по NTP (зеркалирование или realtime audio).
     ntp: Option<timesync::ntp::NtpClock>,
     /// Общий секрет legacy pair-verify: подмешивается в ключ видео.
     legacy_shared: Option<[u8; 32]>,
@@ -252,10 +252,13 @@ impl Media {
                     if let Some(events) = self.events.take() {
                         events.abort();
                     }
-                    if let Some(mrp) = self.mrp.take() {
-                        mrp.abort();
-                    }
+                    // Как shairport на станции: канал MRP живёт до конца
+                    // RTSP-соединения или до нового SETUP с wantsDedicatedSocket,
+                    // TEARDOWN его не закрывает.
                     self.stop_tasks();
+                    if !self.rc_only {
+                        ctx.set_session_group(None);
+                    }
                 }
                 info!("TEARDOWN");
                 ok()
@@ -317,6 +320,9 @@ impl Media {
             }
         }
         if timing == "PTP" {
+            if let Some(group) = body.get("groupUUID").and_then(Value::as_string) {
+                ctx.set_session_group(Some(group.to_owned()));
+            }
             if let Some(info) = body.get("timingPeerInfo").and_then(Value::as_dictionary) {
                 // Адреса самого отправителя: в SETPEERS они не «другие приёмники».
                 self.sender_addrs = addresses(info);
@@ -331,7 +337,9 @@ impl Media {
         }
         let port = self.start_events(ctx).unwrap_or(0);
         d.insert("eventPort".into(), Value::Integer(port.into()));
-        if !d.contains_key("timingPort") {
+        // shairport-sync: фиктивный timingPort 0 только в ветке PTP; у сессии
+        // только для пульта (timingProtocol None) в ответе один eventPort.
+        if timing == "PTP" && !d.contains_key("timingPort") {
             d.insert("timingPort".into(), Value::Integer(0.into()));
         }
         d
@@ -461,9 +469,9 @@ impl Media {
                 return;
             };
             debug!(%peer, "канал событий подключён");
-            if conn.write_all(&hello).await.is_err() {
-                return;
-            }
+            // shairport-sync на станции сам ничего не шлёт в канал событий
+            // при подключении: только команды пульта. updateInfo не шлём.
+            let _ = &hello;
             let mut commands = control.as_ref().map(|c| c.attach(owner));
             let mut cseq = 0u32;
             let mut buf = [0u8; 1024];
@@ -526,7 +534,11 @@ impl Media {
                             self.player.audio.clone(),
                             StreamKey::ChaCha(shk),
                             format,
-                            self.player.time_source(),
+                            if self.ntp.is_some() {
+                                self.time_source()
+                            } else {
+                                self.player.time_source()
+                            },
                         )
                     }
                     .map_err(|e| format!("сокеты потока: {e}"))?;

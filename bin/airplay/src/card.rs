@@ -7,38 +7,57 @@
 //! играет, и управляют этим через MRP, как HomePod.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
-use mediaremote::{Artwork, Command as CardCommand, Control, Reply};
-use mrp::messages::{Device, NowPlaying};
+use mrp::messages::Device;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::watch;
 
 use crate::events::{Events, Metadata, Progress};
-use crate::remote::{Command, Remote};
+use crate::remote::Remote;
+use crate::station_mrp::{
+    control::Control,
+    model::{Cover, Feed, Identity, NAME_CELL, Route},
+    server,
+};
+
+/// Источник в терминах станции: у неё «airplay» — входящий AirPlay.
+const SOURCE: &str = "airplay";
 
 pub struct Card {
-    device: Device,
-    now: watch::Sender<NowPlaying>,
+    identity: Identity,
+    feed: watch::Sender<Feed>,
     remote: Remote,
     /// Программа, которая встраивает приёмник, получает события как обычно.
     inner: Arc<dyn Events>,
-    artwork: AtomicU64,
+}
+
+/// SHA-256 в hex, как `hash()` в sources.rs станции.
+fn hash(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 impl Card {
     pub fn new(device: Device, remote: Remote, inner: Arc<dyn Events>) -> Arc<Self> {
-        let (now, _) = watch::channel(NowPlaying {
-            can_seek: true,
+        // ВРЕМЕННЫЙ ОПЫТ: подмена данных карточки переменными окружения,
+        // чтобы найти, чем она отличается от станции. Убрать после опыта.
+        let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+        let _ = NAME_CELL.set(env("X_MRP_NAME").unwrap_or(device.name.clone()));
+        // Станция: пульт доступен, пока работает её управление, то есть всегда.
+        let (feed, _) = watch::channel(Feed {
+            source: env("X_MRP_SOURCE").unwrap_or(SOURCE.into()),
+            volume: env("X_MRP_VOLUME").and_then(|v| v.parse().ok()).unwrap_or(0.2),
+            control_available: true,
             ..Default::default()
         });
         Arc::new(Self {
-            device,
-            now,
+            identity: Identity {
+                device: env("X_MRP_DEVICE").unwrap_or(device.uid),
+                group: env("X_MRP_GROUP").unwrap_or(device.group),
+            },
+            feed,
             remote,
             inner,
-            artwork: AtomicU64::new(0),
         })
     }
 
@@ -55,27 +74,39 @@ impl Card {
             model: info.model.clone(),
             localized_model: localized.into(),
             uid: info.pairing_id.clone(),
-            group: info.pairing_id.clone(),
+            group: info.group_id(),
             system_app: "com.github.corsairguy.airplay".into(),
         }
     }
 
-    /// Одно соединение MRP (канал потока 130 уже расшифрован).
+    /// Одно соединение MRP (канал потока 130 уже расшифрован): сервер станции.
     pub async fn serve<S>(self: Arc<Self>, stream: S) -> std::io::Result<()>
     where
         S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
     {
-        let control = Arc::new(CardControl(self.clone()));
-        mediaremote::serve(stream, self.device.clone(), self.now.subscribe(), control).await
+        let control = Control::new(self.feed.clone(), self.remote.clone());
+        server::connection(stream, self.identity.clone(), self.feed.subscribe(), control)
+            .await
+            .map_err(std::io::Error::other)
     }
 
-    fn update(&self, f: impl FnOnce(&mut NowPlaying)) {
-        let connected = self.remote.connected();
-        self.now.send_if_modified(|now| {
-            let before = now.clone();
-            f(now);
-            now.control_available = connected;
-            *now != before
+    /// Группа сессии отправителя (`gid`), как маршрут станции.
+    pub fn route(&self, group: Option<String>) {
+        self.update(|feed| {
+            feed.route = group.map(|group| Route {
+                group,
+                active: true,
+                leader: true,
+                contains_leader: true,
+            })
+        });
+    }
+
+    fn update(&self, f: impl FnOnce(&mut Feed)) {
+        self.feed.send_if_modified(|feed| {
+            let before = feed.clone();
+            f(feed);
+            *feed != before
         });
     }
 }
@@ -91,66 +122,54 @@ fn volume_unit(db: f32) -> f32 {
 
 impl Events for Card {
     fn volume(&self, db: f32) {
-        self.update(|now| now.volume = volume_unit(db));
+        self.update(|feed| feed.volume = volume_unit(db));
         self.inner.volume(db);
     }
 
     fn playing(&self, playing: bool) {
-        self.update(|now| now.playing = playing);
+        self.update(|feed| feed.playing = playing);
         self.inner.playing(playing);
     }
 
     fn metadata(&self, m: &Metadata) {
-        self.update(|now| {
-            now.title = m.title.clone().unwrap_or_default();
-            now.artist = m.artist.clone().unwrap_or_default();
-            now.album = m.album.clone().unwrap_or_default();
+        self.update(|feed| {
+            feed.title = m.title.clone().unwrap_or_default();
+            feed.artist = m.artist.clone().unwrap_or_default();
+            feed.album = m.album.clone().unwrap_or_default();
             if let Some(d) = m.duration {
-                now.duration = Some(d.as_secs_f64());
+                feed.duration = Some(d.as_secs_f64());
             }
-            let id = Sha256::digest(format!("{}\n{}\n{}", now.title, now.artist, now.album));
-            now.content_id = hex::encode(&id[..8]);
+            feed.content_id = hash(
+                format!("{}\0{}\0{}\0{}", feed.source, feed.title, feed.artist, feed.album)
+                    .as_bytes(),
+            );
         });
         self.inner.metadata(m);
     }
 
     fn artwork(&self, mime: &str, data: &[u8]) {
-        if let Some((mime, width, height)) = image_info(data).or_else(|| {
-            // Неизвестный формат: доверяем Content-Type, размер неизвестен.
-            mime.starts_with("image/")
-                .then(|| (mime_static(mime), 0, 0))
-        }) {
-            let n = self.artwork.fetch_add(1, Ordering::Relaxed) + 1;
-            let art = Artwork {
+        // Как sources.rs станции: только картинка с известными размерами.
+        let cover = image_info(data)
+            .filter(|(_, w, h)| (1..=8192).contains(w) && (1..=8192).contains(h))
+            .map(|(mime, width, height)| Cover {
+                id: hash(data),
                 data: Arc::new(data.to_vec()),
-                id: format!("art-{n}"),
                 mime: mime.into(),
                 width,
                 height,
-            };
-            self.update(|now| now.artwork = Some(art));
-        } else {
-            // Пустая картинка — отправитель убрал обложку.
-            self.update(|now| now.artwork = None);
-        }
+            });
+        self.update(|feed| feed.cover = cover);
         self.inner.artwork(mime, data);
     }
 
     fn progress(&self, p: Progress) {
-        self.update(|now| {
-            now.position = p.position.as_secs_f64();
+        self.update(|feed| {
+            feed.position = p.position.as_secs_f64();
             if !p.duration.is_zero() {
-                now.duration = Some(p.duration.as_secs_f64());
+                feed.duration = Some(p.duration.as_secs_f64());
             }
         });
         self.inner.progress(p);
-    }
-}
-
-fn mime_static(mime: &str) -> &'static str {
-    match mime {
-        "image/png" => "image/png",
-        _ => "image/jpeg",
     }
 }
 
@@ -187,32 +206,6 @@ fn image_info(data: &[u8]) -> Option<(&'static str, u32, u32)> {
         at += 2 + len;
     }
     None
-}
-
-struct CardControl(Arc<Card>);
-
-impl Control for CardControl {
-    fn command(&self, command: CardCommand) -> Reply<'_> {
-        let command = match command {
-            CardCommand::Play => Command::Play,
-            CardCommand::Pause => Command::Pause,
-            CardCommand::PlayPause => Command::PlayPause,
-            CardCommand::Stop => Command::Stop,
-            CardCommand::Next => Command::Next,
-            CardCommand::Previous => Command::Previous,
-            CardCommand::Seek(secs) => Command::Seek(secs),
-        };
-        let sent = self.0.remote.send(command);
-        Box::pin(async move { sent })
-    }
-
-    fn volume(&self, volume: f32) -> Reply<'_> {
-        let sent = self.0.remote.send(Command::Volume(volume));
-        if sent {
-            self.0.update(|now| now.volume = volume);
-        }
-        Box::pin(async move { sent })
-    }
 }
 
 #[cfg(test)]
@@ -257,7 +250,7 @@ mod tests {
             Remote::new(),
             Arc::new(crate::events::NoEvents),
         );
-        let rx = card.now.subscribe();
+        let rx = card.feed.subscribe();
         card.metadata(&Metadata {
             title: Some("Песня".into()),
             ..Default::default()
@@ -271,6 +264,6 @@ mod tests {
         assert_eq!(now.title, "Песня");
         assert!(now.playing && !now.content_id.is_empty());
         assert_eq!((now.position, now.duration), (3.0, Some(10.0)));
-        assert!(!now.control_available, "отправителя нет");
+        assert!(now.control_available, "как на станции: пульт доступен и без отправителя");
     }
 }

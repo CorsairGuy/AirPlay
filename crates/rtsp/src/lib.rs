@@ -130,9 +130,8 @@ fn write_headers(head: &mut String, headers: &Headers, body_len: usize) {
             let _ = write!(head, "{k}: {v}\r\n");
         }
     }
-    if body_len > 0 {
-        let _ = write!(head, "Content-Length: {body_len}\r\n");
-    }
+    // Как shairport-sync: Content-Length есть всегда, и 0 у пустого ответа.
+    let _ = write!(head, "Content-Length: {body_len}\r\n");
     head.push_str("\r\n");
 }
 

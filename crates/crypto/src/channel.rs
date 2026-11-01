@@ -45,10 +45,9 @@ impl Channel {
     pub fn open(&mut self, buf: &mut Vec<u8>, out: &mut Vec<u8>) -> Result<(), Error> {
         let mut pos = 0;
         while buf.len() - pos >= 2 {
+            // We send at most MAX_FRAME, but iOS sends longer frames on the MRP
+            // data stream (seen 1087 and 1125 bytes); any u16 length is valid.
             let len = u16::from_le_bytes([buf[pos], buf[pos + 1]]) as usize;
-            if len > MAX_FRAME {
-                return Err(Error::FrameTooLong(len));
-            }
             let end = pos + 2 + len + TAG_LEN;
             if buf.len() < end {
                 break;

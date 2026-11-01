@@ -18,7 +18,7 @@ const USAGE: &str = "\
   serve     запустить демон
   status    состояние демона и активные сессии
   list      AirPlay-устройства в сети
-  send      отправить звук или экран на устройство
+  send      отправить PCM-звук на приёмники (realtime NTP; без автопереподключения)
   pair      сопряжение с устройством
   set       изменить настройку на лету
   log       логи и отладка
@@ -67,6 +67,13 @@ const USAGE: &str = "\
                   версия AirPlay в /info и Bonjour (по умолчанию 366.0)
   --enclosure-color Ц
                   цвет корпуса для значка в iOS: 1 — белый, 2 — чёрный
+
+Параметры send:
+  --to HOST[:PORT] можно повторять (до 8 приёмников; порт по умолчанию 7000)
+  --volume ДБ     от -30 до 0, либо -144 (mute); по умолчанию -29.7
+  --latency-ms N  250..2000 мс; по умолчанию 500
+                  stdin: S16BE, 44100 Гц, стерео. Один общий источник времени;
+                  это не управление группой AP2/PTP. Ошибка приёмника завершает запуск.
 
 Подробность логов задаёт RUST_LOG, например RUST_LOG=debug.";
 
@@ -225,7 +232,45 @@ fn main() -> ExitCode {
             println!("{USAGE}");
             ExitCode::SUCCESS
         }
-        Some(cmd @ ("status" | "list" | "send" | "pair" | "set" | "log")) => {
+        Some("send") => {
+            let options = match airplay::send::Options::parse(&args[1..]) {
+                Ok(options) => options,
+                Err(error) => {
+                    eprintln!("airplay send: {error:#}\n\n{USAGE}");
+                    return ExitCode::from(2);
+                }
+            };
+            tracing_subscriber::fmt()
+                .with_writer(std::io::stderr)
+                .with_env_filter(
+                    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+                )
+                .init();
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .expect("не создать среду выполнения tokio");
+            let result = runtime.block_on(async {
+                let (stop, stopped) = tokio::sync::watch::channel(false);
+                let interrupt = tokio::spawn(async move {
+                    if tokio::signal::ctrl_c().await.is_ok() {
+                        stop.send_replace(true);
+                    }
+                });
+                let result = airplay::send::run(options, tokio::io::stdin(), stopped).await;
+                interrupt.abort();
+                result
+            });
+            match result {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("airplay send: {error:#}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Some(cmd @ ("status" | "list" | "pair" | "set" | "log")) => {
             eprintln!("airplay {cmd}: ещё не реализовано");
             ExitCode::FAILURE
         }

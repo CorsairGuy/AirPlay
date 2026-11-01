@@ -49,6 +49,12 @@ fn ns_to_ntp(ns: u64) -> [u8; 8] {
     ((secs << 32) | frac).to_be_bytes()
 }
 
+/// Current NTP timestamp on the same monotonic timeline as timing replies.
+/// Suitable for sender sync packets; does not jump when wall time changes.
+pub fn now() -> u64 {
+    u64::from_be_bytes(ns_to_ntp(local_ns()))
+}
+
 fn read_ntp(b: &[u8]) -> u64 {
     ntp_to_ns(u64::from_be_bytes(b[..8].try_into().unwrap()))
 }
@@ -206,5 +212,19 @@ mod tests {
         let ns = 3_900_000_000_123_456_789u64;
         let back = ntp_to_ns(u64::from_be_bytes(ns_to_ntp(ns)));
         assert!(back.abs_diff(ns) < 2, "{back}");
+    }
+
+    #[test]
+    fn sender_timestamp_uses_the_timing_reply_clock() {
+        let req = request();
+        let before = now();
+        let resp = reply(&req).unwrap();
+        let after = now();
+        let received = u64::from_be_bytes(resp[16..24].try_into().unwrap());
+        let transmitted = u64::from_be_bytes(resp[24..32].try_into().unwrap());
+        // Wrapping differences also work across the NTP seconds rollover.
+        let span = after.wrapping_sub(before);
+        assert!(received.wrapping_sub(before) <= span);
+        assert!(transmitted.wrapping_sub(before) <= span);
     }
 }

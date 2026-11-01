@@ -20,6 +20,7 @@ mdns = { package = "ap_mdns", path = "crates/mdns" }
 device = { package = "ap_device", path = "crates/device" }
 clock = { package = "ap_clock", path = "crates/clock" }
 rtp = { package = "ap_rtp", path = "crates/rtp" }
+sender = { package = "ap_sender", path = "crates/sender" }
 audio_stream = { package = "ap_audio_stream", path = "crates/audio_stream" }
 mirror = { package = "ap_mirror", path = "crates/mirror" }
 hls = { package = "ap_hls", path = "crates/hls" }
@@ -39,7 +40,7 @@ bytes = "1"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "signal", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "io-std", "time", "signal", "sync"] }
 plist = "1.7"
 mdns-sd = "0.21"
 rand = "0.8"

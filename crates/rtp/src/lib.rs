@@ -4,6 +4,12 @@
 use chacha20poly1305::aead::{AeadInPlace, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce, Tag};
 
+mod packetizer;
+pub use packetizer::{
+    MAX_PCM_FRAMES, PacketizeError, Packetized, PcmPacketizer, RETRANSMIT_CACHE_PACKETS,
+    RetransmitRequest, sync_packet,
+};
+
 pub const HEADER_LEN: usize = 12;
 const TAG_LEN: usize = 16;
 const NONCE_LEN: usize = 8;

@@ -39,6 +39,8 @@ pub struct Context {
     pub remote: crate::remote::Remote,
     /// Кто разбирает канал потока 130; `None` — поток только регистрируется.
     pub mrp: Option<crate::remote::MrpService>,
+    /// `groupUUID` текущей сессии отправителя: идёт в `gid`, как у shairport-sync.
+    pub session_group: std::sync::Mutex<Option<String>>,
 }
 
 impl Context {
@@ -73,9 +75,31 @@ impl Context {
         }
     }
 
+    /// Сессия отправителя началась (`Some(groupUUID)`) или закончилась:
+    /// `gid` в Bonjour, `/info` и карточке меняется, как у shairport-sync.
+    pub fn set_session_group(&self, group: Option<String>) {
+        {
+            let mut current = self.session_group.lock().unwrap_or_else(|e| e.into_inner());
+            if *current == group {
+                return;
+            }
+            *current = group.clone();
+        }
+        if let Some(crate::remote::MrpService::Card(card)) = &self.mrp {
+            card.route(group);
+        }
+        let services = self.services();
+        if let Some(adv) = self.mdns.lock().unwrap_or_else(|e| e.into_inner()).as_mut()
+            && let Err(e) = adv.update(services)
+        {
+            warn!("Bonjour: {e}");
+        }
+    }
+
     /// Описание приёмника с флагами по текущему состоянию сопряжения.
     pub fn device(&self) -> DeviceInfo {
         let mut d = self.device.clone();
+        d.group = self.session_group.lock().unwrap_or_else(|e| e.into_inner()).clone();
         if self.require_pin {
             d.require_pin(!self.store.is_empty());
         }
@@ -159,7 +183,7 @@ impl Session {
                 (resp, None)
             }
             ("GET", "/info") => (
-                Response::to(req, 200).with_body(BPLIST, self.ctx.device().info_plist()),
+                Response::to(req, 200).with_body(BPLIST, self.ctx.device().info_plist_for(Some(&self.peer))),
                 None,
             ),
             ("POST", "/pair-pin-start") => {
@@ -325,6 +349,8 @@ mod tests {
                 source_version: "366.0".into(),
                 display: None,
                 audio_only_ui: false,
+                group: None,
+                pgid: "00000000-0000-4000-8000-000000000000".into(),
                 enclosure_color: None,
             },
             identity,
@@ -336,6 +362,7 @@ mod tests {
             mirror: None,
             remote: Default::default(),
             mrp: None,
+            session_group: Default::default(),
             player: Arc::new(Player::new(
                 audio_stream::Config {
                     device: "null".into(),
@@ -904,7 +931,9 @@ mod tests {
         };
         let m = next().await;
         let body = m[0].nested(f::ProtocolMessage::deviceInfoMessage).unwrap();
-        assert_eq!(body.string(f::DeviceInfoMessage::name), Some("Тест"));
+        // Имя у карточки станции общее на процесс (её константа NAME), в тестах
+        // его мог задать другой тест.
+        assert!(body.string(f::DeviceInfoMessage::name).is_some_and(|n| !n.is_empty()));
 
         // Трек от отправителя — карточка подписанному iPhone.
         use crate::events::Events;

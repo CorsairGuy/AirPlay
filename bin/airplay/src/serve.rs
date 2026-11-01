@@ -59,6 +59,15 @@ pub enum Mrp {
     Bridge(std::net::SocketAddr),
 }
 
+/// `pgid` на запуск, как `generate_random_uuid()` в shairport-sync.
+fn random_pgid() -> String {
+    let mut b: [u8; 16] = rand::random();
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let h = hex::encode(b);
+    format!("{}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..])
+}
+
 pub async fn run(opts: Options) -> Result<()> {
     let identity = state::load_identity(&opts.state_dir)?;
     let store = state::FileStore::open(&opts.state_dir)?;
@@ -76,13 +85,17 @@ pub async fn run(opts: Options) -> Result<()> {
         } else {
             Features::AUDIO_RECEIVER
         },
-        status_flags: 0x4,
+        // Как у shairport на станции: «аудиокабель подключён» и доступ
+        // по HomeKit (бит 10), 0x404.
+        status_flags: 0x404,
         pairing_id: identity.pairing_id.clone(),
         public_key: identity.public_key(),
         source_version: opts.source_version,
         display: mirroring.then_some(opts.display),
         // Карточку «Сейчас играет» рисует служба MRP: без неё не обещаем.
         audio_only_ui: opts.mrp != Mrp::Off,
+        group: None,
+        pgid: random_pgid(),
         enclosure_color: opts.enclosure_color,
     };
 
@@ -138,6 +151,7 @@ pub async fn run(opts: Options) -> Result<()> {
         mirror: opts.mirror,
         remote: opts.remote,
         mrp,
+        session_group: Default::default(),
     });
     if opts.mdns {
         let host = format!("airplay-{}", device_id.replace(':', "").to_lowercase());
@@ -175,7 +189,7 @@ async fn accept_loop(listener: TcpListener, ctx: Arc<Context>) {
     }
 }
 
-async fn serve_connection(
+pub(crate) async fn serve_connection(
     mut stream: TcpStream,
     ctx: Arc<Context>,
     peer: std::net::SocketAddr,

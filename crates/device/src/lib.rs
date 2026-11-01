@@ -15,7 +15,9 @@ impl Features {
     pub const AUDIO: u64 = 1 << 9;
     pub const AUDIO_REDUNDANT: u64 = 1 << 11;
     pub const FAIRPLAY_AUTH: u64 = 1 << 14;
+    pub const METADATA_PROGRESS: u64 = 1 << 15;
     pub const METADATA_ARTWORK: u64 = 1 << 16;
+    pub const METADATA_TEXT: u64 = 1 << 17;
     pub const AUDIO_FORMATS_1: u64 = 1 << 18;
     pub const AUDIO_FORMATS_2: u64 = 1 << 19;
     pub const AUDIO_FORMATS_3: u64 = 1 << 20;
@@ -34,7 +36,9 @@ impl Features {
         Self::AUDIO
             | Self::AUDIO_REDUNDANT
             | Self::FAIRPLAY_AUTH
+            | Self::METADATA_PROGRESS
             | Self::METADATA_ARTWORK
+            | Self::METADATA_TEXT
             | Self::AUDIO_FORMATS_1
             | Self::AUDIO_FORMATS_2
             | Self::AUDIO_FORMATS_3
@@ -81,6 +85,10 @@ pub struct DeviceInfo {
     /// `deviceEnclosureColor`: цвет корпуса для значка в iOS, например «1»
     /// — белый, «2» — чёрный (как у HomePod).
     pub enclosure_color: Option<String>,
+    /// Группа текущей сессии отправителя (`groupUUID` из SETUP).
+    pub group: Option<String>,
+    /// `pgid`: случайный UUID на запуск, как у shairport-sync.
+    pub pgid: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +100,45 @@ pub struct Display {
 
 impl DeviceInfo {
     pub const PROTOCOL_VERSION: &'static str = "1.1";
+    /// `osvers` и `fv`, как у shairport-sync 5.5.1 на станции.
+    pub const OS_VERSION: &'static str = "15.0";
+    pub const FIRMWARE_VERSION: &'static str = "5.5.1";
+
+    /// `gid`: как в shairport-sync — группа сессии отправителя (`groupUUID`
+    /// из SETUP), пока она идёт, иначе собственный `pi`.
+    pub fn group_id(&self) -> String {
+        self.group.clone().unwrap_or_else(|| self.pi())
+    }
+
+    /// `pi`: как `generate_device_uuid(deviceid)` в shairport-sync — UUID,
+    /// выведенный из deviceid, отдельный от `psi` (идентичности сопряжения).
+    pub fn pi(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(self.device_id.to_ascii_lowercase().as_bytes());
+        let mut b = [0u8; 16];
+        b.copy_from_slice(&digest[..16]);
+        b[6] = (b[6] & 0x0f) | 0x50;
+        b[8] = (b[8] & 0x3f) | 0x80;
+        let h = hex::encode(b);
+        format!("{}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..])
+    }
+
+    /// `fex`/`featuresEx`: биты Features little-endian в base64 без `=`, как у shairport-sync.
+    pub fn fex(&self) -> String {
+        const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let bytes = self.features.0.to_le_bytes();
+        let mut out = String::new();
+        for chunk in bytes.chunks(3) {
+            let n = chunk
+                .iter()
+                .enumerate()
+                .fold(0u32, |n, (i, b)| n | (*b as u32) << (16 - 8 * i));
+            for i in 0..=chunk.len() {
+                out.push(A[(n >> (18 - 6 * i) & 63) as usize] as char);
+            }
+        }
+        out
+    }
     /// statusFlags: приёмник готов к работе.
     pub const STATUS_READY: u32 = 0x4;
     /// statusFlags: нужен PIN (как у shairplay-rust в режиме PIN).
@@ -109,41 +156,60 @@ impl DeviceInfo {
         }
     }
 
-    /// Тело ответа на `GET /info` (двоичный plist).
+    /// Тело ответа на `GET /info` (двоичный plist): набор ключей shairport-sync
+    /// со станции.
     pub fn info_plist(&self) -> Vec<u8> {
+        self.info_plist_for(None)
+    }
+
+    /// То же с `senderAddress` — адресом спрашивающего, как у shairport-sync.
+    pub fn info_plist_for(&self, sender: Option<&str>) -> Vec<u8> {
         let mut d = Dictionary::new();
+        d.insert("canRecordScreenStream".into(), false.into());
+        if let Some(color) = &self.enclosure_color {
+            d.insert("deviceEnclosureColor".into(), color.clone().into());
+        }
         d.insert("deviceID".into(), self.device_id.clone().into());
-        d.insert("macAddress".into(), self.device_id.clone().into());
         d.insert(
             "features".into(),
             Value::Integer((self.features.0 as i64).into()),
         );
+        d.insert("featuresEx".into(), self.fex().into());
+        d.insert("initialVolume".into(), Value::Real(-20.0));
+        d.insert("keepAliveSendStatsAsBody".into(), false.into());
+        d.insert("model".into(), self.model.clone().into());
+        d.insert("name".into(), self.name.clone().into());
+        d.insert("pi".into(), self.pi().into());
+        d.insert("pk".into(), Value::Data(self.public_key.to_vec()));
+        let mut caps = Dictionary::new();
+        caps.insert("supportsFPSSecureStop".into(), false.into());
+        caps.insert("supportsInterstitials".into(), false.into());
+        caps.insert(
+            "supportsUIForAudioOnlyContent".into(),
+            self.audio_only_ui.into(),
+        );
+        d.insert("playbackCapabilities".into(), caps.into());
+        d.insert("protocolVersion".into(), Self::PROTOCOL_VERSION.into());
+        d.insert("psi".into(), self.pairing_id.clone().into());
+        d.insert("screenDemoMode".into(), false.into());
+        if let Some(sender) = sender {
+            d.insert("senderAddress".into(), sender.into());
+        }
+        d.insert("sourceVersion".into(), self.source_version.clone().into());
         d.insert(
             "statusFlags".into(),
             Value::Integer(self.status_flags.into()),
         );
-        d.insert("name".into(), self.name.clone().into());
-        d.insert("model".into(), self.model.clone().into());
-        d.insert("pi".into(), self.pairing_id.clone().into());
-        // Те же группа и роль, что в TXT: с `igl`/`gcgl` = 0 iPhone не даёт
-        // нажать кнопку устройств в карточке (проверено на станции).
-        d.insert("psi".into(), self.pairing_id.clone().into());
-        d.insert("gid".into(), self.pairing_id.clone().into());
-        d.insert("igl".into(), true.into());
-        d.insert("gcgl".into(), true.into());
-        d.insert("pk".into(), Value::Data(self.public_key.to_vec()));
-        d.insert("protocolVersion".into(), Self::PROTOCOL_VERSION.into());
-        d.insert("sourceVersion".into(), self.source_version.clone().into());
-        d.insert("keepAliveLowPower".into(), true.into());
-        d.insert("keepAliveSendStatsAsBody".into(), true.into());
-        if self.audio_only_ui {
-            let mut caps = Dictionary::new();
-            caps.insert("supportsUIForAudioOnlyContent".into(), true.into());
-            d.insert("playbackCapabilities".into(), caps.into());
-        }
-        if let Some(color) = &self.enclosure_color {
-            d.insert("deviceEnclosureColor".into(), color.clone().into());
-        }
+        let mut formats = Dictionary::new();
+        formats.insert("audioStream".into(), Value::Integer(21235712.into()));
+        formats.insert(
+            "bufferStream".into(),
+            Value::Integer(1649282383872u64.into()),
+        );
+        d.insert("supportedFormats".into(), formats.into());
+        d.insert("txtAirPlay".into(), Value::Data(self.txt_airplay_record()));
+        d.insert("volumeControlType".into(), Value::Integer(3.into()));
+        d.insert("vv".into(), Value::Integer(2.into()));
         if let Some(display) = self.display {
             let mut s = Dictionary::new();
             s.insert("widthPixels".into(), Value::Integer(display.width.into()));
@@ -160,24 +226,57 @@ impl DeviceInfo {
         out
     }
 
+    /// `txtAirPlay` в `/info`: TXT-запись shairport-sync, каждая строка с байтом длины.
+    fn txt_airplay_record(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        for (k, v) in [
+            ("acl", "0".to_string()),
+            ("btaddr", "00:00:00:00:00:00".into()),
+            ("deviceid", self.device_id.clone()),
+            ("fex", self.fex()),
+            ("features", self.features.to_txt()),
+            ("flags", format!("0x{:X}", self.status_flags)),
+            ("gid", self.group_id()),
+            ("igl", "1".into()),
+            ("gcgl", "1".into()),
+            ("pgid", self.pgid.clone()),
+            ("model", self.model.clone()),
+            ("protovers", Self::PROTOCOL_VERSION.into()),
+            ("pi", self.pi()),
+            ("psi", self.pairing_id.clone()),
+            ("pk", hex::encode(self.public_key)),
+            ("srcvers", self.source_version.clone()),
+            ("osvers", Self::OS_VERSION.into()),
+            ("vv", "2".into()),
+        ] {
+            let entry = format!("{k}={v}");
+            out.push(entry.len() as u8);
+            out.extend_from_slice(entry.as_bytes());
+        }
+        out
+    }
+
     /// TXT-записи службы `_airplay._tcp`.
     pub fn airplay_txt(&self) -> Vec<(String, String)> {
         let pk = hex::encode(self.public_key);
         [
             ("acl", "0".to_string()),
             ("deviceid", self.device_id.clone()),
+            ("fex", self.fex()),
             ("features", self.features.to_txt()),
             ("flags", format!("0x{:X}", self.status_flags)),
-            ("gid", self.pairing_id.clone()),
+            ("gid", self.group_id()),
             ("igl", "1".into()),
             ("gcgl", "1".into()),
             ("model", self.model.clone()),
             ("protovers", Self::PROTOCOL_VERSION.into()),
-            ("pi", self.pairing_id.clone()),
+            ("pi", self.pi()),
             ("psi", self.pairing_id.clone()),
             ("pk", pk),
             ("srcvers", self.source_version.clone()),
+            ("osvers", Self::OS_VERSION.into()),
             ("vv", "2".into()),
+            ("fv", Self::FIRMWARE_VERSION.into()),
         ]
         .into_iter()
         .map(|(k, v)| (k.to_string(), v))
@@ -228,13 +327,19 @@ mod tests {
             display: None,
             audio_only_ui: false,
             enclosure_color: None,
+            group: None,
+            pgid: "00000000-0000-4000-8000-000000000000".into(),
         }
     }
 
     #[test]
     fn audio_receiver_matches_shairport_sync() {
-        assert_eq!(Features::AUDIO_RECEIVER.0, 0x1C340405D4A00);
-        assert_eq!(Features::AUDIO_RECEIVER.to_txt(), "0x405D4A00,0x1C340");
+        // Как TXT станции (shairport-sync 5.5.1 с метаданными).
+        assert_eq!(Features::AUDIO_RECEIVER.0, 0x1C340405FCA00);
+        assert_eq!(Features::AUDIO_RECEIVER.to_txt(), "0x405FCA00,0x1C340");
+        let mut dev = info();
+        dev.features = Features::AUDIO_RECEIVER;
+        assert_eq!(dev.fex(), "AMpfQEDDAQA");
     }
 
     #[test]
@@ -242,11 +347,13 @@ mod tests {
         let v = Value::from_reader(std::io::Cursor::new(info().info_plist())).unwrap();
         let d = v.as_dictionary().unwrap();
         assert_eq!(d["deviceID"].as_string(), Some("02:11:22:33:44:55"));
-        assert_eq!(d["features"].as_signed_integer(), Some(0x1C340405D4A00));
+        assert_eq!(d["features"].as_signed_integer(), Some(0x1C340405FCA00));
         assert_eq!(d["pk"].as_data(), Some(&[9u8; 32][..]));
-        assert_eq!(d["psi"].as_string(), d["pi"].as_string());
-        assert_eq!(d["igl"].as_boolean(), Some(true));
-        assert_eq!(d["gcgl"].as_boolean(), Some(true));
+        // Как у shairport: pi из deviceid, psi — идентичность сопряжения.
+        assert_ne!(d["psi"].as_string(), d["pi"].as_string());
+        assert_eq!(d["volumeControlType"].as_signed_integer(), Some(3));
+        let txt = d["txtAirPlay"].as_data().unwrap();
+        assert!(txt.windows(5).any(|w| w == b"igl=1"));
     }
 
     #[test]
