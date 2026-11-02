@@ -80,7 +80,7 @@ LocalClock. `Timeline::clock_map` адаптирует измеренное RX-�
 запускают. Платформенный адаптер должен создать один реальный источник локальных
 меток; одинаковый тег LocalClock без общего источника не обеспечивает синхронность.
 
-Master.complete_sync/receive принимают Reading и проверяют совпадение ClockID
+Master.complete_send/receive принимают Reading и проверяют совпадение ClockID
 и поколения. MediaTimeline.anchor требует текущее Domain: после смены мастера
 или рестарта со старым ClockID прежний якорь отвергается. Адаптер отвечает за
 смену поколения, получение свежих mappings и согласованный переход сеансов.
@@ -90,14 +90,31 @@ Master.complete_sync/receive принимают Reading и проверяют с
 Подготовлены отдельные автономные примитивы `clock::ptp_sender::Master` и
 `MediaTimeline`, а также `rtp::ptp_sync_packet`. Они не подключены к transport.
 Master возвращает датаграммы для явно заданных peers; Follow_Up появляется
-только после `complete_sync` с реальным egress timestamp. Он отвечает на
+только после `complete_send` с реальным egress timestamp. Он отвечает на
 Delay_Req, ограничивает рассылку по времени и останавливает эксперимент при
-чужом Announce. Это фиксированный мастер без BMCA, Pdelay и Signaling, без
-сокетов и без доказательства receiver lock/readiness; в LAN пока не включать.
+чужом Announce. Pdelay использует отдельный send-completion для времени
+Pdelay_Resp_Follow_Up; его токен не подменяет ожидающий Sync. Signaling разбирает
+валидные REQUEST_UNICAST TLV и выдаёт до восьми ограниченных grants только для
+поддерживаемых интервалов (Announce 1 с, Sync/DelayResp 125 мс), до 300 с.
+Это не полная реализация negotiation/Cancel/lease scheduling. Фиксированный
+мастер не реализует BMCA/follower и не доказывает receiver lock/readiness.
+Core без сокетов; в LAN пока не включать.
 MediaTimeline сохраняет одну связь sample index / RTP / master ns; смена
 grandmaster требует отдельного решения адаптера, а не изменения ClockID на лету.
 Сериализатор d7 не выбирает receiver-specific семантику frame_1/frame_2 и latency:
 её ещё нужно связать с PCM packetizer и проверить по полному сеансу HomePod.
+
+`timesync::sender::MasterService` — отдельный явно запускаемый UDP-адаптер этого
+прототипа. Он требует конкретный bind IP, два порта, список peers/портов и
+внедрённый общий ClockSource; своего источника времени не создаёт. sample должен
+возвращать согласованную пару LocalInstant/Reading из кеша без блокирующих I/O.
+Смена domain/epoch или локальной эпохи завершает worker с ошибкой. Send/stop
+имеют deadlines; shutdown дожидается освобождения сокетов, Drop отменяет worker.
+Не запускать одновременно с действующим TimeSync на тех же портах: binding
+эксклюзивен, второго владельца адаптер отвергает. До production оба направления
+должен объединить один controller выбора роли; сейчас TimeSync::start, sender
+Session и CLI новый адаптер не вызывают. Проверка — только IPv4 loopback на
+высоких портах в контейнере без сети, не реальный HomePod.
 
 - HTTP transient HAP pair-setup M1–M4 через общий `pair::hap::ControllerSetup`,
   включая проверку доказательства сервера. Постоянное PIN-сопряжение не включено.

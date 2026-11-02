@@ -5,6 +5,7 @@
 //! работает вхолостую, и плеер играет по своим часам, без мультирума.
 
 pub mod ntp;
+pub mod sender;
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
