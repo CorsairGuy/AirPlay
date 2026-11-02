@@ -525,7 +525,7 @@ pub fn decode_plist(bytes: &[u8]) -> anyhow::Result<Value> {
 
 /// State/timeline-only patch for an already announced content item. Do not
 /// invalidate artwork or re-announce the queue on ordinary Pause/Play updates.
-pub fn playback_update(identity: &Identity, feed: &Feed) -> Node {
+pub fn playback_updates(identity: &Identity, feed: &Feed) -> Vec<Node> {
     let mut body = Node::default();
     body.node(
         f("SetStateMessage", "playerPath"),
@@ -542,6 +542,7 @@ pub fn playback_update(identity: &Identity, feed: &Feed) -> Node {
         },
     )
     .double(f("SetStateMessage", "playbackStateTimestamp"), cocoa());
+    let mut updates = vec![envelope("SET_STATE_MESSAGE", body, None)];
     if !feed.content_id.is_empty() && !feed.title.is_empty() {
         let mut metadata = Node::default();
         metadata
@@ -557,16 +558,19 @@ pub fn playback_update(identity: &Identity, feed: &Feed) -> Node {
         let mut item = Node::default();
         item.text(f("ContentItem", "identifier"), &feed.content_id)
             .node(f("ContentItem", "metadata"), &metadata);
-        let mut queue = Node::default();
-        queue
-            .int(f("PlaybackQueue", "location"), 0)
-            .node(f("PlaybackQueue", "contentItems"), &item);
-        body.node(f("SetStateMessage", "playbackQueue"), &queue);
+        let mut update = Node::default();
+        update
+            .node(f("UpdateContentItemMessage", "contentItems"), &item)
+            .node(
+                f("UpdateContentItemMessage", "playerPath"),
+                &path(identity, feed, false),
+            );
+        updates.push(envelope("UPDATE_CONTENT_ITEM_MESSAGE", update, None));
     }
-    envelope("SET_STATE_MESSAGE", body, None)
+    updates
 }
 
-pub fn state_change(identity: &Identity, previous: &Feed, current: &Feed) -> Option<Node> {
+pub fn state_change(identity: &Identity, previous: &Feed, current: &Feed) -> Vec<Node> {
     if current.content_id != previous.content_id
         || current.title != previous.title
         || current.artist != previous.artist
@@ -575,13 +579,13 @@ pub fn state_change(identity: &Identity, previous: &Feed, current: &Feed) -> Opt
         || current.duration != previous.duration
         || current.control_available != previous.control_available
     {
-        Some(state(identity, current, None, None))
+        vec![state(identity, current, None, None)]
     } else if current.playing != previous.playing
         || (current.position - previous.position).abs() >= 1.0
     {
-        Some(playback_update(identity, current))
+        playback_updates(identity, current)
     } else {
-        None
+        Vec::new()
     }
 }
 
@@ -589,7 +593,7 @@ pub fn state_change(identity: &Identity, previous: &Feed, current: &Feed) -> Opt
 mod playback_patch_tests {
     use super::*;
     #[test]
-    fn pause_play_patches_preserve_artwork_but_late_join_requests_still_return_it() {
+    fn pause_play_merge_item_without_replacing_queue_and_late_join_returns_artwork() {
         let id = Identity {
             device: "device".into(),
             group: "group".into(),
@@ -598,6 +602,7 @@ mod playback_patch_tests {
             content_id: "track".into(),
             title: "Song".into(),
             playing: true,
+            control_available: true,
             cover: Some(Cover {
                 data: Arc::new(vec![1, 2, 3]),
                 id: "cover".into(),
@@ -607,19 +612,32 @@ mod playback_patch_tests {
             }),
             ..Default::default()
         };
+        let initial = state(&id, &before, None, None);
+        let mut fixtures = vec![("initial", initial)];
         for playing in [false, true] {
             let mut current = before.clone();
             current.playing = playing;
             current.position = 12.0;
-            let message = state_change(&id, &before, &current).unwrap();
-            message.validate("ProtocolMessage").unwrap();
-            let body = message
+            let messages = state_change(&id, &before, &current);
+            assert_eq!(messages.len(), 2);
+            for message in &messages {
+                message.validate("ProtocolMessage").unwrap();
+            }
+            let state_body = messages[0]
                 .nested(schema::extension(kind("SET_STATE_MESSAGE")))
                 .unwrap();
-            let queue = body.nested(f("SetStateMessage", "playbackQueue")).unwrap();
-            let item = queue.nested(f("PlaybackQueue", "contentItems")).unwrap();
+            assert!(
+                state_body
+                    .get(f("SetStateMessage", "playbackQueue"))
+                    .is_none()
+            );
+            let update = messages[1]
+                .nested(schema::extension(kind("UPDATE_CONTENT_ITEM_MESSAGE")))
+                .unwrap();
+            let item = update
+                .nested(f("UpdateContentItemMessage", "contentItems"))
+                .unwrap();
             assert_eq!(item.string(f("ContentItem", "identifier")), Some("track"));
-            assert!(item.get(f("ContentItem", "artworkData")).is_none());
             let metadata = item.nested(f("ContentItem", "metadata")).unwrap();
             assert_eq!(metadata.0.len(), 3);
             assert_eq!(
@@ -634,6 +652,26 @@ mod playback_patch_tests {
             ] {
                 assert!(metadata.get(f("ContentItemMetadata", name)).is_none());
             }
+            let prefix = if playing { "play" } else { "pause" };
+            fixtures.push((
+                if playing { "play_state" } else { "pause_state" },
+                messages[0].clone(),
+            ));
+            fixtures.push((
+                if playing { "play_item" } else { "pause_item" },
+                messages[1].clone(),
+            ));
+            if prefix == "pause" {
+                // Reproduce the rejected old wire shape for an independent
+                // client regression: SetState replaces this truncated queue.
+                let mut queue = Node::default();
+                queue
+                    .int(f("PlaybackQueue", "location"), 0)
+                    .node(f("PlaybackQueue", "contentItems"), &item);
+                let mut legacy = state_body.clone();
+                legacy.node(f("SetStateMessage", "playbackQueue"), &queue);
+                fixtures.push(("legacy_pause", envelope("SET_STATE_MESSAGE", legacy, None)));
+            }
         }
         let mut request = Node::default();
         request.float(f("PlaybackQueueRequestMessage", "artworkWidth"), 2.0);
@@ -647,5 +685,12 @@ mod playback_patch_tests {
             item.raw(f("ContentItem", "artworkData")),
             Some([1, 2, 3].as_slice())
         );
+        if let Some(folder) = std::env::var_os("MRP_REGRESSION_OUTPUT") {
+            let folder = std::path::PathBuf::from(folder);
+            std::fs::create_dir_all(&folder).unwrap();
+            for (name, message) in fixtures {
+                std::fs::write(folder.join(format!("{name}.pb")), message.encode()).unwrap();
+            }
+        }
     }
 }

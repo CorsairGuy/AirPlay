@@ -1,7 +1,9 @@
 // Generated from the reference MRP descriptors; do not alter wire tags.
 pub fn field(message: &str, name: &str) -> u32 {
     match (message, name) {
-        ("AVOutputDeviceDescriptor", "name") => 1,
+        ("UpdateContentItemMessage","contentItems")=>1,
+("UpdateContentItemMessage","playerPath")=>2,
+("AVOutputDeviceDescriptor", "name") => 1,
         ("AVOutputDeviceDescriptor", "uniqueIdentifier") => 2,
         ("AVOutputDeviceDescriptor", "groupID") => 3,
         ("AVOutputDeviceDescriptor", "modelID") => 4,
@@ -588,7 +590,9 @@ pub fn kind(name: &str) -> u32 {
 }
 pub fn wire_type(message: &str, field: u32) -> Option<(u8, &'static str)> {
     match (message, field) {
-        ("AVOutputDeviceDescriptor", 1) => Some((2, "")),
+        ("UpdateContentItemMessage",1)=>Some((2,"ContentItem")),
+("UpdateContentItemMessage",2)=>Some((2,"PlayerPath")),
+("AVOutputDeviceDescriptor", 1) => Some((2, "")),
         ("AVOutputDeviceDescriptor", 2) => Some((2, "")),
         ("AVOutputDeviceDescriptor", 3) => Some((2, "")),
         ("AVOutputDeviceDescriptor", 4) => Some((2, "")),

@@ -1,5 +1,17 @@
 # Partial card updates and cached artwork
 
+Correction: the first candidate's truncated queue inside SetState was rejected
+after a physical Station trial broke Play/Next; rollback restored the controls.
+An independent pyatv replay proves that this shape replaces the queue and loses
+existing item metadata. The corrected implementation uses queue-free SetState
+plus UpdateContentItem56(extension60) to merge the existing item's timeline.
+Rust fixtures replayed through pyatv preserve title/artwork/archive/commands and
+Pause/Play state. This explains a concrete defect; iPhone control recovery on
+the corrected candidate remains physically unverified.
+
+The older description below must be read with that correction: timeline items
+are no longer sent inside a reduced SetState.PlaybackQueue.
+
 The card receives receiver events, not a generic downstream MRP player-state
 stream. Its DMAP metadata updates can omit fields: omission preserves current
 fields, while a different title clears the old item's missing metadata, artwork,
