@@ -54,7 +54,27 @@ for prefix, state, rate in [('pause', pb.PlaybackState.Paused, 0.0),
     assert len(current.items) == 1
     assert abs(current.metadata.elapsedTime - 12.0) < 1e-6
 
+
+# Replay the complete multi-message packet through the unmodified pyatv decoder.
+from pyatv.protocols.airplay.channels import BaseDataStreamChannel
+from pyatv.support.variant import read_variant, write_variant
+import logging
+packet = (root / 'group_update_packet.bin').read_bytes()
+decoded = BaseDataStreamChannel.decode_protobufs(packet)
+assert len(decoded) == 5
+assert decoded[0].type == pb.DEVICE_INFO_UPDATE_MESSAGE
+assert any(message.type == pb.UPDATE_OUTPUT_DEVICE_MESSAGE for message in decoded)
+length, rest = read_variant(packet)
+legacy = (root / 'legacy_device_update.pb').read_bytes()
+bad_packet = write_variant(len(legacy)) + legacy + rest[length:]
+previous_logging = logging.root.manager.disable
+try:
+    logging.disable(logging.CRITICAL)  # Expected negative-control decoder error.
+    assert BaseDataStreamChannel.decode_protobufs(bad_packet) == []
+finally:
+    logging.disable(previous_logging)
+
 print(json.dumps({'old_shape_loses_metadata': True,
                   'new_shape_preserves_queue_artwork_commands': True,
                   'pause_play_correct': True,
-                  'network_connections': 0}))
+                  'network_connections': 0, 'strict_group_packet_decoded': True, 'old_order_drops_following_updates': True}))

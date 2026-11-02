@@ -416,14 +416,20 @@ pub fn volume(identity: &Identity, feed: &Feed) -> Node {
     envelope("VOLUME_DID_CHANGE_MESSAGE", n, None)
 }
 pub fn device_info_update(identity: &Identity, feed: &Feed) -> Node {
-    let mut n = device_info(identity, feed, None);
-    n.0.retain(|(tag, _)| *tag != f("ProtocolMessage", "type"));
-    n.int(
-        f("ProtocolMessage", "type"),
-        kind("DEVICE_INFO_UPDATE_MESSAGE") as u64,
-    );
-    n
+    let mut message = device_info(identity, feed, None);
+    // MRP clients use the leading field-1 tag to recognize protobuf frames.
+    // Update the existing value in place: removing and appending type moves
+    // it behind the body and can discard the rest of a multi-message packet.
+    let tag = f("ProtocolMessage", "type");
+    let (_, value) = message
+        .0
+        .iter_mut()
+        .find(|(field, _)| *field == tag)
+        .expect("device info type");
+    *value = crate::station_mrp::wire::Value::Int(kind("DEVICE_INFO_UPDATE_MESSAGE") as u64);
+    message
 }
+
 pub fn announcement(identity: &Identity, feed: &Feed) -> Vec<Node> {
     let mut updated = Node::default();
     updated.node(f("UpdateClientMessage", "client"), &client(feed));
@@ -691,6 +697,56 @@ mod playback_patch_tests {
             for (name, message) in fixtures {
                 std::fs::write(folder.join(format!("{name}.pb")), message.encode()).unwrap();
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod device_update_order_tests {
+    use super::*;
+    #[test]
+    fn device_update_starts_with_type_and_preserves_device_info_body() {
+        let id = Identity {
+            device: "device".into(),
+            group: "group".into(),
+        };
+        let feed = Feed::default();
+        let original = device_info(&id, &feed, None);
+        let update = device_info_update(&id, &feed);
+        assert_eq!(update.encode()[0], 8);
+        assert_eq!(
+            update.number(f("ProtocolMessage", "type")),
+            Some(kind("DEVICE_INFO_UPDATE_MESSAGE") as u64)
+        );
+        assert_eq!(
+            update
+                .nested(schema::extension(kind("DEVICE_INFO_UPDATE_MESSAGE")))
+                .unwrap(),
+            original
+                .nested(schema::extension(kind("DEVICE_INFO_MESSAGE")))
+                .unwrap()
+        );
+        update.validate("ProtocolMessage").unwrap();
+        if let Some(folder) = std::env::var_os("MRP_REGRESSION_OUTPUT") {
+            let folder = std::path::PathBuf::from(folder);
+            std::fs::create_dir_all(&folder).unwrap();
+            let mut legacy = update.clone();
+            legacy
+                .0
+                .retain(|(tag, _)| *tag != f("ProtocolMessage", "type"));
+            legacy.int(
+                f("ProtocolMessage", "type"),
+                kind("DEVICE_INFO_UPDATE_MESSAGE") as u64,
+            );
+            std::fs::write(folder.join("device_update.pb"), update.encode()).unwrap();
+            std::fs::write(folder.join("legacy_device_update.pb"), legacy.encode()).unwrap();
+            let mut packet = vec![update];
+            packet.extend(topology(&id, &feed));
+            std::fs::write(
+                folder.join("group_update_packet.bin"),
+                crate::station_mrp::wire::encode_packet(&packet),
+            )
+            .unwrap();
         }
     }
 }

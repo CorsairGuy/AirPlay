@@ -1,5 +1,13 @@
 # Partial card updates and cached artwork
 
+DeviceInfoUpdate now changes its existing type field in place, keeping field1
+first. Although protobuf permits other field orders, the standard pyatv AirPlay
+decoder requires leading0x08 and otherwise discards following messages in the
+same packet. An independent full-packet regression reproduces that loss and
+decodes all five corrected group-update messages.42AirPlay tests passed. The
+effect on iPhone selected-row blinking remains a physical test, not an assertion
+based only on pyatv behavior.
+
 Correction: the first candidate's truncated queue inside SetState was rejected
 after a physical Station trial broke Play/Next; rollback restored the controls.
 An independent pyatv replay proves that this shape replaces the queue and loses
