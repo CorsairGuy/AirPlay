@@ -13,6 +13,7 @@ pub mod events;
 pub mod media;
 pub mod remote;
 pub mod send;
+pub mod local_process;
 pub mod serve;
 pub mod session;
 pub mod state;

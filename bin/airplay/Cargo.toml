@@ -32,7 +32,8 @@ mediaserver.workspace = true
 mediaremote.workspace = true
 mrp.workspace = true
 anyhow.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["process"] }
+libc = "0.2"
 tracing.workspace = true
 tracing-subscriber.workspace = true
 rand.workspace = true

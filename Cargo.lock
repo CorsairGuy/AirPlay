@@ -57,6 +57,7 @@ dependencies = [
  "ap_video",
  "hex",
  "if-addrs",
+ "libc",
  "mediaremote",
  "mediaserver",
  "plist",

@@ -23,6 +23,7 @@ pub struct Options {
     pub targets: Vec<String>,
     pub volume_db: f32,
     pub latency_ms: u32,
+    pub local: Option<crate::local_process::Options>,
 }
 
 impl Options {
@@ -31,7 +32,12 @@ impl Options {
             targets: Vec::new(),
             volume_db: -29.7,
             latency_ms: 500,
+            local: None,
         };
+        let mut local_program = None;
+        let mut local_args = Vec::new();
+        let mut local_gain = 1;
+        let mut local_gate = None;
         let mut args = args.iter();
         while let Some(argument) = args.next() {
             let value = args
@@ -47,9 +53,34 @@ impl Options {
                     options.latency_ms =
                         value.parse().context("--latency-ms: нужны миллисекунды")?
                 }
+                "--local-program" => {
+                    if local_program.is_some() {
+                        bail!("--local-program задан повторно");
+                    }
+                    local_program = Some(std::path::PathBuf::from(value));
+                }
+                "--local-arg" => local_args.push(value.clone()),
+                "--local-gain" => {
+                    local_gain = value.parse().context("--local-gain: нужно целое 1..4")?
+                }
+                "--local-gate" => local_gate = Some(std::path::PathBuf::from(value)),
                 other => bail!("неизвестный параметр {other}"),
             }
         }
+        options.local = match local_program {
+            Some(program) => Some(crate::local_process::Options {
+                program,
+                args: local_args,
+                gain: local_gain,
+                gate: local_gate,
+            }),
+            None => {
+                if !local_args.is_empty() || local_gain != 1 || local_gate.is_some() {
+                    bail!("локальные параметры требуют --local-program");
+                }
+                None
+            }
+        };
         options.validate()?;
         Ok(options)
     }
@@ -61,6 +92,9 @@ impl Options {
         Volume::db(self.volume_db)?;
         if !(250..=2_000).contains(&self.latency_ms) {
             bail!("--latency-ms: допустимо 250..2000 мс");
+        }
+        if let Some(local) = &self.local {
+            local.validate()?;
         }
         Ok(())
     }
@@ -131,10 +165,18 @@ async fn produce<R: AsyncRead + Unpin>(
 /// All receivers connect before a single media clock starts. Any peer failure
 /// stops this run: reconnect/group restoration is deliberately not implicit.
 pub async fn run<R: AsyncRead + Unpin>(
-    options: Options,
+    mut options: Options,
     input: R,
     stop: watch::Receiver<bool>,
 ) -> Result<()> {
+    options.validate()?;
+    if *stop.borrow() {
+        return Ok(());
+    }
+    if let Some(local) = options.local.take() {
+        let renderer = crate::local_process::Renderer::spawn(local)?;
+        return run_with_local(options, input, stop, renderer).await;
+    }
     run_inner(options, input, stop, None).await
 }
 
@@ -147,6 +189,9 @@ pub async fn run_with_local<R: AsyncRead + Unpin, S: sender::LocalSink>(
     stop: watch::Receiver<bool>,
     sink: S,
 ) -> Result<()> {
+    if options.local.is_some() {
+        bail!("local process and supplied LocalSink are mutually exclusive");
+    }
     let local: LocalFactory = Box::new(move |packets, latency, stop| {
         Box::pin(async move {
             sender::run_local(sink, packets, latency, stop).await?;
@@ -293,6 +338,16 @@ mod tests {
             vec!["--to", "x", "--volume", "NaN"],
             vec!["--to", "x", "--latency-ms", "249"],
             vec!["--to", "x", "--latency-ms", "2001"],
+            vec!["--to", "x", "--local-arg", "null"],
+            vec!["--to", "x", "--local-program", "relative"],
+            vec![
+                "--to",
+                "x",
+                "--local-program",
+                "/bin/cat",
+                "--local-gain",
+                "5",
+            ],
         ] {
             assert!(Options::parse(&args(&values)).is_err(), "{values:?}");
         }
@@ -416,6 +471,7 @@ mod tests {
             targets: vec![address.to_string()],
             volume_db: 0.0,
             latency_ms: 250,
+            local: None,
         };
         struct LocalCapture(Arc<Mutex<Vec<(Arc<AudioPacket>, std::time::Instant)>>>);
         impl sender::LocalSink for LocalCapture {

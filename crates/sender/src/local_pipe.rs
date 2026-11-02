@@ -12,6 +12,7 @@ pub struct LocalPcmPipe<W> {
     reference: Instant,
     reference_ns: i64,
     gain: u8,
+    audible: bool,
     record: Vec<u8>,
 }
 impl<W> LocalPcmPipe<W> {
@@ -25,6 +26,7 @@ impl<W> LocalPcmPipe<W> {
                 .try_into()
                 .context("local clock outside signed nanoseconds")?,
             gain: 1,
+            audible: true,
             record: Vec::with_capacity(crate::PACKET_BYTES + 16),
         })
     }
@@ -35,6 +37,10 @@ impl<W> LocalPcmPipe<W> {
         }
         self.gain = gain;
         Ok(self)
+    }
+    /// Startup handoff gate; silences only this output, retaining its timing.
+    pub fn set_audible(&mut self, audible: bool) {
+        self.audible = audible;
     }
     fn timestamp(&self, at: Instant) -> Result<i64> {
         let delta = if at >= self.reference {
@@ -57,6 +63,14 @@ impl<W: AsyncWrite + Unpin + Send + 'static> LocalSink for LocalPcmPipe<W> {
         self.record.extend_from_slice(&timestamp.to_le_bytes());
         self.record
             .extend_from_slice(&((packet.pcm().len() / 4) as u32).to_le_bytes());
+        if !self.audible {
+            self.record.resize(16 + packet.pcm().len(), 0);
+            return self
+                .writer
+                .write_all(&self.record)
+                .await
+                .context("local silent PCM pipe write");
+        }
         for sample in packet.pcm().chunks_exact(2) {
             let value = (i32::from(i16::from_be_bytes([sample[0], sample[1]]))
                 * i32::from(self.gain))
@@ -77,6 +91,30 @@ impl<W: AsyncWrite + Unpin + Send + 'static> LocalSink for LocalPcmPipe<W> {
 mod tests {
     use super::*;
     use tokio::io::AsyncReadExt;
+    #[tokio::test]
+    async fn startup_gate_silences_only_local_payload_and_keeps_timestamps() {
+        let (writer, mut reader) = tokio::io::duplex(4096);
+        let now = Instant::now();
+        let packet = Arc::new(
+            crate::MediaClock::at(now, 0)
+                .packet(0, &[0x12; crate::PACKET_BYTES])
+                .unwrap(),
+        );
+        let mut sink = LocalPcmPipe::new(writer, now, 1_000_000_000).unwrap();
+        sink.set_audible(false);
+        sink.write(packet.clone(), now).await.unwrap();
+        sink.set_audible(true);
+        sink.write(packet.clone(), now).await.unwrap();
+        drop(sink);
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).await.unwrap();
+        let size = 16 + crate::PACKET_BYTES;
+        assert_eq!(bytes.len(), size * 2);
+        assert_eq!(&bytes[..16], &bytes[size..size + 16]);
+        assert!(bytes[16..size].iter().all(|b| *b == 0));
+        assert!(bytes[size + 16..].iter().all(|b| *b == 0x12));
+        assert!(packet.pcm().iter().all(|b| *b == 0x12));
+    }
     #[tokio::test]
     async fn pipe_preserves_deadline_and_remote_pcm_with_explicit_local_gain() {
         let (writer, mut reader) = tokio::io::duplex(4096);

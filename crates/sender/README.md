@@ -28,6 +28,17 @@ renderer. Его реализация отвечает за реальный в�
 при Drop. Для Станции отдельно нужны startup gate, guard, локальное приглушение и
 восстановление прямого маршрута; эти функции не включаются автоматически этим API.
 
+Frontend `airplay send` дополнительно имеет opt-in Linux process adapter:
+`--local-program /absolute/program`, повторяемый `--local-arg VALUE`,
+`--local-gain 1..4` и `--local-gate /absolute/unique-session-file`.
+Он сам сопоставляет Instant и CLOCK_MONOTONIC, запускает только заданный executable
+без shell и завершает принадлежащий ему child при отмене. Перед EOF ждёт конца
+запланированного PCM, закрывает stdin и проверяет exit status (deadline200мс).
+Gate влияет только на локальный payload; временные метки сохраняются. Создание gate
+после проверки готовности и восстановление маршрута остаются внешнему контроллеру.
+Без этих флагов поведение CLI остаётся remote-only. Библиотечные callers должны
+добавить `local: None` к `airplay::send::Options`, если используют struct literal.
+
 ## Что реализовано
 
 - HTTP transient HAP pair-setup M1–M4 через общий `pair::hap::ControllerSetup`,
