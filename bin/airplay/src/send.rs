@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
+use std::{future::Future, pin::Pin};
 
 use anyhow::{Context, Result, anyhow, bail};
 use sender::{AudioPacket, Identity, MediaClock, Session, SessionConfig, Volume};
@@ -132,7 +133,44 @@ async fn produce<R: AsyncRead + Unpin>(
 pub async fn run<R: AsyncRead + Unpin>(
     options: Options,
     input: R,
+    stop: watch::Receiver<bool>,
+) -> Result<()> {
+    run_inner(options, input, stop, None).await
+}
+
+/// Optional platform renderer, fed from the same clock and immutable packet queue.
+/// The adapter owns its output latency, gain, startup gate and resource cleanup.
+/// No route is changed by this API; platform handoff requires separate validation.
+pub async fn run_with_local<R: AsyncRead + Unpin, S: sender::LocalSink>(
+    options: Options,
+    input: R,
+    stop: watch::Receiver<bool>,
+    sink: S,
+) -> Result<()> {
+    let local: LocalFactory = Box::new(move |packets, latency, stop| {
+        Box::pin(async move {
+            sender::run_local(sink, packets, latency, stop).await?;
+            Ok(sender::StreamStats::default())
+        })
+    });
+    run_inner(options, input, stop, Some(local)).await
+}
+
+type LocalFuture = Pin<Box<dyn Future<Output = Result<sender::StreamStats>> + Send>>;
+type LocalFactory = Box<
+    dyn FnOnce(
+            broadcast::Receiver<Arc<AudioPacket>>,
+            Duration,
+            watch::Receiver<bool>,
+        ) -> LocalFuture
+        + Send,
+>;
+
+async fn run_inner<R: AsyncRead + Unpin>(
+    options: Options,
+    input: R,
     mut stop: watch::Receiver<bool>,
+    local: Option<LocalFactory>,
 ) -> Result<()> {
     options.validate()?;
     if *stop.borrow() {
@@ -150,7 +188,14 @@ pub async fn run<R: AsyncRead + Unpin>(
         ),
         "AirPlay sender",
     );
-    let (audio, receiver) = broadcast::channel(QUEUE_PACKETS);
+    // A renderer may block while its device consumes lead-in silence. Bound memory,
+    // but allow the configured latency before declaring a local subscriber overrun.
+    let capacity = if local.is_some() {
+        ((u64::from(options.latency_ms) * RATE).div_ceil(1000 * FRAMES as u64) + 32) as usize
+    } else {
+        QUEUE_PACKETS
+    };
+    let (audio, receiver) = broadcast::channel(capacity);
     drop(receiver);
     let (_volume, volumes) = watch::channel(volume);
     let (halt, halted) = watch::channel(false);
@@ -177,6 +222,13 @@ pub async fn run<R: AsyncRead + Unpin>(
             _ = stop.changed() => return Ok(()),
         };
         workers.spawn(session.run(audio.subscribe(), volumes.clone(), halted.clone()));
+    }
+    if let Some(start) = local {
+        workers.spawn(start(
+            audio.subscribe(),
+            Duration::from_millis(u64::from(options.latency_ms)),
+            halted.clone(),
+        ));
     }
     let result: Result<bool> = tokio::select! {
         produced = produce(input, audio) => produced.map(|_| true),
@@ -268,6 +320,15 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn sender_to_receiver_delivers_big_endian_stereo_samples() {
+        loopback(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn local_and_remote_outputs_share_pcm_and_presentation_deadlines() {
+        loopback(true).await;
+    }
+
+    async fn loopback(with_local: bool) {
         use crate::{media::Player, session::Context as ReceiverContext};
         use audio::Sink;
         use device::{DeviceInfo, Features};
@@ -356,10 +417,34 @@ mod tests {
             volume_db: 0.0,
             latency_ms: 250,
         };
-        let result = tokio::time::timeout(
-            Duration::from_secs(12),
-            run(options, std::io::Cursor::new(pcm), stopped),
-        )
+        struct LocalCapture(Arc<Mutex<Vec<(Arc<AudioPacket>, std::time::Instant)>>>);
+        impl sender::LocalSink for LocalCapture {
+            async fn write(
+                &mut self,
+                packet: Arc<AudioPacket>,
+                at: std::time::Instant,
+            ) -> Result<()> {
+                self.0.lock().unwrap().push((packet, at));
+                Ok(())
+            }
+            async fn finish(&mut self) -> Result<()> {
+                Ok(())
+            }
+        }
+        let local_seen = Arc::new(Mutex::new(Vec::new()));
+        let result = tokio::time::timeout(Duration::from_secs(12), async {
+            if with_local {
+                run_with_local(
+                    options,
+                    std::io::Cursor::new(pcm),
+                    stopped,
+                    LocalCapture(local_seen.clone()),
+                )
+                .await
+            } else {
+                run(options, std::io::Cursor::new(pcm), stopped).await
+            }
+        })
         .await;
         if !matches!(&result, Ok(Ok(()))) {
             receiver.abort();
@@ -379,5 +464,14 @@ mod tests {
             exact_pairs >= FRAMES * 4,
             "too few exact S16BE stereo frames: {exact_pairs}"
         );
+        if with_local {
+            let records = local_seen.lock().unwrap();
+            assert_eq!(records.len(), 48);
+            for (i, (packet, at)) in records.iter().enumerate() {
+                assert_eq!(packet.frame_index(), i as u64 * FRAMES as u64);
+                assert_eq!(*at, packet.play_at(Duration::from_millis(250)).unwrap());
+                assert_eq!(&packet.pcm()[..4], &[0x12, 0x34, 0xdc, 0xbb]);
+            }
+        }
     }
 }
