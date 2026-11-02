@@ -14,6 +14,8 @@ pub mod media;
 pub mod remote;
 pub mod send;
 pub mod send_control;
+#[cfg(unix)]
+pub mod send_ipc;
 pub mod local_process;
 pub mod serve;
 pub mod session;

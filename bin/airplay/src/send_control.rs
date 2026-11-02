@@ -39,6 +39,9 @@ impl RelayControl {
             && state.targets.values().all(|v| v.media.borrow().is_some())
     }
     pub fn snapshot(&self) -> Vec<TargetStatus> {
+        self.status_snapshot().1
+    }
+    pub fn status_snapshot(&self) -> (bool, Vec<TargetStatus>) {
         let state = self.0.lock().unwrap();
         let mut targets: Vec<_> = state
             .targets
@@ -50,7 +53,11 @@ impl RelayControl {
             })
             .collect();
         targets.sort_by_key(|v| v.endpoint);
-        targets
+        let started = state.active
+            && state.expected > 0
+            && targets.len() == state.expected
+            && targets.iter().all(|v| v.media.is_some());
+        (started, targets)
     }
     pub fn set_volume(&self, endpoint: SocketAddr, volume: Volume) -> Result<()> {
         let state = self.0.lock().unwrap();

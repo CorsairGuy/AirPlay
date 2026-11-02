@@ -81,7 +81,9 @@ Frontend-библиотека `airplay::send_control::RelayControl` и
 всем настроенным участникам, не ongoing health/акустическую готовность.
 При ошибке/stop/end/cancellation регистрация очищается; один handle нельзя
 одновременно использовать для двух запусков. Это in-process API, не IPC;
-нынешний CLI всё ещё имеет статический общий volume.
+CLI по умолчанию имеет общий initial volume; опциональный --control-socket
+добавляет process-мост STATUS/VOLUME с независимым управлением участниками.
+Контракт и ограничения описаны в docs/RELAY_IPC.md корня репозитория.
 
 `Identity` — identity отправителя, переданная приложением, без встроенного имени
 Станции или подмены модели HomePod. `SessionConfig::new(endpoint, identity)` имеет

@@ -24,6 +24,7 @@ pub struct Options {
     pub volume_db: f32,
     pub latency_ms: u32,
     pub local: Option<crate::local_process::Options>,
+    pub control_socket: Option<std::path::PathBuf>,
 }
 
 impl Options {
@@ -33,6 +34,7 @@ impl Options {
             volume_db: -29.7,
             latency_ms: 500,
             local: None,
+            control_socket: None,
         };
         let mut local_program = None;
         let mut local_args = Vec::new();
@@ -64,6 +66,7 @@ impl Options {
                     local_gain = value.parse().context("--local-gain: нужно целое 1..4")?
                 }
                 "--local-gate" => local_gate = Some(std::path::PathBuf::from(value)),
+                "--control-socket" => options.control_socket = Some(value.into()),
                 other => bail!("неизвестный параметр {other}"),
             }
         }
@@ -95,6 +98,11 @@ impl Options {
         }
         if let Some(local) = &self.local {
             local.validate()?;
+        }
+        if let Some(path) = &self.control_socket {
+            if !cfg!(unix) || !path.is_absolute() {
+                bail!("control socket requires an absolute Unix path")
+            }
         }
         Ok(())
     }
@@ -165,10 +173,23 @@ async fn produce<R: AsyncRead + Unpin>(
 /// All receivers connect before a single media clock starts. Any peer failure
 /// stops this run: reconnect/group restoration is deliberately not implicit.
 pub async fn run<R: AsyncRead + Unpin>(
-    options: Options,
+    mut options: Options,
     input: R,
     stop: watch::Receiver<bool>,
 ) -> Result<()> {
+    options.validate()?;
+    if *stop.borrow() {
+        return Ok(());
+    }
+    if let Some(path) = options.control_socket.take() {
+        #[cfg(unix)]
+        return crate::send_ipc::run(options, input, stop, path).await;
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+            bail!("control socket unsupported")
+        }
+    }
     run_inner(options, input, stop, None, None).await
 }
 
@@ -245,6 +266,9 @@ async fn run_inner<R: AsyncRead + Unpin>(
     control: Option<crate::send_control::RelayControl>,
 ) -> Result<()> {
     options.validate()?;
+    if options.control_socket.is_some() {
+        bail!("explicit RelayControl and CLI control socket cannot be combined")
+    }
     if *stop.borrow() {
         return Ok(());
     }
@@ -524,6 +548,7 @@ mod tests {
             volume_db: 0.0,
             latency_ms: 250,
             local: None,
+            control_socket: None,
         };
         struct LocalCapture(Arc<Mutex<Vec<(Arc<AudioPacket>, std::time::Instant)>>>);
         impl sender::LocalSink for LocalCapture {

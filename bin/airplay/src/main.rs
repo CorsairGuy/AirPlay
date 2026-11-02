@@ -76,6 +76,7 @@ const USAGE: &str = "\
   --local-arg VALUE      аргумент renderer; можно повторять
   --local-gain N         компенсация только локальной копии, 1..4; по умолчанию 1
   --local-gate /PATH     локально тишина, пока файл готовности отсутствует
+  --control-socket /PATH локальное управление STATUS/VOLUME (Unix, private directory)
                   stdin: S16BE, 44100 Гц, стерео. Один общий источник времени;
                   это не управление группой AP2/PTP. Ошибка приёмника завершает запуск.
 
