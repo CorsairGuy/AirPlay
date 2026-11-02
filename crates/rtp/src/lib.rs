@@ -5,6 +5,8 @@ use chacha20poly1305::aead::{AeadInPlace, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce, Tag};
 
 mod packetizer;
+mod ptp;
+pub use ptp::ptp_sync_packet;
 pub use packetizer::{
     MAX_PCM_FRAMES, PacketizeError, Packetized, PcmPacketizer, RETRANSMIT_CACHE_PACKETS,
     RetransmitRequest, sync_packet,

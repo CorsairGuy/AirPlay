@@ -70,6 +70,18 @@ election пока нет. Ползунки iPhone этим прототипом 
 
 ### Существующий realtime transport
 
+Подготовлены отдельные автономные примитивы `clock::ptp_sender::Master` и
+`MediaTimeline`, а также `rtp::ptp_sync_packet`. Они не подключены к transport.
+Master возвращает датаграммы для явно заданных peers; Follow_Up появляется
+только после `complete_sync` с реальным egress timestamp. Он отвечает на
+Delay_Req, ограничивает рассылку по времени и останавливает эксперимент при
+чужом Announce. Это фиксированный мастер без BMCA, Pdelay и Signaling, без
+сокетов и без доказательства receiver lock/readiness; в LAN пока не включать.
+MediaTimeline сохраняет одну связь sample index / RTP / master ns; смена
+grandmaster требует отдельного решения адаптера, а не изменения ClockID на лету.
+Сериализатор d7 не выбирает receiver-specific семантику frame_1/frame_2 и latency:
+её ещё нужно связать с PCM packetizer и проверить по полному сеансу HomePod.
+
 - HTTP transient HAP pair-setup M1–M4 через общий `pair::hap::ControllerSetup`,
   включая проверку доказательства сервера. Постоянное PIN-сопряжение не включено.
 - Шифрованный RTSP через общий `crypto::Channel` и кодек `rtsp`; SETUP сессии,

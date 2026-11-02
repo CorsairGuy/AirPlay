@@ -9,6 +9,7 @@
 mod filter;
 mod rate;
 pub mod ptp;
+pub mod ptp_sender;
 
 pub use filter::OffsetFilter;
 pub use rate::AudioRateEstimator;
