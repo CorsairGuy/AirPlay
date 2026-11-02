@@ -74,7 +74,8 @@ mod tests {
         let remote = Remote::new();
         let mut commands = remote.attach(7);
         let (feed, _) = watch::channel(Feed {
-            playing: true, position: 10.0,
+            playing: true,
+            position: 10.0,
             position_sampled: Instant::now() - Duration::from_secs(5),
             ..Default::default()
         });
@@ -84,7 +85,10 @@ mod tests {
         let paused = feed.borrow().clone();
         assert!(!paused.playing);
         assert!((paused.position - 15.0).abs() < 0.2);
-        assert_eq!(paused.position_at(Instant::now() + Duration::from_secs(30)), paused.position);
+        assert_eq!(
+            paused.position_at(Instant::now() + Duration::from_secs(30)),
+            paused.position
+        );
         control.action(1, None).await.unwrap();
         assert_eq!(commands.recv().await, Some(Command::Play));
         assert!(feed.borrow().playing);
@@ -95,5 +99,45 @@ mod tests {
         let control = Control::new(feed.clone(), Remote::new());
         assert!(control.action(1, None).await.is_err());
         assert!(!feed.borrow().playing);
+    }
+
+    // Scenarios informed by AppleTVControlLibrary/pyatv player-state tests:
+    // paused elapsed time and independent metadata/state updates. This is a
+    // server-side regression, not a port of their multi-player client model.
+    #[tokio::test]
+    async fn remote_pause_then_source_play_keeps_metadata_and_resumes_timeline() {
+        let remote = Remote::new();
+        let mut commands = remote.attach(8);
+        let (feed, _) = watch::channel(Feed {
+            title: "Current track".into(),
+            content_id: "track-1".into(),
+            playing: true,
+            position: 20.0,
+            duration: Some(180.0),
+            ..Default::default()
+        });
+        let control = Control::new(feed.clone(), remote);
+        control.action(2, None).await.unwrap();
+        assert_eq!(commands.recv().await, Some(Command::Pause));
+        let paused = feed.borrow().clone();
+        assert_eq!(
+            paused.position_at(paused.position_sampled + Duration::from_secs(20)),
+            paused.position
+        );
+        // A subsequent sender notification must override optimistic pause;
+        // there must be no pending-command lockout of the other controller.
+        feed.send_modify(|state| state.set_playing(true));
+        let resumed = feed.borrow().clone();
+        assert_eq!(resumed.title, "Current track");
+        assert_eq!(resumed.content_id, "track-1");
+        assert_eq!(resumed.duration, Some(180.0));
+        assert_eq!(
+            resumed.position_at(resumed.position_sampled + Duration::from_secs(2)),
+            resumed.position + 2.0
+        );
+        control.action(3, None).await.unwrap();
+        assert_eq!(commands.recv().await, Some(Command::Pause));
+        control.action(3, None).await.unwrap();
+        assert_eq!(commands.recv().await, Some(Command::Play));
     }
 }

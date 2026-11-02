@@ -7,9 +7,11 @@
 //! «будящего» Announce для замолчавших часов.
 
 mod filter;
+mod rate;
 pub mod ptp;
 
 pub use filter::OffsetFilter;
+pub use rate::AudioRateEstimator;
 pub use ptp::{Action, Ptp, Timeline};
 
 /// Медиавремя AirPlay 2: момент `network_ns` на часах отправителя (PTP)
