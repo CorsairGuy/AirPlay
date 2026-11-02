@@ -92,13 +92,15 @@ fn timestamp(b: &mut [u8], ns: u64) {
 }
 
 fn announce(clock: u64, seq: u16) -> Vec<u8> {
+    let dataset =
+        crate::role::Dataset::airplay_profile(clock).expect("nonzero sender clock identity");
     let mut b = header(0xb, 76, FLAGS, clock, seq, 0);
-    b[47] = 128;
-    b[48] = 6;
-    b[49] = 0x21;
-    b[50..52].copy_from_slice(&0x436au16.to_be_bytes());
-    b[52] = 128;
-    b[53..61].copy_from_slice(&clock.to_be_bytes());
+    b[47] = dataset.priority1;
+    b[48] = dataset.clock_class;
+    b[49] = dataset.accuracy;
+    b[50..52].copy_from_slice(&dataset.variance.to_be_bytes());
+    b[52] = dataset.priority2;
+    b[53..61].copy_from_slice(&dataset.grandmaster.to_be_bytes());
     b[63] = 0x20;
     b[64..68].copy_from_slice(&[0, 8, 0, 8]);
     b[68..76].copy_from_slice(&clock.to_be_bytes());
@@ -129,6 +131,10 @@ pub struct Master {
 }
 
 impl Master {
+    /// Use this exact dataset when constructing the common role controller.
+    pub fn dataset(&self) -> crate::role::Dataset {
+        crate::role::Dataset::airplay_profile(self.clock).expect("validated sender identity")
+    }
     pub fn new(domain: Domain) -> Result<Self, Error> {
         let clock = domain.id();
         if clock == 0 {
@@ -629,6 +635,15 @@ mod tests {
         packet = header(2, 54, FLAGS, 99, 1, -3);
         packet[28..30].fill(0);
         assert!(m.receive(peer(), &packet, time(0)).is_none());
+    }
+    #[test]
+    fn role_policy_and_wire_announce_use_identical_dataset() {
+        let mut m = master();
+        let batch = m.poll(0).unwrap();
+        assert_eq!(
+            crate::role::Dataset::from_announce(&batch[0].bytes),
+            Some(m.dataset())
+        );
     }
     #[test]
     fn frozen_media_line_handles_rtp_wrap_and_late_member_without_reanchoring() {
