@@ -7,6 +7,7 @@
 //! «будящего» Announce для замолчавших часов.
 
 mod filter;
+pub mod domain;
 mod rate;
 pub mod ptp;
 pub mod ptp_sender;

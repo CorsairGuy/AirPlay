@@ -5,6 +5,7 @@
 //! real egress/ingress times and implement Signaling before LAN deployment.
 //! Wire profile: Music Assistant ap2_ptp.c at 0a58c239 (Apache-2.0), checked
 //! against OwnTone. No changes to the existing receiver Ptp or NTP transport.
+use crate::domain::{Domain, Reading};
 use std::{
     collections::{BTreeMap, BTreeSet},
     net::IpAddr,
@@ -97,6 +98,7 @@ fn follow_up(clock: u64, seq: u16, ns: u64) -> Vec<u8> {
 
 pub struct Master {
     clock: u64,
+    domain: Domain,
     instance: u64,
     peers: BTreeSet<IpAddr>,
     pending: BTreeMap<IpAddr, SyncToken>,
@@ -109,7 +111,8 @@ pub struct Master {
 }
 
 impl Master {
-    pub fn new(clock: u64) -> Result<Self, Error> {
+    pub fn new(domain: Domain) -> Result<Self, Error> {
+        let clock = domain.id();
         if clock == 0 {
             return Err(Error::InvalidIdentity);
         }
@@ -130,6 +133,7 @@ impl Master {
         }
         Ok(Self {
             clock,
+            domain,
             instance,
             peers: BTreeSet::new(),
             pending: BTreeMap::new(),
@@ -217,28 +221,27 @@ impl Master {
     }
     /// Failed sends must not call this. A token is single-use; removed peers,
     /// old poll batches and other Master instances cannot generate Follow_Up.
-    pub fn complete_sync(&mut self, token: &SyncToken, egress_master_ns: u64) -> Option<Datagram> {
-        if self.foreign_clock || self.pending.get(&token.peer) != Some(token) {
+    pub fn complete_sync(&mut self, token: &SyncToken, egress: Reading) -> Option<Datagram> {
+        if egress.domain() != self.domain
+            || self.foreign_clock
+            || self.pending.get(&token.peer) != Some(token)
+        {
             return None;
         }
         self.pending.remove(&token.peer);
         Some(Datagram {
             peer: token.peer,
             port: 320,
-            bytes: follow_up(self.clock, token.seq, egress_master_ns),
+            bytes: follow_up(self.clock, token.seq, egress.ns()),
             sync: None,
         })
     }
     /// Only strict, configured-peer Delay_Req is answered, unicast to that peer.
     /// Reception of a foreign Announce inhibits the fixed-master experiment;
     /// it is not silently ignored in favour of fighting another master.
-    pub fn receive(
-        &mut self,
-        peer: IpAddr,
-        packet: &[u8],
-        ingress_master_ns: u64,
-    ) -> Option<Datagram> {
-        if !self.peers.contains(&peer)
+    pub fn receive(&mut self, peer: IpAddr, packet: &[u8], ingress: Reading) -> Option<Datagram> {
+        if ingress.domain() != self.domain
+            || !self.peers.contains(&peer)
             || packet.len() < 34
             || packet[0] >> 4 != 1
             || packet[1] & 15 != 2
@@ -266,7 +269,7 @@ impl Master {
         }
         let seq = u16::from_be_bytes([packet[30], packet[31]]);
         let mut bytes = header(9, 54, FLAGS | TWO_STEP, self.clock, seq, -3);
-        timestamp(&mut bytes[34..44], ingress_master_ns);
+        timestamp(&mut bytes[34..44], ingress.ns());
         bytes[44..54].copy_from_slice(&packet[20..30]);
         Some(Datagram {
             peer,
@@ -281,36 +284,36 @@ impl Master {
 /// queue depth, packet arrival time and target connection time do not move it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MediaTimeline {
-    clock: u64,
+    domain: Domain,
     start_frame: u64,
     start_rtp: u32,
     start_ns: u64,
     rate: u32,
 }
 impl MediaTimeline {
-    pub fn new(clock: u64, frame: u64, rtp: u32, master_ns: u64, rate: u32) -> Result<Self, Error> {
-        if clock == 0 {
-            return Err(Error::InvalidIdentity);
-        }
+    pub fn new(frame: u64, rtp: u32, start: Reading, rate: u32) -> Result<Self, Error> {
         if rate == 0 {
             return Err(Error::InvalidRate);
         }
         Ok(Self {
-            clock,
+            domain: start.domain(),
             start_frame: frame,
             start_rtp: rtp,
-            start_ns: master_ns,
+            start_ns: start.ns(),
             rate,
         })
     }
-    pub fn anchor(&self, frame: u64) -> Result<crate::Anchor, Error> {
+    pub fn anchor(&self, frame: u64, current_domain: Domain) -> Result<crate::Anchor, Error> {
+        if current_domain != self.domain {
+            return Err(Error::ForeignClock);
+        }
         let delta = i128::from(frame) - i128::from(self.start_frame);
         let ns = i128::from(self.start_ns) + delta * 1_000_000_000 / i128::from(self.rate);
         let network_ns = u64::try_from(ns).map_err(|_| Error::Overflow)?;
         Ok(crate::Anchor {
             rtp: self.start_rtp.wrapping_add(delta as u32),
             network_ns,
-            timeline: self.clock,
+            timeline: self.domain.id(),
             playing: true,
         })
     }
@@ -323,9 +326,15 @@ mod tests {
         "192.0.2.1".parse().unwrap()
     }
     fn master() -> Master {
-        let mut m = Master::new(0x1122334455667788).unwrap();
+        let mut m = Master::new(domain()).unwrap();
         m.set_peers(&[peer()]).unwrap();
         m
+    }
+    fn domain() -> Domain {
+        Domain::new(0x1122334455667788, 1).unwrap()
+    }
+    fn time(ns: u64) -> Reading {
+        domain().reading(ns)
     }
     fn read_ts(bytes: &[u8]) -> u64 {
         let s = u64::from_be_bytes([
@@ -346,11 +355,11 @@ mod tests {
         assert_eq!(sync.port, 319);
         assert_eq!(&sync.bytes[34..], &[0; 10]);
         let token = sync.sync.as_ref().unwrap();
-        let f = m.complete_sync(token, 12_345_678_901).unwrap();
+        let f = m.complete_sync(token, time(12_345_678_901)).unwrap();
         assert_eq!(&f.bytes[30..32], &sync.bytes[30..32]);
         assert_eq!(read_ts(&f.bytes[34..44]), 12_345_678_901);
         assert_eq!(&f.bytes[86..94], &a[20..28]);
-        assert!(m.complete_sync(token, 0).is_none());
+        assert!(m.complete_sync(token, time(0)).is_none());
     }
     #[test]
     fn receiver_parser_accepts_generated_master_timeline() {
@@ -366,7 +375,10 @@ mod tests {
                 .find(|p| p.sync.is_some())
                 .unwrap();
             let f = m
-                .complete_sync(sync.sync.as_ref().unwrap(), 10_000_000_000 + n * SYNC_NS)
+                .complete_sync(
+                    sync.sync.as_ref().unwrap(),
+                    time(10_000_000_000 + n * SYNC_NS),
+                )
                 .unwrap();
             receiver.on_packet(peer(), &sync.bytes, n * SYNC_NS);
             receiver.on_packet(peer(), &f.bytes, n * SYNC_NS);
@@ -382,53 +394,73 @@ mod tests {
         let old = m.poll(0).unwrap()[1].sync.clone().unwrap();
         assert!(m.poll(1).unwrap().is_empty());
         assert_eq!(m.poll(50_000_000_000).unwrap().len(), 2);
-        assert!(m.complete_sync(&old, 1).is_none());
+        assert!(m.complete_sync(&old, time(1)).is_none());
         assert_eq!(m.poll(0), Err(Error::TimeReversed));
         let current = m.poll(51_000_000_000).unwrap()[1].sync.clone().unwrap();
         m.set_peers(&[]).unwrap();
         m.set_peers(&[peer()]).unwrap();
-        assert!(m.complete_sync(&current, 1).is_none());
+        assert!(m.complete_sync(&current, time(1)).is_none());
         let mut other = master();
         other.poll(0).unwrap();
-        assert!(other.complete_sync(&old, 1).is_none());
+        assert!(other.complete_sync(&old, time(1)).is_none());
     }
     #[test]
     fn delay_response_preserves_request_identity_sequence_and_ingress() {
         let mut m = master();
         let mut req = header(1, 44, FLAGS, 99, 0xfffe, -3);
         req[28..30].copy_from_slice(&7u16.to_be_bytes());
-        let r = m.receive(peer(), &req, 2_999_999_999).unwrap();
+        let r = m.receive(peer(), &req, time(2_999_999_999)).unwrap();
         assert_eq!(r.peer, peer());
         assert_eq!(r.port, 320);
         assert_eq!(&r.bytes[44..54], &req[20..30]);
         assert_eq!(&r.bytes[30..32], &req[30..32]);
         assert_eq!(read_ts(&r.bytes[34..44]), 2_999_999_999);
-        assert!(m.receive("192.0.2.9".parse().unwrap(), &req, 0).is_none());
+        assert!(
+            m.receive("192.0.2.9".parse().unwrap(), &req, time(0))
+                .is_none()
+        );
         req[2..4].copy_from_slice(&43u16.to_be_bytes());
-        assert!(m.receive(peer(), &req, 0).is_none());
+        assert!(m.receive(peer(), &req, time(0)).is_none());
     }
     #[test]
     fn foreign_clock_inhibits_transmission_instead_of_uncontrolled_election() {
         let mut m = master();
         let token = m.poll(0).unwrap()[1].sync.clone().unwrap();
-        m.receive(peer(), &announce(999, 1), 0);
+        m.receive(peer(), &announce(999, 1), time(0));
         assert_eq!(m.poll(1), Err(Error::ForeignClock));
-        assert!(m.complete_sync(&token, 0).is_none());
+        assert!(m.complete_sync(&token, time(0)).is_none());
+    }
+    #[test]
+    fn wrong_clock_or_restart_cannot_timestamp_a_sync_or_reuse_media_anchor() {
+        let mut m = master();
+        let token = m.poll(0).unwrap()[1].sync.clone().unwrap();
+        let restart = Domain::new(domain().id(), 2).unwrap();
+        assert!(m.complete_sync(&token, restart.reading(100)).is_none());
+        assert!(
+            m.complete_sync(&token, Domain::new(999, 1).unwrap().reading(100))
+                .is_none()
+        );
+        assert!(m.complete_sync(&token, time(100)).is_some());
+        let line = MediaTimeline::new(0, 0, time(100), 44_100).unwrap();
+        assert_eq!(line.anchor(1, restart), Err(Error::ForeignClock));
+        assert!(line.anchor(1, domain()).is_ok());
     }
     #[test]
     fn frozen_media_line_handles_rtp_wrap_and_late_member_without_reanchoring() {
-        let line = MediaTimeline::new(8, 100, u32::MAX - 100, 10_000_000_000, 44_100).unwrap();
-        let a = line.anchor(44_200).unwrap();
+        let d = Domain::new(8, 1).unwrap();
+        let line =
+            MediaTimeline::new(100, u32::MAX - 100, d.reading(10_000_000_000), 44_100).unwrap();
+        let a = line.anchor(44_200, d).unwrap();
         assert_eq!(a.rtp, (u32::MAX - 100).wrapping_add(44_100));
         assert_eq!(a.network_ns, 11_000_000_000);
         assert_eq!(a.timeline, 8);
-        assert_eq!(line.anchor(99).unwrap().network_ns, 9_999_977_325);
-        assert_eq!(line.anchor(44_200), line.anchor(44_200));
-        assert!(MediaTimeline::new(1, 0, 0, 0, 0).is_err());
+        assert_eq!(line.anchor(99, d).unwrap().network_ns, 9_999_977_325);
+        assert_eq!(line.anchor(44_200, d), line.anchor(44_200, d));
+        assert!(MediaTimeline::new(0, 0, d.reading(0), 0).is_err());
         assert!(
-            MediaTimeline::new(1, 100, 0, 0, 1)
+            MediaTimeline::new(100, 0, d.reading(0), 1)
                 .unwrap()
-                .anchor(0)
+                .anchor(0, d)
                 .is_err()
         );
     }
