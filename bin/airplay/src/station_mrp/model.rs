@@ -71,11 +71,16 @@ impl Default for Feed {
 }
 impl Feed {
     pub fn position_at(&self, now: Instant) -> f64 {
-        let value = self.position + if self.playing {
-            now.saturating_duration_since(self.position_sampled).as_secs_f64()
-        } else { 0.0 };
+        let value = self.position
+            + if self.playing {
+                now.saturating_duration_since(self.position_sampled)
+                    .as_secs_f64()
+            } else {
+                0.0
+            };
         let value = value.max(0.0);
-        self.duration.filter(|d| d.is_finite() && *d > 0.0)
+        self.duration
+            .filter(|d| d.is_finite() && *d > 0.0)
             .map_or(value, |duration| value.min(duration))
     }
     pub fn set_playing(&mut self, playing: bool) {
@@ -516,4 +521,131 @@ pub fn topology(identity: &Identity, feed: &Feed) -> Vec<Node> {
 }
 pub fn decode_plist(bytes: &[u8]) -> anyhow::Result<Value> {
     Ok(Value::from_reader(Cursor::new(bytes))?)
+}
+
+/// State/timeline-only patch for an already announced content item. Do not
+/// invalidate artwork or re-announce the queue on ordinary Pause/Play updates.
+pub fn playback_update(identity: &Identity, feed: &Feed) -> Node {
+    let mut body = Node::default();
+    body.node(
+        f("SetStateMessage", "playerPath"),
+        &path(identity, feed, false),
+    )
+    .int(
+        f("SetStateMessage", "playbackState"),
+        if feed.playing {
+            1
+        } else if feed.title.is_empty() {
+            0
+        } else {
+            2
+        },
+    )
+    .double(f("SetStateMessage", "playbackStateTimestamp"), cocoa());
+    if !feed.content_id.is_empty() && !feed.title.is_empty() {
+        let mut metadata = Node::default();
+        metadata
+            .double(
+                f("ContentItemMetadata", "elapsedTime"),
+                feed.position_at(Instant::now()),
+            )
+            .float(
+                f("ContentItemMetadata", "playbackRate"),
+                if feed.playing { 1.0 } else { 0.0 },
+            )
+            .double(f("ContentItemMetadata", "elapsedTimeTimestamp"), cocoa());
+        let mut item = Node::default();
+        item.text(f("ContentItem", "identifier"), &feed.content_id)
+            .node(f("ContentItem", "metadata"), &metadata);
+        let mut queue = Node::default();
+        queue
+            .int(f("PlaybackQueue", "location"), 0)
+            .node(f("PlaybackQueue", "contentItems"), &item);
+        body.node(f("SetStateMessage", "playbackQueue"), &queue);
+    }
+    envelope("SET_STATE_MESSAGE", body, None)
+}
+
+pub fn state_change(identity: &Identity, previous: &Feed, current: &Feed) -> Option<Node> {
+    if current.content_id != previous.content_id
+        || current.title != previous.title
+        || current.artist != previous.artist
+        || current.album != previous.album
+        || current.cover != previous.cover
+        || current.duration != previous.duration
+        || current.control_available != previous.control_available
+    {
+        Some(state(identity, current, None, None))
+    } else if current.playing != previous.playing
+        || (current.position - previous.position).abs() >= 1.0
+    {
+        Some(playback_update(identity, current))
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod playback_patch_tests {
+    use super::*;
+    #[test]
+    fn pause_play_patches_preserve_artwork_but_late_join_requests_still_return_it() {
+        let id = Identity {
+            device: "device".into(),
+            group: "group".into(),
+        };
+        let before = Feed {
+            content_id: "track".into(),
+            title: "Song".into(),
+            playing: true,
+            cover: Some(Cover {
+                data: Arc::new(vec![1, 2, 3]),
+                id: "cover".into(),
+                mime: "image/png".into(),
+                width: 2,
+                height: 2,
+            }),
+            ..Default::default()
+        };
+        for playing in [false, true] {
+            let mut current = before.clone();
+            current.playing = playing;
+            current.position = 12.0;
+            let message = state_change(&id, &before, &current).unwrap();
+            message.validate("ProtocolMessage").unwrap();
+            let body = message
+                .nested(schema::extension(kind("SET_STATE_MESSAGE")))
+                .unwrap();
+            let queue = body.nested(f("SetStateMessage", "playbackQueue")).unwrap();
+            let item = queue.nested(f("PlaybackQueue", "contentItems")).unwrap();
+            assert_eq!(item.string(f("ContentItem", "identifier")), Some("track"));
+            assert!(item.get(f("ContentItem", "artworkData")).is_none());
+            let metadata = item.nested(f("ContentItem", "metadata")).unwrap();
+            assert_eq!(metadata.0.len(), 3);
+            assert_eq!(
+                metadata.real(f("ContentItemMetadata", "playbackRate")),
+                Some(if playing { 1.0 } else { 0.0 })
+            );
+            for name in [
+                "artworkAvailable",
+                "artworkIdentifier",
+                "nowPlayingInfoData",
+                "title",
+            ] {
+                assert!(metadata.get(f("ContentItemMetadata", name)).is_none());
+            }
+        }
+        let mut request = Node::default();
+        request.float(f("PlaybackQueueRequestMessage", "artworkWidth"), 2.0);
+        let full = state(&id, &before, Some(&request), Some("late-join"));
+        let body = full
+            .nested(schema::extension(kind("SET_STATE_MESSAGE")))
+            .unwrap();
+        let queue = body.nested(f("SetStateMessage", "playbackQueue")).unwrap();
+        let item = queue.nested(f("PlaybackQueue", "contentItems")).unwrap();
+        assert_eq!(
+            item.raw(f("ContentItem", "artworkData")),
+            Some([1, 2, 3].as_slice())
+        );
+    }
 }

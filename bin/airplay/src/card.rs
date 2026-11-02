@@ -46,7 +46,9 @@ impl Card {
         // Станция: пульт доступен, пока работает её управление, то есть всегда.
         let (feed, _) = watch::channel(Feed {
             source: env("X_MRP_SOURCE").unwrap_or(SOURCE.into()),
-            volume: env("X_MRP_VOLUME").and_then(|v| v.parse().ok()).unwrap_or(0.2),
+            volume: env("X_MRP_VOLUME")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0.2),
             control_available: true,
             ..Default::default()
         });
@@ -85,9 +87,14 @@ impl Card {
         S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
     {
         let control = Control::new(self.feed.clone(), self.remote.clone());
-        server::connection(stream, self.identity.clone(), self.feed.subscribe(), control)
-            .await
-            .map_err(std::io::Error::other)
+        server::connection(
+            stream,
+            self.identity.clone(),
+            self.feed.subscribe(),
+            control,
+        )
+        .await
+        .map_err(std::io::Error::other)
     }
 
     /// Группа сессии отправителя (`gid`), как маршрут станции.
@@ -133,15 +140,35 @@ impl Events for Card {
 
     fn metadata(&self, m: &Metadata) {
         self.update(|feed| {
-            feed.title = m.title.clone().unwrap_or_default();
-            feed.artist = m.artist.clone().unwrap_or_default();
-            feed.album = m.album.clone().unwrap_or_default();
+            // DMAP updates may omit fields. A duration-only update is not a
+            // request to erase the current track. A different title starts a
+            // new item, so its missing fields must not inherit the old item.
+            if m.title.as_ref().is_some_and(|title| *title != feed.title) {
+                feed.artist.clear();
+                feed.album.clear();
+                feed.duration = None;
+                feed.cover = None;
+                feed.position = 0.0;
+                feed.position_sampled = std::time::Instant::now();
+            }
+            if let Some(title) = &m.title {
+                feed.title.clone_from(title);
+            }
+            if let Some(artist) = &m.artist {
+                feed.artist.clone_from(artist);
+            }
+            if let Some(album) = &m.album {
+                feed.album.clone_from(album);
+            }
             if let Some(d) = m.duration {
                 feed.duration = Some(d.as_secs_f64());
             }
             feed.content_id = hash(
-                format!("{}\0{}\0{}\0{}", feed.source, feed.title, feed.artist, feed.album)
-                    .as_bytes(),
+                format!(
+                    "{}\0{}\0{}\0{}",
+                    feed.source, feed.title, feed.artist, feed.album
+                )
+                .as_bytes(),
             );
         });
         self.inner.metadata(m);
@@ -265,6 +292,65 @@ mod tests {
         assert_eq!(now.title, "Песня");
         assert!(now.playing && !now.content_id.is_empty());
         assert_eq!((now.position, now.duration), (3.0, Some(10.0)));
-        assert!(now.control_available, "как на станции: пульт доступен и без отправителя");
+        assert!(
+            now.control_available,
+            "как на станции: пульт доступен и без отправителя"
+        );
+    }
+
+    #[test]
+    fn partial_metadata_preserves_track_and_pause_but_new_track_clears_old_assets() {
+        let card = Card::new(
+            Device {
+                name: "test".into(),
+                model: "AudioAccessory5,1".into(),
+                localized_model: "HomePod".into(),
+                uid: "partial".into(),
+                group: "g".into(),
+                system_app: "test".into(),
+            },
+            Remote::new(),
+            Arc::new(crate::events::NoEvents),
+        );
+        card.metadata(&Metadata {
+            title: Some("First".into()),
+            artist: Some("Artist".into()),
+            album: Some("Album".into()),
+            ..Default::default()
+        });
+        card.progress(Progress {
+            position: std::time::Duration::from_secs(25),
+            duration: std::time::Duration::from_secs(180),
+        });
+        card.playing(false);
+        let before = card.feed.borrow().clone();
+        card.metadata(&Metadata {
+            duration: Some(std::time::Duration::from_secs(181)),
+            ..Default::default()
+        });
+        let partial = card.feed.borrow().clone();
+        assert_eq!(partial.content_id, before.content_id);
+        assert_eq!(
+            (
+                partial.title.as_str(),
+                partial.artist.as_str(),
+                partial.album.as_str()
+            ),
+            ("First", "Artist", "Album")
+        );
+        assert_eq!(partial.position, 25.0);
+        assert!(!partial.playing);
+        card.playing(true);
+        card.metadata(&Metadata {
+            title: Some("Next".into()),
+            ..Default::default()
+        });
+        let next = card.feed.borrow().clone();
+        assert_ne!(next.content_id, before.content_id);
+        assert!(next.artist.is_empty() && next.album.is_empty() && next.cover.is_none());
+        assert_eq!(
+            (next.position, next.duration, next.playing),
+            (0.0, None, true)
+        );
     }
 }
