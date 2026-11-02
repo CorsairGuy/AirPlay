@@ -69,6 +69,20 @@ Gate влияет только на локальный payload; временны
 
 ## API и владение
 
+`Session::run_with_progress` дополнительно принимает watch-канал
+`Option<MediaProgress>`. None сохраняется до успешного UDP audio send;
+публикуются count/frame_index/play_at, без аудио и метаданных. Это не ACK
+воспроизведения HomePod. Отдельные Volume watch остаются независимыми.
+
+Frontend-библиотека `airplay::send_control::RelayControl` и
+`send::run_controlled`/`run_with_local_controlled` связывают такие каналы
+с конкретными SocketAddr. snapshot.requested_volume — запрошенный уровень,
+не remote acknowledgement. all_media_started означает только успешную отправку
+всем настроенным участникам, не ongoing health/акустическую готовность.
+При ошибке/stop/end/cancellation регистрация очищается; один handle нельзя
+одновременно использовать для двух запусков. Это in-process API, не IPC;
+нынешний CLI всё ещё имеет статический общий volume.
+
 `Identity` — identity отправителя, переданная приложением, без встроенного имени
 Станции или подмены модели HomePod. `SessionConfig::new(endpoint, identity)` имеет
 latency22050 кадров(500мс), volume−30dB, request_timeout8с. Допустимая latency:

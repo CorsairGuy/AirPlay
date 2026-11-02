@@ -19,4 +19,4 @@ pub use local_pipe::LocalPcmPipe;
 pub use packet::{
     AudioPacket, FRAME_BYTES, FRAMES_PER_PACKET, MediaClock, PACKET_BYTES, SAMPLE_RATE,
 };
-pub use session::{Identity, Session, SessionConfig, StreamStats, Volume};
+pub use session::{Identity, MediaProgress, Session, SessionConfig, StreamStats, Volume};

@@ -165,19 +165,22 @@ async fn produce<R: AsyncRead + Unpin>(
 /// All receivers connect before a single media clock starts. Any peer failure
 /// stops this run: reconnect/group restoration is deliberately not implicit.
 pub async fn run<R: AsyncRead + Unpin>(
-    mut options: Options,
+    options: Options,
     input: R,
     stop: watch::Receiver<bool>,
 ) -> Result<()> {
-    options.validate()?;
-    if *stop.borrow() {
-        return Ok(());
-    }
-    if let Some(local) = options.local.take() {
-        let renderer = crate::local_process::Renderer::spawn(local)?;
-        return run_with_local(options, input, stop, renderer).await;
-    }
-    run_inner(options, input, stop, None).await
+    run_inner(options, input, stop, None, None).await
+}
+
+/// Library entry point for a platform controller with independent target volume
+/// and per-target successful-media observation. The CLI remains static-volume.
+pub async fn run_controlled<R: AsyncRead + Unpin>(
+    options: Options,
+    input: R,
+    stop: watch::Receiver<bool>,
+    control: crate::send_control::RelayControl,
+) -> Result<()> {
+    run_inner(options, input, stop, None, Some(control)).await
 }
 
 /// Optional platform renderer, fed from the same clock and immutable packet queue.
@@ -192,13 +195,36 @@ pub async fn run_with_local<R: AsyncRead + Unpin, S: sender::LocalSink>(
     if options.local.is_some() {
         bail!("local process and supplied LocalSink are mutually exclusive");
     }
-    let local: LocalFactory = Box::new(move |packets, latency, stop| {
+    run_inner(options, input, stop, Some(local_factory(sink)), None).await
+}
+
+pub async fn run_with_local_controlled<R: AsyncRead + Unpin, S: sender::LocalSink>(
+    options: Options,
+    input: R,
+    stop: watch::Receiver<bool>,
+    sink: S,
+    control: crate::send_control::RelayControl,
+) -> Result<()> {
+    if options.local.is_some() {
+        bail!("local process and supplied LocalSink are mutually exclusive");
+    }
+    run_inner(
+        options,
+        input,
+        stop,
+        Some(local_factory(sink)),
+        Some(control),
+    )
+    .await
+}
+
+fn local_factory<S: sender::LocalSink>(sink: S) -> LocalFactory {
+    Box::new(move |packets, latency, stop| {
         Box::pin(async move {
             sender::run_local(sink, packets, latency, stop).await?;
             Ok(sender::StreamStats::default())
         })
-    });
-    run_inner(options, input, stop, Some(local)).await
+    })
 }
 
 type LocalFuture = Pin<Box<dyn Future<Output = Result<sender::StreamStats>> + Send>>;
@@ -212,15 +238,27 @@ type LocalFactory = Box<
 >;
 
 async fn run_inner<R: AsyncRead + Unpin>(
-    options: Options,
+    mut options: Options,
     input: R,
     mut stop: watch::Receiver<bool>,
     local: Option<LocalFactory>,
+    control: Option<crate::send_control::RelayControl>,
 ) -> Result<()> {
     options.validate()?;
     if *stop.borrow() {
         return Ok(());
     }
+    let _control_guard = control
+        .as_ref()
+        .map(|v| v.claim(options.targets.len()))
+        .transpose()?;
+    let local = if let Some(process) = options.local.take() {
+        Some(local_factory(crate::local_process::Renderer::spawn(
+            process,
+        )?))
+    } else {
+        local
+    };
     let volume = Volume::db(options.volume_db)?;
     let identity = Identity::new(
         format!(
@@ -242,7 +280,6 @@ async fn run_inner<R: AsyncRead + Unpin>(
     };
     let (audio, receiver) = broadcast::channel(capacity);
     drop(receiver);
-    let (_volume, volumes) = watch::channel(volume);
     let (halt, halted) = watch::channel(false);
     let mut workers = JoinSet::new();
     let mut addresses = HashSet::new();
@@ -266,7 +303,19 @@ async fn run_inner<R: AsyncRead + Unpin>(
             session = Session::connect(config) => session.with_context(|| format!("подключение {target}"))?,
             _ = stop.changed() => return Ok(()),
         };
-        workers.spawn(session.run(audio.subscribe(), volumes.clone(), halted.clone()));
+        let (volume_tx, volumes) = watch::channel(volume);
+        if let Some(control) = &control {
+            let (progress, observed) = watch::channel(None);
+            control.register(address, volume_tx, observed);
+            workers.spawn(session.run_with_progress(
+                audio.subscribe(),
+                volumes,
+                halted.clone(),
+                progress,
+            ));
+        } else {
+            workers.spawn(session.run(audio.subscribe(), volumes, halted.clone()));
+        }
     }
     if let Some(start) = local {
         workers.spawn(start(
@@ -285,6 +334,9 @@ async fn run_inner<R: AsyncRead + Unpin>(
         _ = stop.changed() => Ok(false),
     };
     if !matches!(result, Ok(true)) {
+        if let Some(control) = &control {
+            control.invalidate();
+        }
         halt.send_replace(true);
     }
     let mut outcome = result.map(|_| ());
@@ -488,13 +540,37 @@ mod tests {
             }
         }
         let local_seen = Arc::new(Mutex::new(Vec::new()));
+        let control = crate::send_control::RelayControl::default();
+        let monitoring = if with_local {
+            let handle = control.clone();
+            Some(tokio::spawn(async move {
+                tokio::time::timeout(Duration::from_secs(6), async {
+                    loop {
+                        if handle.all_media_started() {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                let snapshot = handle.snapshot();
+                assert_eq!(snapshot.len(), 1);
+                assert!(snapshot[0].media.is_some());
+                assert_eq!(snapshot[0].endpoint, address);
+                assert!(handle.progress(address).is_some());
+            }))
+        } else {
+            None
+        };
         let result = tokio::time::timeout(Duration::from_secs(12), async {
             if with_local {
-                run_with_local(
+                run_with_local_controlled(
                     options,
                     std::io::Cursor::new(pcm),
                     stopped,
                     LocalCapture(local_seen.clone()),
+                    control.clone(),
                 )
                 .await
             } else {
@@ -506,6 +582,11 @@ mod tests {
             receiver.abort();
         }
         result.expect("loopback deadline").expect("sender loopback");
+        if let Some(monitoring) = monitoring {
+            monitoring.await.unwrap();
+            assert!(control.snapshot().is_empty());
+            assert!(!control.all_media_started());
+        }
         tokio::time::timeout(Duration::from_secs(2), receiver)
             .await
             .unwrap()

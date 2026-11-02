@@ -126,6 +126,14 @@ pub struct StreamStats {
     pub volume_updates: u64,
 }
 
+/// Successful media transmission, not receiver playback/acoustic acknowledgement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MediaProgress {
+    pub packets_sent: u64,
+    pub frame_index: u64,
+    pub play_at: Instant,
+}
+
 // Tokio handles detach on drop; these protocol helpers must instead stop on all
 // setup errors, caller cancellation and session destruction.
 struct Task<T = ()>(JoinHandle<T>);
@@ -384,10 +392,31 @@ impl Session {
     /// TEARDOWN, while stop interrupts the drain. Per-target volume uses watch's latest-value coalescing, with
     /// no file polling, slider callback or platform-specific gain policy here.
     pub async fn run(
+        self,
+        audio: broadcast::Receiver<Arc<AudioPacket>>,
+        volume: watch::Receiver<Volume>,
+        stop: watch::Receiver<bool>,
+    ) -> Result<StreamStats> {
+        self.run_inner(audio, volume, stop, None).await
+    }
+
+    /// Coalesced observation channel. It remains None until a UDP audio send succeeds.
+    pub async fn run_with_progress(
+        self,
+        audio: broadcast::Receiver<Arc<AudioPacket>>,
+        volume: watch::Receiver<Volume>,
+        stop: watch::Receiver<bool>,
+        progress: watch::Sender<Option<MediaProgress>>,
+    ) -> Result<StreamStats> {
+        self.run_inner(audio, volume, stop, Some(progress)).await
+    }
+
+    async fn run_inner(
         mut self,
         mut audio: broadcast::Receiver<Arc<AudioPacket>>,
         volume: watch::Receiver<Volume>,
         mut stop: watch::Receiver<bool>,
+        progress: Option<watch::Sender<Option<MediaProgress>>>,
     ) -> Result<StreamStats> {
         let rtsp = self
             .rtsp
@@ -401,7 +430,7 @@ impl Session {
             self.config.volume,
         )));
         let result = tokio::select! {
-            result = self.stream(&mut audio, &mut stop) => result,
+            result = self.stream(&mut audio, &mut stop, progress.as_ref()) => result,
             result = &mut owner.0 => {
                 result.context("receiver control task failed")??;
                 bail!("receiver control task ended before media");
@@ -432,6 +461,7 @@ impl Session {
         &mut self,
         audio: &mut broadcast::Receiver<Arc<AudioPacket>>,
         stop: &mut watch::Receiver<bool>,
+        progress: Option<&watch::Sender<Option<MediaProgress>>>,
     ) -> Result<StreamStats> {
         let mut stats = StreamStats::default();
         let mut last_sync = Instant::now() - Duration::from_secs(2);
@@ -480,6 +510,9 @@ impl Session {
                     // playable receiver. The caller decides whether to reconnect.
                     self.audio.send(&packet.audio).await?;
                     stats.packets_sent += 1;
+                    if let Some(progress)=progress {
+                        progress.send_replace(Some(MediaProgress{packets_sent:stats.packets_sent,frame_index:chunk.index,play_at:chunk.play_at(self.latency()).context("presentation overflow")?}));
+                    }
                     last_presentation = chunk.play_at(self.latency()).and_then(|t| t.checked_add(frames_duration(FRAMES_PER_PACKET as u64) + Duration::from_millis(50)));
                 }
                 got = self.control.recv_from(&mut control_buf) => {
@@ -680,12 +713,14 @@ mod tests {
         let (volume, volumes) = watch::channel(Volume::db(-30.0).unwrap());
         let (_stop, stopped) = watch::channel(false);
         volume.send_replace(Volume::db(-25.0).unwrap());
-        let running = tokio::spawn(session.run(packets, volumes, stopped));
+        let (progress, observed) = watch::channel(None);
+        let running = tokio::spawn(session.run_with_progress(packets, volumes, stopped, progress));
         timeout(Duration::from_secs(1), waiting)
             .await
             .unwrap()
             .unwrap();
         let clock = crate::MediaClock::now();
+        assert!(observed.borrow().is_none());
         for index in 0..20u64 {
             let packet = Arc::new(
                 clock
@@ -710,6 +745,17 @@ mod tests {
             .unwrap();
         assert_eq!(stats.packets_sent, 20);
         assert_eq!(stats.volume_updates, 1);
+        let progress = observed.borrow().unwrap();
+        assert_eq!(progress.packets_sent, 20);
+        assert_eq!(progress.frame_index, 19 * FRAMES_PER_PACKET as u64);
+        assert_eq!(
+            progress.play_at,
+            clock
+                .packet(progress.frame_index, &[0; crate::PACKET_BYTES])
+                .unwrap()
+                .play_at(Duration::from_millis(500))
+                .unwrap()
+        );
         peer.await.unwrap();
     }
 
