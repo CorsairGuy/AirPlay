@@ -9,6 +9,7 @@
 //! See the crate README and PROVENANCE for supported formats and limitations.
 
 mod local;
+pub mod group;
 mod local_pipe;
 mod packet;
 mod session;
