@@ -128,8 +128,8 @@ pub struct StreamStats {
 
 // Tokio handles detach on drop; these protocol helpers must instead stop on all
 // setup errors, caller cancellation and session destruction.
-struct Task(JoinHandle<()>);
-impl Drop for Task {
+struct Task<T = ()>(JoinHandle<T>);
+impl<T> Drop for Task<T> {
     fn drop(&mut self) {
         self.0.abort();
     }
@@ -140,7 +140,7 @@ impl Drop for Task {
 /// paced packets and returns counters; it does not reconnect behind the caller.
 pub struct Session {
     config: SessionConfig,
-    rtsp: Rtsp,
+    rtsp: Option<Rtsp>,
     audio: UdpSocket,
     control: Arc<UdpSocket>,
     control_destination: SocketAddr,
@@ -364,7 +364,7 @@ impl Session {
         };
         Ok(Self {
             config,
-            rtsp,
+            rtsp: Some(rtsp),
             audio,
             control,
             control_destination,
@@ -386,34 +386,55 @@ impl Session {
     pub async fn run(
         mut self,
         mut audio: broadcast::Receiver<Arc<AudioPacket>>,
-        mut volume: watch::Receiver<Volume>,
+        volume: watch::Receiver<Volume>,
         mut stop: watch::Receiver<bool>,
     ) -> Result<StreamStats> {
-        let result = self.stream(&mut audio, &mut volume, &mut stop).await;
-        let teardown = timeout(
-            Duration::from_secs(2),
-            self.rtsp.request("TEARDOWN", None, Vec::new(), None, &[]),
+        let rtsp = self
+            .rtsp
+            .take()
+            .context("missing receiver control connection")?;
+        let (control_stop, stopping) = watch::channel(false);
+        let mut owner = Task(tokio::spawn(control_owner(
+            rtsp,
+            volume,
+            stopping,
+            self.config.volume,
+        )));
+        let result = tokio::select! {
+            result = self.stream(&mut audio, &mut stop) => result,
+            result = &mut owner.0 => {
+                result.context("receiver control task failed")??;
+                bail!("receiver control task ended before media");
+            }
+        };
+        control_stop.send_replace(true);
+        let control = match timeout(
+            self.config.request_timeout + Duration::from_secs(2),
+            &mut owner.0,
         )
-        .await;
-        match (result, teardown) {
+        .await
+        {
+            Ok(Ok(result)) => result,
+            Ok(Err(error)) => Err(error.into()),
+            Err(_) => Err(anyhow!("receiver control shutdown deadline exceeded")),
+        };
+        match (result, control) {
             (Err(error), _) => Err(error),
-            (Ok(stats), Ok(Ok(_))) => Ok(stats),
-            (Ok(_), Ok(Err(error))) => Err(error.context("receiver TEARDOWN failed")),
-            (Ok(_), Err(_)) => Err(anyhow!("receiver TEARDOWN deadline exceeded")),
+            (Ok(mut stats), Ok(updates)) => {
+                stats.volume_updates = updates;
+                Ok(stats)
+            }
+            (Ok(_), Err(error)) => Err(error),
         }
     }
 
     async fn stream(
         &mut self,
         audio: &mut broadcast::Receiver<Arc<AudioPacket>>,
-        volume: &mut watch::Receiver<Volume>,
         stop: &mut watch::Receiver<bool>,
     ) -> Result<StreamStats> {
         let mut stats = StreamStats::default();
         let mut last_sync = Instant::now() - Duration::from_secs(2);
-        let mut feedback_tick = tokio::time::interval(Duration::from_secs(2));
-        let mut current_volume = self.config.volume;
-        let mut volume_tick = tokio::time::interval(Duration::from_millis(100));
         let mut control_buf = [0u8; 64];
         let mut last_presentation: Option<Instant> = None;
         let mut drain_until: Option<Instant> = None;
@@ -471,17 +492,6 @@ impl Session {
                         stats.retransmitted_packets += 1;
                     }
                 }
-                _ = volume_tick.tick() => {
-                    let desired = *volume.borrow_and_update();
-                    if desired != current_volume {
-                        apply_volume(&mut self.rtsp, desired).await?;
-                        current_volume = desired;
-                        stats.volume_updates += 1;
-                    }
-                }
-                _ = feedback_tick.tick() => {
-                    self.rtsp.request("POST", Some("/feedback"), Vec::new(), None, &[]).await?;
-                }
                 _ = async {
                     if let Some(deadline) = drain { sleep_until(deadline.into()).await; }
                     else { std::future::pending::<()>().await; }
@@ -491,6 +501,50 @@ impl Session {
         }
         Ok(stats)
     }
+}
+
+// Own the control stream in one task. A slow peer cannot stall UDP audio or
+// retransmissions. Never reuse a connection after an incomplete failed request.
+async fn control_owner(
+    mut rtsp: Rtsp,
+    mut volume: watch::Receiver<Volume>,
+    mut stop: watch::Receiver<bool>,
+    mut current: Volume,
+) -> Result<u64> {
+    let mut updates = 0;
+    let mut feedback = tokio::time::interval_at(
+        tokio::time::Instant::now() + Duration::from_secs(2),
+        Duration::from_secs(2),
+    );
+    feedback.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut volume_tick = tokio::time::interval(Duration::from_millis(100));
+    volume_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        if *stop.borrow() {
+            break;
+        }
+        tokio::select! {
+            _ = volume_tick.tick() => {
+                let desired = *volume.borrow_and_update();
+                if desired != current {
+                    apply_volume(&mut rtsp, desired).await?;
+                    current = desired;
+                    updates += 1;
+                }
+            }
+            _ = feedback.tick() => {
+                rtsp.request("POST", Some("/feedback"), Vec::new(), None, &[]).await?;
+            }
+            _ = wait_stop(&mut stop) => break,
+        }
+    }
+    timeout(
+        Duration::from_secs(2),
+        rtsp.request("TEARDOWN", None, Vec::new(), None, &[]),
+    )
+    .await
+    .context("receiver TEARDOWN deadline exceeded")??;
+    Ok(updates)
 }
 
 fn dictionary(items: Vec<(&str, plist::Value)>) -> plist::Value {
@@ -569,6 +623,95 @@ async fn timing_server(socket: Arc<UdpSocket>, peer: std::net::IpAddr) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn slow_rtsp_does_not_hold_the_real_udp_media_loop() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        let (entered, waiting) = tokio::sync::oneshot::channel();
+        let peer = tokio::spawn(async move {
+            let mut conn = Connection::new(server);
+            let mut entered = Some(entered);
+            loop {
+                let request = conn.event_request().await.unwrap();
+                if request.method == "SET_PARAMETER" {
+                    entered.take().unwrap().send(()).unwrap();
+                    sleep(Duration::from_millis(400)).await;
+                }
+                let mut bytes = Vec::new();
+                rtsp::Response::to(&request, 200).encode(&mut bytes);
+                conn.send(&bytes).await.unwrap();
+                if request.method == "TEARDOWN" {
+                    break;
+                }
+            }
+        });
+        let receiving = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let audio = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        audio
+            .connect(receiving.local_addr().unwrap())
+            .await
+            .unwrap();
+        let control_peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let config = SessionConfig::new(
+            listener.local_addr().unwrap(),
+            Identity::new("test", "test"),
+        );
+        let session = Session {
+            rtsp: Some(Rtsp::new(
+                Connection::new(client),
+                "rtsp://test/1".into(),
+                "test".into(),
+                1,
+                Duration::from_secs(1),
+            )),
+            packetizer: rtp::PcmPacketizer::new([7; 32], 1, 7, config.latency_frames),
+            config,
+            audio,
+            control: Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap()),
+            control_destination: control_peer.local_addr().unwrap(),
+            _timing_task: Task(tokio::spawn(std::future::pending())),
+            _event_task: None,
+        };
+        let (pcm, packets) = broadcast::channel(32);
+        let (volume, volumes) = watch::channel(Volume::db(-30.0).unwrap());
+        let (_stop, stopped) = watch::channel(false);
+        volume.send_replace(Volume::db(-25.0).unwrap());
+        let running = tokio::spawn(session.run(packets, volumes, stopped));
+        timeout(Duration::from_secs(1), waiting)
+            .await
+            .unwrap()
+            .unwrap();
+        let clock = crate::MediaClock::now();
+        for index in 0..20u64 {
+            let packet = Arc::new(
+                clock
+                    .packet(index * FRAMES_PER_PACKET as u64, &[0; crate::PACKET_BYTES])
+                    .unwrap(),
+            );
+            sleep_until(packet.produced_at().into()).await;
+            pcm.send(packet).unwrap();
+            let mut bytes = [0; 2048];
+            let n = timeout(Duration::from_millis(100), receiving.recv(&mut bytes))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(n > 12);
+            assert_eq!(u16::from_be_bytes([bytes[2], bytes[3]]), 7 + index as u16);
+        }
+        drop(pcm);
+        let stats = timeout(Duration::from_secs(2), running)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(stats.packets_sent, 20);
+        assert_eq!(stats.volume_updates, 1);
+        peer.await.unwrap();
+    }
 
     #[test]
     fn volume_is_validated_before_entering_control_channel() {
