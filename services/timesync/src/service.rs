@@ -6,7 +6,7 @@ use crate::{
     engine::{Emission, Engine, Snapshot},
     sender::{ClockSource, Config as NetworkConfig, Ports, Source},
 };
-use clock::{follower, role};
+use clock::{follower, probe, role};
 use std::{
     collections::{BTreeMap, VecDeque},
     io,
@@ -25,6 +25,7 @@ pub struct Config {
     pub network: NetworkConfig,
     pub election: role::Config,
     pub follow: follower::Config,
+    pub probe: Option<probe::Config>,
 }
 pub struct Service {
     addresses: (SocketAddr, SocketAddr),
@@ -54,6 +55,7 @@ mod tests {
     }
     fn config(peer: Peer, policy: Policy) -> Config {
         Config {
+            probe: None,
             network: NetworkConfig {
                 domain: Domain::new(100, 1).unwrap(),
                 bind_ip: "127.0.0.1".parse().unwrap(),
@@ -165,6 +167,67 @@ mod tests {
         let _general = UdpSocket::bind(addresses.1).await.unwrap();
     }
     #[tokio::test]
+    async fn opt_in_probe_completes_over_loopback_without_changing_mapping_quality() {
+        let event = UdpSocket::bind("127.0.0.2:0").await.unwrap();
+        let general = UdpSocket::bind("127.0.0.2:0").await.unwrap();
+        let peer = Peer {
+            ip: "127.0.0.2".parse().unwrap(),
+            ports: Ports {
+                event: event.local_addr().unwrap().port(),
+                general: general.local_addr().unwrap().port(),
+            },
+        };
+        let mut cfg = config(peer, Policy::FollowOnly(peer.ip));
+        cfg.election.announce_lease_ns = 2_000_000_000;
+        cfg.follow.mapping_lease_ns = 1_000_000_000;
+        cfg.probe = Some(probe::Config {
+            interval_ns: 125_000_000,
+            timeout_ns: 100_000_000,
+            measurement: clock::measurement::Config {
+                max_roundtrip_ns: 100_000_000,
+                rate_window_ns: 1_000_000_000,
+                valid_for_ns: 1_000_000_000,
+                timestamp_error_ns: 1_000_000,
+            },
+        });
+        let service = Service::bind(cfg, Arc::new(TestClock)).await.unwrap();
+        let addresses = service.addresses();
+        let mut status = service.subscribe();
+        let domain = Domain::new(50, 1).unwrap();
+        let mut remote = Master::new(domain).unwrap();
+        remote.set_peers(&["127.0.0.1".parse().unwrap()]).unwrap();
+        for n in 0..4 {
+            emit(&mut remote, n, &event, &general, addresses).await;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let mut buffer = [0u8; 1024];
+        let (size, addr) = timeout(Duration::from_secs(1), event.recv_from(&mut buffer))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(buffer[0] & 15, 2);
+        let response = remote
+            .receive(
+                addr.ip(),
+                &buffer[..size],
+                domain.reading(clock::now_ns() + 20_000_000_000),
+            )
+            .unwrap();
+        event.send_to(&response.bytes, addresses.0).await.unwrap();
+        let follow = remote
+            .complete_send(
+                response.completion.as_ref().unwrap(),
+                domain.reading(clock::now_ns() + 20_000_000_000),
+            )
+            .unwrap();
+        general.send_to(&follow.bytes, addresses.1).await.unwrap();
+        let measured = wait_for(&mut status, |s| s.link.is_some() && s.mapping.is_some()).await;
+        assert_eq!(measured.link.unwrap().neighbor.id(), 50);
+        assert_eq!(measured.quality, Some(Quality::OneWay));
+        service.shutdown().await.unwrap();
+        assert!(status.borrow().link.is_none());
+    }
+    #[tokio::test]
     async fn follow_only_without_evidence_never_creates_a_master() {
         let event = UdpSocket::bind("127.0.0.2:0").await.unwrap();
         let general = UdpSocket::bind("127.0.0.2:0").await.unwrap();
@@ -248,6 +311,9 @@ impl Service {
             config.election,
             config.follow,
         )?;
+        if let Some(probe) = config.probe {
+            engine.enable_probe(probe)?;
+        }
         let event = UdpSocket::bind(SocketAddr::new(network.bind_ip, network.ports.event)).await?;
         let general =
             UdpSocket::bind(SocketAddr::new(network.bind_ip, network.ports.general)).await?;
@@ -357,7 +423,7 @@ async fn dispatch(
         if sent != packet.bytes.len() {
             return Err(io::Error::new(io::ErrorKind::WriteZero, "short clock send"));
         }
-        if packet.completion.is_some() {
+        if emission.needs_completion() {
             let (local, own) = source.sample()?;
             if let Some(follow) = engine.complete(&emission, local, own)? {
                 queue.push_front(follow);

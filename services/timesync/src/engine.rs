@@ -2,6 +2,7 @@
 use clock::{
     domain::{ClockMap, Domain, LocalClock, LocalInstant, Reading},
     follower::{self, Follower},
+    measurement, probe,
     ptp_sender::{Datagram, Master},
     role::{self, Controller, Role, Selection},
 };
@@ -17,6 +18,7 @@ pub struct Snapshot {
     pub selection: Selection,
     pub mapping: Option<ClockMap>,
     pub quality: Option<Quality>,
+    pub link: Option<measurement::Estimate>,
 }
 impl Snapshot {
     pub fn inactive() -> Self {
@@ -27,6 +29,7 @@ impl Snapshot {
             },
             mapping: None,
             quality: None,
+            link: None,
         }
     }
 }
@@ -34,11 +37,17 @@ impl Snapshot {
 enum Origin {
     Master,
     Link,
+    Probe(probe::Token),
 }
 #[derive(Clone, Debug)]
 pub struct Emission {
     pub datagram: Datagram,
     origin: Origin,
+}
+impl Emission {
+    pub fn needs_completion(&self) -> bool {
+        self.datagram.completion.is_some() || matches!(self.origin, Origin::Probe(_))
+    }
 }
 pub struct Engine {
     own: Domain,
@@ -49,6 +58,8 @@ pub struct Engine {
     master: Option<Master>,
     link: Master,
     follower: Option<Follower>,
+    probe_config: Option<probe::Config>,
+    probe: Option<probe::Requester>,
     snapshot: Snapshot,
     had_mapping: bool,
     faulted: bool,
@@ -155,6 +166,71 @@ mod tests {
         assert!(e.snapshot().selection.domain.unwrap().epoch() > first.epoch());
     }
     #[test]
+    fn opt_in_probe_measures_neighbor_without_promoting_one_way_mapping() {
+        let mut e = engine();
+        e.enable_probe(probe::Config {
+            interval_ns: 125_000_000,
+            timeout_ns: 100_000_000,
+            measurement: measurement::Config {
+                max_roundtrip_ns: 100_000_000,
+                rate_window_ns: 1_000_000_000,
+                valid_for_ns: 2_000_000_000,
+                timestamp_error_ns: 0,
+            },
+        })
+        .unwrap();
+        let mut m = remote();
+        deliver(&mut e, &mut m, 0, 1_000_000_000);
+        deliver(&mut e, &mut m, 1, 2_000_000_000);
+        deliver(&mut e, &mut m, 2, 3_000_000_000);
+        let at = 3_010_000_000;
+        let batch = e.tick(local().at(at), own(at)).unwrap();
+        assert_eq!(batch.len(), 1);
+        let request = &batch[0];
+        assert!(request.needs_completion());
+        e.complete(request, local().at(at), own(at)).unwrap();
+        let domain = Domain::new(50, 1).unwrap();
+        let response = m
+            .receive(
+                peer(),
+                &request.datagram.bytes,
+                domain.reading(at + 20_002_000_000),
+            )
+            .unwrap();
+        let follow = m
+            .complete_send(
+                response.completion.as_ref().unwrap(),
+                domain.reading(at + 20_003_000_000),
+            )
+            .unwrap();
+        e.receive(
+            peer(),
+            &response.bytes,
+            local().at(at + 5_000_000),
+            own(at + 5_000_000),
+        )
+        .unwrap();
+        e.receive(
+            peer(),
+            &follow.bytes,
+            local().at(at + 5_000_010),
+            own(at + 5_000_010),
+        )
+        .unwrap();
+        let s = e.snapshot();
+        assert_eq!(s.link.unwrap().mean_path_ns, 2_000_000);
+        assert_eq!(s.link.unwrap().neighbor.id(), 50);
+        assert_eq!(s.quality, Some(Quality::OneWay));
+        e.tick(local().at(13_000_000_001), own(13_000_000_001))
+            .unwrap();
+        assert!(e.snapshot().link.is_none());
+        assert!(
+            e.complete(request, local().at(13_000_000_002), own(13_000_000_002))
+                .unwrap()
+                .is_none()
+        );
+    }
+    #[test]
     fn changing_physical_epoch_revokes_snapshot_and_engine_cannot_resume_old_domain() {
         let mut e = engine();
         e.tick(local().at(10), own(10)).unwrap();
@@ -204,6 +280,8 @@ impl Engine {
             master: None,
             link,
             follower: None,
+            probe_config: None,
+            probe: None,
             snapshot: Snapshot::inactive(),
             had_mapping: false,
             faulted: false,
@@ -214,6 +292,7 @@ impl Engine {
         self.faulted = true;
         self.master = None;
         self.follower = None;
+        self.probe = None;
         self.snapshot = Snapshot::inactive();
     }
     fn validate(&mut self, now: LocalInstant, own: Reading) -> io::Result<()> {
@@ -258,11 +337,13 @@ impl Engine {
         }
         self.master = None;
         self.follower = None;
+        self.probe = None;
         self.had_mapping = false;
         self.snapshot = Snapshot {
             selection: next,
             mapping: None,
             quality: None,
+            link: None,
         };
         match next.role {
             Role::Master => {
@@ -274,6 +355,21 @@ impl Engine {
                 let dataset = self.controller.selected_dataset().ok_or_else(|| {
                     io::Error::new(io::ErrorKind::InvalidData, "selected source absent")
                 })?;
+                if let Some(config) = self.probe_config {
+                    self.probe = Some(
+                        probe::Requester::new(
+                            self.own.id(),
+                            self.link.dataset().source_port,
+                            peer,
+                            dataset,
+                            Domain::new(dataset.source_clock, next.domain.unwrap().epoch())
+                                .map_err(io::Error::other)?,
+                            self.local,
+                            config,
+                        )
+                        .map_err(io::Error::other)?,
+                    );
+                }
                 self.follower = Some(
                     Follower::new(
                         peer,
@@ -297,6 +393,7 @@ impl Engine {
         self.transition(next)
     }
     fn refresh(&mut self, now: LocalInstant, own: Reading) -> io::Result<()> {
+        self.snapshot.link = self.probe.as_ref().and_then(|p| p.latest(now));
         match self.snapshot.selection.role {
             Role::Master => {
                 // Same live physical clock, newly selected authority epoch. Do
@@ -345,7 +442,23 @@ impl Engine {
                 })
                 .collect()
         } else {
-            Vec::new()
+            self.probe
+                .as_mut()
+                .map(|probe| probe.poll(now))
+                .transpose()
+                .map_err(io::Error::other)?
+                .flatten()
+                .into_iter()
+                .map(|request| Emission {
+                    datagram: Datagram {
+                        peer: request.peer,
+                        port: 319,
+                        bytes: request.bytes,
+                        completion: None,
+                    },
+                    origin: Origin::Probe(request.token),
+                })
+                .collect()
         })
     }
     pub fn receive(
@@ -365,6 +478,10 @@ impl Engine {
         }
         self.choose(now)?;
         self.refresh(now, own)?;
+        if let Some(probe) = self.probe.as_mut() {
+            probe.receive(peer, packet, now).map_err(io::Error::other)?;
+            self.snapshot.link = probe.latest(now);
+        }
         if let Some(follower) = self.follower.as_mut() {
             match follower
                 .receive(peer, packet, now)
@@ -413,6 +530,12 @@ impl Engine {
         self.validate(now, own)?;
         self.choose(now)?;
         self.refresh(now, own)?;
+        if let Origin::Probe(token) = emission.origin {
+            if let Some(probe) = self.probe.as_mut() {
+                probe.sent(token, now).map_err(io::Error::other)?;
+            }
+            return Ok(None);
+        }
         let Some(token) = emission.datagram.completion.as_ref() else {
             return Ok(None);
         };
@@ -424,6 +547,7 @@ impl Engine {
                 )
             }),
             Origin::Link => self.link.complete_send(token, own),
+            Origin::Probe(_) => unreachable!(),
         };
         Ok(packet.map(|datagram| Emission {
             datagram,
@@ -432,5 +556,17 @@ impl Engine {
     }
     pub fn snapshot(&self) -> Snapshot {
         self.snapshot
+    }
+    /// Explicit opt-in, configured before the first role is chosen.
+    pub fn enable_probe(&mut self, config: probe::Config) -> io::Result<()> {
+        config.validate().map_err(io::Error::other)?;
+        if self.snapshot.selection.role != Role::Listening || self.physical_sample.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "probe configuration requires a fresh engine",
+            ));
+        }
+        self.probe_config = Some(config);
+        Ok(())
     }
 }
