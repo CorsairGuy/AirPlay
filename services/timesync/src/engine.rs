@@ -21,6 +21,21 @@ pub struct Snapshot {
     pub link: Option<measurement::Estimate>,
 }
 impl Snapshot {
+    /// Explicit candidate only. Does not replace the live one-way map or claim
+    /// servo lock. Both Sync evidence and the Pdelay lease must still be fresh.
+    pub fn measured_mapping(
+        &self,
+        now: LocalInstant,
+        policy: measurement::MappingPolicy,
+    ) -> Option<measurement::MeasuredMap> {
+        if !matches!(self.selection.role, Role::Follower(_))
+            || self.quality != Some(Quality::OneWay)
+        {
+            return None;
+        }
+        self.mapping?.to_network(now, now).ok()?;
+        self.link?.mapping_for(self.selection.domain?, now, policy)
+    }
     pub fn inactive() -> Self {
         Self {
             selection: Selection {

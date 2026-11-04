@@ -4,7 +4,7 @@
 //! that ratio exactly once. gPTP's correction is FollowUp - Response (not the
 //! ordinary 1588 sum); checked against linuxptp 227bbd47 port_peer_delay.
 //! Delay assumes a symmetric path. Asymmetry cannot be solved from four stamps.
-use crate::domain::{Domain, LocalClock, LocalInstant, Reading};
+use crate::domain::{ClockMap, Domain, LocalClock, LocalInstant, Reading};
 use std::collections::VecDeque;
 
 const SCALE: i128 = 1_000_000_000;
@@ -52,6 +52,9 @@ pub struct Exchange {
 }
 #[derive(Clone, Copy, Debug)]
 pub struct Estimate {
+    reference_local: LocalInstant,
+    reference_remote: Reading,
+    valid_for_ns: u64,
     pub neighbor: Domain,
     pub measured_at: LocalInstant,
     pub mean_path_ns: u64,
@@ -59,6 +62,68 @@ pub struct Estimate {
     pub offset_uncertainty_ns: u64,
     pub neighbor_rate_ppb: Option<i64>,
     pub rate_uncertainty_ppb: Option<u64>,
+}
+/// Application limits, not a declaration of hardware/acoustic lock.
+#[derive(Clone, Copy, Debug)]
+pub struct MappingPolicy {
+    pub max_age_ns: u64,
+    pub lease_ns: u64,
+    pub max_uncertainty_ns: u64,
+    pub max_rate_uncertainty_ppb: u64,
+}
+#[derive(Clone, Copy, Debug)]
+pub struct MeasuredMap {
+    pub mapping: ClockMap,
+    /// Bound over the entire granted lease, under stable-rate/capture assumptions.
+    pub uncertainty_ns: u64,
+}
+impl Estimate {
+    /// Only a direct root neighbor can supply the selected group's scale.
+    /// Never relabel a boundary clock as its upstream grandmaster.
+    pub fn mapping_for(
+        self,
+        selected: Domain,
+        now: LocalInstant,
+        policy: MappingPolicy,
+    ) -> Option<MeasuredMap> {
+        if selected != self.neighbor
+            || now.clock() != self.reference_local.clock()
+            || policy.max_age_ns == 0
+            || policy.lease_ns == 0
+        {
+            return None;
+        }
+        let age = now.ns().checked_sub(self.measured_at.ns())?;
+        let remaining = policy.max_age_ns.min(self.valid_for_ns).checked_sub(age)?;
+        let lease = policy.lease_ns.min(remaining);
+        if lease == 0 {
+            return None;
+        }
+        let rate = self.neighbor_rate_ppb?;
+        let rate_error = self.rate_uncertainty_ppb?;
+        if rate_error > policy.max_rate_uncertainty_ppb {
+            return None;
+        }
+        let horizon = now
+            .ns()
+            .checked_sub(self.reference_local.ns())?
+            .checked_add(lease)?;
+        // Ceiling avoids understating even a fractional nanosecond of drift.
+        let drift = (u128::from(horizon) * u128::from(rate_error) + 999_999_999) / 1_000_000_000;
+        let uncertainty = self
+            .offset_uncertainty_ns
+            .checked_add(u64::try_from(drift).ok()?)?;
+        if uncertainty > policy.max_uncertainty_ns {
+            return None;
+        }
+        let source =
+            ClockMap::new(self.reference_local, self.reference_remote, rate, u64::MAX).ok()?;
+        let remote_now = source.to_network(now, now).ok()?;
+        Some(MeasuredMap {
+            mapping: ClockMap::new(now, remote_now, rate, lease).ok()?,
+            uncertainty_ns: uncertainty,
+        })
+    }
 }
 #[derive(Clone, Copy)]
 struct Point {
@@ -159,6 +224,11 @@ impl Estimator {
             + turn_local * i128::from(rate_error) / SCALE
             + (-network).max(0);
         let result = Estimate {
+            reference_local: self.local.at(point.local),
+            reference_remote: self
+                .neighbor
+                .reading(u64::try_from(point.remote).map_err(|_| Error::Overflow)?),
+            valid_for_ns: self.config.valid_for_ns,
             neighbor: self.neighbor,
             measured_at: e.received,
             mean_path_ns: delay,
@@ -217,6 +287,116 @@ mod tests {
             response_correction_ns: 0,
             followup_correction_ns: 0,
         }
+    }
+    #[test]
+    fn measured_map_tracks_rate_and_preserves_a_common_presentation_instant() {
+        for ppb in [-200_000, 300_000] {
+            let mut e = Estimator::new(domain(), local(), config()).unwrap();
+            for n in 0..12 {
+                e.observe(exchange(
+                    1_000_000_000 + n * 1_000_000_000,
+                    2_000_000,
+                    2_000_000,
+                    10_000_000,
+                    ppb,
+                ))
+                .unwrap();
+            }
+            let estimate = e.latest.unwrap();
+            let now = estimate.measured_at;
+            let policy = MappingPolicy {
+                max_age_ns: 1_000_000_000,
+                lease_ns: 500_000_000,
+                max_uncertainty_ns: 100_000_000,
+                max_rate_uncertainty_ppb: 100_000_000,
+            };
+            let map = estimate.mapping_for(domain(), now, policy).unwrap();
+            let target = local().at(now.ns() + 250_000_000);
+            let network = map.mapping.to_network(target, now).unwrap();
+            assert!(
+                (i128::from(network.ns()) - i128::from(remote(i128::from(target.ns()), ppb).ns()))
+                    .abs()
+                    <= 2
+            );
+            assert!(
+                (i128::from(map.mapping.to_local(network, now).unwrap().ns())
+                    - i128::from(target.ns()))
+                .abs()
+                    <= 2
+            );
+            assert!(
+                map.mapping
+                    .to_network(target, local().at(now.ns() + 500_000_001))
+                    .is_err()
+            );
+            assert!(
+                estimate
+                    .mapping_for(Domain::new(50, 7).unwrap(), now, policy)
+                    .is_none()
+            );
+            assert!(
+                estimate
+                    .mapping_for(Domain::new(200, 8).unwrap(), now, policy)
+                    .is_none()
+            );
+            assert!(
+                estimate
+                    .mapping_for(domain(), local().at(now.ns() + 1_000_000_000), policy)
+                    .is_none()
+            );
+            assert!(
+                estimate
+                    .mapping_for(
+                        domain(),
+                        now,
+                        MappingPolicy {
+                            max_uncertainty_ns: 1,
+                            ..policy
+                        }
+                    )
+                    .is_none()
+            );
+            assert!(
+                estimate
+                    .mapping_for(
+                        domain(),
+                        now,
+                        MappingPolicy {
+                            max_rate_uncertainty_ppb: 0,
+                            ..policy
+                        }
+                    )
+                    .is_none()
+            );
+        }
+    }
+    #[test]
+    fn unqualified_measurement_and_wrong_local_clock_do_not_produce_maps() {
+        let mut e = Estimator::new(domain(), local(), config()).unwrap();
+        let estimate = e
+            .observe(exchange(1_000_000_000, 1000, 1000, 1000, 0))
+            .unwrap()
+            .unwrap();
+        let policy = MappingPolicy {
+            max_age_ns: 1_000_000_000,
+            lease_ns: 100_000_000,
+            max_uncertainty_ns: u64::MAX,
+            max_rate_uncertainty_ppb: u64::MAX,
+        };
+        assert!(
+            estimate
+                .mapping_for(domain(), estimate.measured_at, policy)
+                .is_none()
+        );
+        assert!(
+            estimate
+                .mapping_for(
+                    domain(),
+                    LocalClock::new(2).unwrap().at(estimate.measured_at.ns()),
+                    policy
+                )
+                .is_none()
+        );
     }
     #[test]
     fn symmetric_delay_and_fast_slow_clock_rates_are_recovered_without_double_scaling() {
