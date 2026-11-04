@@ -15,6 +15,7 @@ pub mod role;
 pub mod follower;
 pub mod measurement;
 pub mod probe;
+pub mod slew;
 
 pub use filter::OffsetFilter;
 pub use rate::AudioRateEstimator;

@@ -114,6 +114,13 @@ impl ClockMap {
     pub fn domain(self) -> Domain {
         self.remote.domain
     }
+    pub fn rate_ppb(self) -> i64 {
+        self.rate_ppb
+    }
+    pub fn remaining_ns(&self, now: LocalInstant) -> Result<u64, Error> {
+        self.fresh(now)?;
+        Ok(self.valid_for_ns - (now.ns() - self.local.ns))
+    }
     fn fresh(&self, now: LocalInstant) -> Result<(), Error> {
         if now.clock != self.local.clock {
             return Err(Error::WrongDomain);
