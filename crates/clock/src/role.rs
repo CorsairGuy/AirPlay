@@ -380,6 +380,34 @@ impl Controller {
     pub fn selection(&self) -> Selection {
         self.selection
     }
+    /// Revoke a measurement without forgetting a still-live announcing master.
+    pub fn renew_mapping_epoch(&mut self, now: LocalInstant) -> Result<Selection, Error> {
+        let previous = self.selection;
+        let selected = self.tick(now)?;
+        if selected != previous {
+            return Ok(selected);
+        }
+        if let Some(domain) = selected.domain {
+            let epoch = match next_epoch() {
+                Ok(epoch) => epoch,
+                Err(error) => {
+                    self.fail();
+                    return Err(error);
+                }
+            };
+            self.selection.domain =
+                Some(Domain::new(domain.id(), epoch).map_err(|_| Error::Invalid)?);
+        }
+        Ok(self.selection)
+    }
+    /// Call tick first; this is the source identity selected for that instant.
+    pub fn selected_dataset(&self) -> Option<Dataset> {
+        match self.key {
+            Key::Local => Some(self.own),
+            Key::Remote { peer, .. } => self.foreign.get(&peer).map(|c| c.dataset),
+            Key::Listening => None,
+        }
+    }
 }
 fn remote_key(peer: IpAddr, c: Candidate) -> Key {
     Key::Remote {
@@ -462,6 +490,20 @@ mod tests {
         let selected = c.tick(local().at(20)).unwrap();
         assert_eq!(selected.role, Role::Follower(peer()));
         assert_eq!(selected.domain.unwrap().id(), 20);
+    }
+    #[test]
+    fn mapping_loss_keeps_fresh_master_evidence_and_does_not_elect_local_clock() {
+        let mut c = controller(Policy::Elect);
+        for (n, t) in [(1, 10), (2, 20)] {
+            c.announce(peer(), &packet(dataset(20, 100), n), local().at(t))
+                .unwrap();
+        }
+        let old = c.tick(local().at(20)).unwrap();
+        let renewed = c.renew_mapping_epoch(local().at(21)).unwrap();
+        assert_eq!(renewed.role, old.role);
+        assert_eq!(renewed.domain.unwrap().id(), 20);
+        assert!(renewed.domain.unwrap().epoch() > old.domain.unwrap().epoch());
+        assert_eq!(c.tick(local().at(22)).unwrap(), renewed);
     }
     #[test]
     fn replay_does_not_renew_lease_and_follow_only_never_self_promotes() {

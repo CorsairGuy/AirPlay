@@ -342,6 +342,19 @@ impl Master {
             completion: None,
         })
     }
+    /// Dedicated link-delay responder use: never feeds Announce into this
+    /// instance and never polls it. It creates no second periodic master.
+    pub fn receive_peer_delay(
+        &mut self,
+        peer: IpAddr,
+        packet: &[u8],
+        ingress: Reading,
+    ) -> Option<Datagram> {
+        if packet.first().map(|b| b & 15) != Some(2) {
+            return None;
+        }
+        self.receive(peer, packet, ingress)
+    }
     fn signaling(&self, peer: IpAddr, packet: &[u8], seq: u16) -> Option<Datagram> {
         if packet.len() < 48 {
             return None;

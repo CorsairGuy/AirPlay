@@ -46,13 +46,13 @@ pub struct Config {
     pub ports: Ports,
     pub peers: Vec<Peer>,
 }
-struct Source {
-    inner: Arc<dyn ClockSource>,
-    domain: Domain,
-    local: LocalClock,
+pub(super) struct Source {
+    pub(super) inner: Arc<dyn ClockSource>,
+    pub(super) domain: Domain,
+    pub(super) local: LocalClock,
 }
 impl Source {
-    fn sample(&self) -> io::Result<(LocalInstant, Reading)> {
+    pub(super) fn sample(&self) -> io::Result<(LocalInstant, Reading)> {
         let (local, remote) = self.inner.sample()?;
         if remote.domain() != self.domain || local.clock() != self.local {
             return Err(io::Error::new(

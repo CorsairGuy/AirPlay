@@ -6,6 +6,8 @@
 
 pub mod ntp;
 pub mod sender;
+pub mod engine;
+pub mod service;
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
