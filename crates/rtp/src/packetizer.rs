@@ -129,6 +129,9 @@ impl PcmPacketizer {
     pub fn initial_timestamp(&self) -> u32 {
         self.latency_frames
     }
+    pub fn mapping_lead_frames(&self) -> u32 {
+        self.mapping_lead_frames
+    }
     pub fn next_sequence(&self) -> u16 {
         self.sequence
     }

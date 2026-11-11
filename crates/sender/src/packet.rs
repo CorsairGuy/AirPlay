@@ -42,7 +42,26 @@ impl MediaClock {
             index: frame_index,
             produced,
             ntp: self.ntp.wrapping_add(offset),
+            ptp: None,
         })
+    }
+    /// Sample/map the shared producer instant once, before broadcasting the
+    /// immutable frame. The provider must be nonblocking and role/freshness
+    /// qualified; receivers must not replace this with a send-time clock read.
+    pub fn packet_with_ptp(
+        &self,
+        frame_index: u64,
+        pcm: &[u8],
+        domain: clock::domain::Domain,
+        read_at: impl FnOnce(Instant) -> Result<clock::domain::Reading>,
+    ) -> Result<AudioPacket> {
+        let mut packet = self.packet(frame_index, pcm)?;
+        let reading = read_at(packet.produced)?;
+        if reading.domain() != domain {
+            bail!("producer PTP clock or epoch changed");
+        }
+        packet.ptp = Some(reading);
+        Ok(packet)
     }
 }
 
@@ -54,9 +73,13 @@ pub struct AudioPacket {
     pub(crate) index: u64,
     pub(crate) produced: Instant,
     pub(crate) ntp: u64,
+    ptp: Option<clock::domain::Reading>,
 }
 
 impl AudioPacket {
+    pub fn ptp_reading(&self) -> Option<clock::domain::Reading> {
+        self.ptp
+    }
     pub fn pcm(&self) -> &[u8] {
         &self.data
     }
@@ -85,6 +108,48 @@ pub(crate) fn frames_duration(frames: u64) -> Duration {
 mod tests {
     use super::*;
 
+    #[test]
+    fn ptp_provider_is_called_once_at_the_producer_instant() {
+        let start = Instant::now();
+        let clock = MediaClock::at(start, 0);
+        let domain = clock::domain::Domain::new(7, 1).unwrap();
+        let calls = std::cell::Cell::new(0);
+        let packet = clock
+            .packet_with_ptp(44_100, &[0; PACKET_BYTES], domain, |instant| {
+                calls.set(calls.get() + 1);
+                assert_eq!(instant, start + Duration::from_secs(1));
+                Ok(domain.reading(7_000_000_000))
+            })
+            .unwrap();
+        assert_eq!(calls.get(), 1);
+        assert_eq!(packet.ptp_reading(), Some(domain.reading(7_000_000_000)));
+        assert!(
+            clock
+                .packet(0, &[0; PACKET_BYTES])
+                .unwrap()
+                .ptp_reading()
+                .is_none()
+        );
+    }
+    #[test]
+    fn ptp_frame_rejects_stale_domain_and_provider_failure() {
+        let clock = MediaClock::now();
+        let domain = clock::domain::Domain::new(7, 1).unwrap();
+        assert!(
+            clock
+                .packet_with_ptp(0, &[0; PACKET_BYTES], domain, |_| Ok(
+                    clock::domain::Domain::new(7, 2).unwrap().reading(1)
+                ))
+                .is_err()
+        );
+        assert!(
+            clock
+                .packet_with_ptp(0, &[0; PACKET_BYTES], domain, |_| anyhow::bail!(
+                    "clock unqualified"
+                ))
+                .is_err()
+        );
+    }
     #[test]
     fn one_epoch_preserves_time_across_receiver_start_times() {
         let start = Instant::now();
