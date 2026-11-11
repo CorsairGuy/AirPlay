@@ -78,7 +78,10 @@ pub struct MasterLease {
 }
 impl MasterLease {
     pub fn spawn(timeline: Arc<MasterTimeline>, mut upstream: watch::Receiver<bool>) -> Self {
-        let (stop, _) = watch::channel(false);
+        let initially_stopped = *upstream.borrow()
+            || upstream.has_changed().is_err()
+            || timeline.reading_at(Instant::now()).is_err();
+        let (stop, _) = watch::channel(initially_stopped);
         let signal = stop.clone();
         let mut status = timeline.status.clone();
         // Freshness can expire without a status notification.
@@ -214,6 +217,13 @@ impl MasterTimeline {
 mod tests {
     use super::*;
     use clock::{domain::ClockMap, role::Selection};
+    #[tokio::test]
+    async fn already_stopped_upstream_never_exposes_a_running_lease() {
+        let (_, _updates, timeline) = fixture();
+        let (_user, upstream) = watch::channel(true);
+        let lease = MasterLease::spawn(Arc::new(timeline), upstream);
+        assert!(*lease.subscribe().borrow());
+    }
     async fn stopped(stop: &mut watch::Receiver<bool>) {
         tokio::time::timeout(Duration::from_secs(1), async {
             while !*stop.borrow_and_update() {
