@@ -89,6 +89,9 @@ pub struct SessionConfig {
     /// Credentials obtained by a previously completed PIN pairing. The adapter
     /// owns secure persistence; None keeps the transient3939 mode.
     pub pairing: Option<PairingCredentials>,
+    /// Explicit PTP transport. Caller owns one qualified clock service/provider
+    /// for the whole group and supplies tagged shared producer frames.
+    pub ptp: Option<crate::timing::PtpPlan>,
     pub request_timeout: Duration,
 }
 
@@ -101,11 +104,19 @@ impl SessionConfig {
             volume: Volume(-30.0),
             preserve_receiver_volume: false,
             pairing: None,
+            ptp: None,
             request_timeout: Duration::from_secs(8),
         }
     }
 
     fn validate(&self) -> Result<()> {
+        if self
+            .ptp
+            .as_ref()
+            .is_some_and(|plan| !plan.has_receiver(self.endpoint.ip()))
+        {
+            bail!("receiver is not in PTP peer configuration");
+        }
         if !(11_025..=88_200).contains(&self.latency_frames) {
             bail!("latency outside realtime stream limits");
         }
@@ -280,9 +291,69 @@ pub struct Session {
     audio: UdpSocket,
     control: Arc<UdpSocket>,
     control_destination: SocketAddr,
-    packetizer: rtp::PcmPacketizer,
-    _timing_task: Task,
+    packetizer: TargetPacketizer,
+    _timing_task: Option<Task>,
     _event_task: Option<Task>,
+}
+
+enum TargetPacketizer {
+    Ntp(rtp::PcmPacketizer),
+    Ptp(crate::timing::PtpPacketizer),
+}
+enum SyncPacket {
+    Ntp([u8; 20]),
+    Ptp([u8; 28]),
+}
+impl SyncPacket {
+    fn bytes(&self) -> &[u8] {
+        match self {
+            Self::Ntp(bytes) => bytes,
+            Self::Ptp(bytes) => bytes,
+        }
+    }
+}
+struct TargetPacket {
+    audio: Vec<u8>,
+    sync: SyncPacket,
+}
+impl TargetPacketizer {
+    fn initial_timestamp(&self) -> u32 {
+        match self {
+            Self::Ntp(p) => p.initial_timestamp(),
+            Self::Ptp(p) => p.initial_timestamp(),
+        }
+    }
+    fn next_sequence(&self) -> u16 {
+        match self {
+            Self::Ntp(p) => p.next_sequence(),
+            Self::Ptp(p) => p.next_sequence(),
+        }
+    }
+    fn retransmit(&self, bytes: &[u8]) -> Vec<Vec<u8>> {
+        match self {
+            Self::Ntp(p) => p.retransmit(bytes),
+            Self::Ptp(p) => p.retransmit(bytes),
+        }
+    }
+    fn packetize(&mut self, frame: &AudioPacket) -> Result<TargetPacket> {
+        Ok(match self {
+            Self::Ntp(p) => {
+                let packet =
+                    p.packetize(frame.pcm(), frame.frame_index(), frame.ntp_timestamp())?;
+                TargetPacket {
+                    audio: packet.audio,
+                    sync: SyncPacket::Ntp(packet.sync),
+                }
+            }
+            Self::Ptp(p) => {
+                let packet = p.packetize(frame)?;
+                TargetPacket {
+                    audio: packet.audio,
+                    sync: SyncPacket::Ptp(packet.sync),
+                }
+            }
+        })
+    }
 }
 
 impl Session {
@@ -302,6 +373,13 @@ impl Session {
             .context("receiver connect deadline exceeded")??;
         stream.set_nodelay(true)?;
         let local_ip = stream.local_addr()?.ip();
+        if config
+            .ptp
+            .as_ref()
+            .is_some_and(|plan| !plan.has_local(local_ip))
+        {
+            bail!("TCP route is outside configured PTP local addresses");
+        }
         let (session_id, dacp, active_remote, uuid_tail, first_sequence, identity_seed) = {
             let mut rng = rand::thread_rng();
             let mut seed = [0; 32];
@@ -354,46 +432,75 @@ impl Session {
         };
         rtsp.conn.encrypt(keys);
 
-        let timing = Arc::new(UdpSocket::bind((local_ip, 0)).await?);
+        let timing = if config.ptp.is_none() {
+            Some(Arc::new(UdpSocket::bind((local_ip, 0)).await?))
+        } else {
+            None
+        };
         let control = Arc::new(UdpSocket::bind((local_ip, 0)).await?);
-        let timing_task = Task(tokio::spawn(timing_server(
-            timing.clone(),
-            config.endpoint.ip(),
-        )));
+        let timing_task = timing.as_ref().map(|timing| {
+            Task(tokio::spawn(timing_server(
+                timing.clone(),
+                config.endpoint.ip(),
+            )))
+        });
         // A receiver may allocate session state at either SETUP. Even a later
         // decode/port/RECORD failure must release it before closing the socket.
         let prepared = async {
-            let setup = dictionary(vec![
-                (
-                    "deviceID",
-                    plist::Value::String(config.identity.device_id.clone()),
-                ),
-                (
-                    "macAddress",
-                    plist::Value::String(config.identity.device_id.clone()),
-                ),
-                ("name", plist::Value::String(config.identity.name.clone())),
-                ("model", plist::Value::String(config.identity.model.clone())),
-                (
-                    "sourceVersion",
-                    plist::Value::String(config.identity.source_version.clone()),
-                ),
-                (
-                    "sessionUUID",
-                    plist::Value::String(format!(
-                        "{session_id:08X}-0000-4000-8000-{uuid_tail:012X}"
-                    )),
-                ),
-                (
-                    "timingPort",
-                    plist::Value::Integer((timing.local_addr()?.port() as u64).into()),
-                ),
-                ("timingProtocol", plist::Value::String("NTP".into())),
-                ("isMultiSelectAirPlay", plist::Value::Boolean(true)),
-                ("groupContainsGroupLeader", plist::Value::Boolean(false)),
-                ("senderSupportsRelay", plist::Value::Boolean(false)),
-                ("statsCollectionEnabled", plist::Value::Boolean(false)),
-            ]);
+            let setup = if let Some(plan) = &config.ptp {
+                let uuid = ((session_id as u128) << 96)
+                    | (0x4000_u128 << 64)
+                    | (0x8000_u128 << 48)
+                    | (uuid_tail as u128);
+                let mut setup = plan.setup(&config.identity, uuid)?;
+                let fields = setup.as_dictionary_mut().context("PTP SETUP dictionary")?;
+                fields.insert("isMultiSelectAirPlay".into(), plist::Value::Boolean(true));
+                fields.insert("senderSupportsRelay".into(), plist::Value::Boolean(false));
+                fields.insert(
+                    "statsCollectionEnabled".into(),
+                    plist::Value::Boolean(false),
+                );
+                setup
+            } else {
+                dictionary(vec![
+                    (
+                        "deviceID",
+                        plist::Value::String(config.identity.device_id.clone()),
+                    ),
+                    (
+                        "macAddress",
+                        plist::Value::String(config.identity.device_id.clone()),
+                    ),
+                    ("name", plist::Value::String(config.identity.name.clone())),
+                    ("model", plist::Value::String(config.identity.model.clone())),
+                    (
+                        "sourceVersion",
+                        plist::Value::String(config.identity.source_version.clone()),
+                    ),
+                    (
+                        "sessionUUID",
+                        plist::Value::String(format!(
+                            "{session_id:08X}-0000-4000-8000-{uuid_tail:012X}"
+                        )),
+                    ),
+                    (
+                        "timingPort",
+                        plist::Value::Integer(
+                            (timing
+                                .as_ref()
+                                .context("NTP timing socket")?
+                                .local_addr()?
+                                .port() as u64)
+                                .into(),
+                        ),
+                    ),
+                    ("timingProtocol", plist::Value::String("NTP".into())),
+                    ("isMultiSelectAirPlay", plist::Value::Boolean(true)),
+                    ("groupContainsGroupLeader", plist::Value::Boolean(false)),
+                    ("senderSupportsRelay", plist::Value::Boolean(false)),
+                    ("statsCollectionEnabled", plist::Value::Boolean(false)),
+                ])
+            };
             let response = rtsp
                 .request(
                     "SETUP",
@@ -407,6 +514,23 @@ impl Session {
             let setup = setup
                 .as_dictionary()
                 .ok_or_else(|| anyhow!("session SETUP reply is not a dictionary"))?;
+            if let Some(plan) = &config.ptp {
+                if setup
+                    .get("timingProtocol")
+                    .is_some_and(|protocol| protocol.as_string() != Some("PTP"))
+                {
+                    bail!("receiver rejected PTP timing protocol");
+                }
+                rtsp.request(
+                    "SETPEERS",
+                    None,
+                    binary_plist(plan.setpeers()?)?,
+                    Some("/peer-list-changed"),
+                    &[],
+                )
+                .await
+                .context("PTP SETPEERS")?;
+            }
             let event_port = optional_port(setup.get("eventPort"))?;
             let event_task = event_port.map(|port| {
                 Task(tokio::spawn(event_channel(
@@ -474,13 +598,24 @@ impl Session {
             let control_port = optional_port(first.get("controlPort"))?
                 .ok_or_else(|| anyhow!("no control port in SETUP reply"))?;
             let render_frames = receiver_render_frames(first.get("latencyMin"))?;
-            let packetizer = rtp::PcmPacketizer::with_render_latency(
-                shk,
-                session_id,
-                first_sequence,
-                config.latency_frames,
-                render_frames,
-            )?;
+            let packetizer = if let Some(plan) = &config.ptp {
+                TargetPacketizer::Ptp(crate::timing::PtpPacketizer::new(
+                    plan.clone(),
+                    shk,
+                    session_id,
+                    first_sequence,
+                    config.latency_frames,
+                    render_frames,
+                )?)
+            } else {
+                TargetPacketizer::Ntp(rtp::PcmPacketizer::with_render_latency(
+                    shk,
+                    session_id,
+                    first_sequence,
+                    config.latency_frames,
+                    render_frames,
+                )?)
+            };
             rtsp.request("RECORD", None, Vec::new(), None, &[]).await?;
             rtsp.request(
                 "FLUSH",
@@ -628,7 +763,10 @@ impl Session {
             if *stop.borrow() {
                 break;
             }
-            if self._timing_task.0.is_finished()
+            if self
+                ._timing_task
+                .as_ref()
+                .is_some_and(|task| task.0.is_finished())
                 || self
                     ._event_task
                     .as_ref()
@@ -657,9 +795,9 @@ impl Session {
                         _ = sleep_until(chunk.produced.into()) => {}
                         _ = wait_stop(stop) => break,
                     }
-                    let packet = self.packetizer.packetize(&chunk.data, chunk.index, chunk.ntp)?;
+                    let packet = self.packetizer.packetize(&chunk)?;
                     if last_sync.elapsed() >= Duration::from_secs(1) {
-                        self.control.send_to(&packet.sync, self.control_destination).await?;
+                        self.control.send_to(packet.sync.bytes(), self.control_destination).await?;
                         last_sync = Instant::now();
                     }
                     // A failed datagram is a transport failure, not proof of a
@@ -872,6 +1010,24 @@ async fn timing_server(socket: Arc<UdpSocket>, peer: std::net::IpAddr) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ptp_receiver_outside_declared_peers_is_rejected_before_connecting() {
+        use super::*;
+        let plan = crate::timing::PtpPlan::new(
+            crate::group::GroupContext::new(123, crate::group::ClockDomain::Ptp(7), true).unwrap(),
+            clock::domain::Domain::new(7, 1).unwrap(),
+            456,
+            vec!["127.0.0.1".parse().unwrap()],
+            vec!["192.0.2.1".parse().unwrap()],
+        )
+        .unwrap();
+        let mut config = SessionConfig::new(
+            "127.0.0.1:9".parse().unwrap(),
+            Identity::new("sender", "test"),
+        );
+        config.ptp = Some(plan);
+        assert!(config.validate().is_err());
+    }
     #[tokio::test]
     async fn first_pin_pairing_returns_verified_keys_or_rejects_wrong_pin() {
         use pair::{
@@ -1163,12 +1319,17 @@ mod tests {
                 1,
                 Duration::from_secs(1),
             )),
-            packetizer: rtp::PcmPacketizer::new([7; 32], 1, 7, config.latency_frames),
+            packetizer: TargetPacketizer::Ntp(rtp::PcmPacketizer::new(
+                [7; 32],
+                1,
+                7,
+                config.latency_frames,
+            )),
             config,
             audio,
             control: Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap()),
             control_destination: control_peer.local_addr().unwrap(),
-            _timing_task: Task(tokio::spawn(std::future::pending())),
+            _timing_task: Some(Task(tokio::spawn(std::future::pending()))),
             _event_task: None,
         };
         let (pcm, packets) = broadcast::channel(32);
@@ -1269,3 +1430,7 @@ mod tests {
             .unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "session_ptp_tests.rs"]
+mod ptp_tests;

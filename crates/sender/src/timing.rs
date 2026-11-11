@@ -15,6 +15,7 @@ pub struct PtpPlan {
     domain: Domain,
     peer_id: u128,
     local_addresses: Vec<IpAddr>,
+    receivers: Vec<IpAddr>,
     peers: Vec<IpAddr>,
 }
 
@@ -114,11 +115,18 @@ impl PtpPlan {
             domain,
             peer_id,
             local_addresses,
+            receivers,
             peers,
         })
     }
     pub fn domain(&self) -> Domain {
         self.domain
+    }
+    pub(crate) fn has_receiver(&self, ip: IpAddr) -> bool {
+        self.receivers.contains(&ip)
+    }
+    pub(crate) fn has_local(&self, ip: IpAddr) -> bool {
+        self.local_addresses.contains(&ip)
     }
     pub fn group(&self) -> &GroupContext {
         &self.context
