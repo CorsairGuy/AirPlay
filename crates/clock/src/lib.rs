@@ -6,20 +6,21 @@
 //! слушаем Sync/Follow_Up мастера и сами в выборах не участвуем, кроме
 //! «будящего» Announce для замолчавших часов.
 
-mod filter;
 pub mod domain;
-mod rate;
-pub mod ptp;
-pub mod ptp_sender;
-pub mod role;
+mod filter;
 pub mod follower;
 pub mod measurement;
+pub mod nqptp;
 pub mod probe;
+pub mod ptp;
+pub mod ptp_sender;
+mod rate;
+pub mod role;
 pub mod slew;
 
 pub use filter::OffsetFilter;
-pub use rate::AudioRateEstimator;
 pub use ptp::{Action, Ptp, Timeline};
+pub use rate::AudioRateEstimator;
 
 /// Медиавремя AirPlay 2: момент `network_ns` на часах отправителя (PTP)
 /// соответствует RTP-метке `rtp`, поток идёт со скоростью `rate` (0 — пауза).
