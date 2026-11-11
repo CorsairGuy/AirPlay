@@ -324,7 +324,7 @@ async fn run_inner<R: AsyncRead + Unpin>(
         QUEUE_PACKETS
     };
     let (audio, receiver) = broadcast::channel(capacity);
-    drop(receiver);
+    let mut sessions = sender::pool::SessionPool::new(receiver);
     let (halt, halted) = watch::channel(false);
     let mut workers = JoinSet::new();
     let mut addresses = HashSet::new();
@@ -348,19 +348,23 @@ async fn run_inner<R: AsyncRead + Unpin>(
             session = Session::connect(config) => session.with_context(|| format!("подключение {target}"))?,
             _ = stop.changed() => return Ok(()),
         };
-        let (volume_tx, volumes) = watch::channel(volume);
+        let handle = sessions.add(&address.to_string(), session)?;
         if let Some(control) = &control {
-            let (progress, observed) = watch::channel(None);
-            control.register(address, volume_tx, observed);
-            workers.spawn(session.run_with_progress(
-                audio.subscribe(),
-                volumes,
-                halted.clone(),
-                progress,
-            ));
-        } else {
-            workers.spawn(session.run(audio.subscribe(), volumes, halted.clone()));
+            control.register_session(address, handle.clone());
         }
+        let mut state = handle.state.clone();
+        workers.spawn(async move {
+            loop {
+                let current = *state.borrow_and_update();
+                match current {
+                    sender::pool::SessionState::Running => {
+                        state.changed().await.context("receiver task closed")?
+                    }
+                    sender::pool::SessionState::Ended => return Ok(sender::StreamStats::default()),
+                    sender::pool::SessionState::Failed => bail!("receiver session failed"),
+                }
+            }
+        });
     }
     if let Some(start) = local {
         workers.spawn(start(
@@ -378,7 +382,8 @@ async fn run_inner<R: AsyncRead + Unpin>(
         }),
         _ = stop.changed() => Ok(false),
     };
-    if !matches!(result, Ok(true)) {
+    let graceful_eof = matches!(result, Ok(true));
+    if !graceful_eof {
         if let Some(control) = &control {
             control.invalidate();
         }
@@ -386,6 +391,19 @@ async fn run_inner<R: AsyncRead + Unpin>(
     }
     let mut outcome = result.map(|_| ());
     let drain = async {
+        let finished = if graceful_eof {
+            sessions.drain().await
+        } else {
+            sessions.shutdown().await
+        };
+        for (_, result) in finished {
+            if let Err(error) = result {
+                halt.send_replace(true);
+                if outcome.is_ok() {
+                    outcome = Err(error);
+                }
+            }
+        }
         while let Some(finished) = workers.join_next().await {
             match finished {
                 Ok(Ok(_)) => {}
@@ -405,7 +423,7 @@ async fn run_inner<R: AsyncRead + Unpin>(
         }
     };
     if tokio::time::timeout(
-        Duration::from_millis(u64::from(options.latency_ms)) + Duration::from_secs(5),
+        Duration::from_millis(u64::from(options.latency_ms)) + Duration::from_secs(14),
         drain,
     )
     .await
@@ -592,7 +610,7 @@ mod tests {
         }
         let local_seen = Arc::new(Mutex::new(Vec::new()));
         let control = crate::send_control::RelayControl::default();
-        let monitoring = if with_local {
+        let monitoring = if with_local || with_routes {
             let handle = control.clone();
             Some(tokio::spawn(async move {
                 tokio::time::timeout(Duration::from_secs(6), async {
@@ -610,6 +628,9 @@ mod tests {
                 assert!(snapshot[0].media.is_some());
                 assert_eq!(snapshot[0].endpoint, address);
                 assert!(handle.progress(address).is_some());
+                handle
+                    .set_volume(address, Volume::db(0.0).unwrap())
+                    .unwrap();
             }))
         } else {
             None

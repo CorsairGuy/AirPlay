@@ -22,6 +22,9 @@ pub struct SessionHandle {
     pub progress: watch::Receiver<Option<MediaProgress>>,
 }
 impl SessionHandle {
+    pub fn requested_volume(&self) -> Volume {
+        *self.volume.borrow()
+    }
     pub fn set_volume(&self, volume: Volume) -> Result<()> {
         if *self.state.borrow() != SessionState::Running {
             bail!("receiver session ended");
@@ -151,13 +154,24 @@ impl SessionPool {
         Ok(handle)
     }
     pub async fn remove(&mut self, uid: &str) -> Result<StreamStats> {
+        self.finish(uid, true).await
+    }
+    async fn finish(&mut self, uid: &str, stop: bool) -> Result<StreamStats> {
         let mut entry = self
             .entries
             .remove(uid)
             .ok_or_else(|| anyhow::anyhow!("unknown receiver session"))?;
-        entry.stop.send_replace(true);
+        if stop {
+            entry.stop.send_replace(true);
+        }
         let mut task = entry.task.take().unwrap();
-        match tokio::time::timeout(entry.shutdown_deadline, &mut task).await {
+        let deadline = entry.shutdown_deadline
+            + if stop {
+                Duration::ZERO
+            } else {
+                Duration::from_secs(2)
+            };
+        match tokio::time::timeout(deadline, &mut task).await {
             Ok(result) => result?,
             Err(_) => {
                 task.abort();
@@ -174,6 +188,17 @@ impl SessionPool {
         let mut results = Vec::new();
         for uid in ids {
             let result = self.remove(&uid).await;
+            results.push((uid, result));
+        }
+        results
+    }
+    /// Wait for source EOF and each receiver's scheduled tail, without cutting
+    /// buffered audio by sending stop. Caller must close its PCM producer first.
+    pub async fn drain(&mut self) -> Vec<(String, Result<StreamStats>)> {
+        let ids: Vec<_> = self.entries.keys().cloned().collect();
+        let mut results = Vec::new();
+        for uid in ids {
+            let result = self.finish(&uid, false).await;
             results.push((uid, result));
         }
         results
@@ -293,5 +318,23 @@ mod tests {
         assert!(pool.remove("stuck").await.is_err());
         assert_eq!(*handle.state.borrow(), SessionState::Failed);
         assert!(pool.is_empty());
+    }
+    #[tokio::test]
+    async fn draining_source_eof_keeps_queued_pcm_instead_of_signalling_stop() {
+        let (audio, packets) = broadcast::channel(16);
+        let mut pool = SessionPool::new(packets);
+        let (events, mut received) = mpsc::unbounded_channel();
+        add(&mut pool, "a", 7001, events);
+        let clock = MediaClock::now();
+        for index in [0, 352] {
+            audio
+                .send(Arc::new(clock.packet(index, &[0; PACKET_BYTES]).unwrap()))
+                .unwrap();
+        }
+        drop(audio);
+        let result = pool.drain().await;
+        assert_eq!(result[0].1.as_ref().unwrap().packets_sent, 2);
+        assert_eq!(received.recv().await.unwrap(), ("a".into(), 0));
+        assert_eq!(received.recv().await.unwrap(), ("a".into(), 352));
     }
 }

@@ -17,8 +17,35 @@ pub struct TargetStatus {
     pub media: Option<MediaProgress>,
 }
 struct Target {
-    volume: watch::Sender<Volume>,
+    volume: Gain,
     media: watch::Receiver<Option<MediaProgress>>,
+}
+enum Gain {
+    Watch(watch::Sender<Volume>),
+    Session(sender::pool::SessionHandle),
+}
+impl Gain {
+    fn requested(&self) -> Volume {
+        match self {
+            Self::Watch(v) => *v.borrow(),
+            Self::Session(v) => v.requested_volume(),
+        }
+    }
+    fn available(&self) -> bool {
+        match self {
+            Self::Watch(v) => !v.is_closed(),
+            Self::Session(v) => *v.state.borrow() == sender::pool::SessionState::Running,
+        }
+    }
+    fn request(&self, volume: Volume) -> Result<()> {
+        match self {
+            Self::Watch(v) => {
+                v.send_replace(volume);
+                Ok(())
+            }
+            Self::Session(v) => v.set_volume(volume),
+        }
+    }
 }
 #[derive(Default)]
 struct State {
@@ -48,7 +75,7 @@ impl RelayControl {
             .iter()
             .map(|(endpoint, target)| TargetStatus {
                 endpoint: *endpoint,
-                requested_volume: *target.volume.borrow(),
+                requested_volume: target.volume.requested(),
                 media: *target.media.borrow(),
             })
             .collect();
@@ -64,8 +91,7 @@ impl RelayControl {
         let Some(target) = state.targets.get(&endpoint) else {
             bail!("unknown or inactive relay target")
         };
-        target.volume.send_replace(volume);
-        Ok(())
+        target.volume.request(volume)
     }
     /// One logical output row, e.g. a stereo pair. This sets its absolute level;
     /// overall multiroom master-volume balance is a separate adapter policy.
@@ -78,14 +104,17 @@ impl RelayControl {
         let receivers = catalog.receivers(&[uid.to_owned()])?;
         let state = self.0.lock().unwrap();
         if !state.active
-            || receivers
-                .iter()
-                .any(|receiver| !state.targets.contains_key(&receiver.address))
+            || receivers.iter().any(|receiver| {
+                state
+                    .targets
+                    .get(&receiver.address)
+                    .is_none_or(|target| !target.volume.available())
+            })
         {
             bail!("logical output has inactive members");
         }
         for receiver in receivers {
-            state.targets[&receiver.address].volume.send_replace(volume);
+            state.targets[&receiver.address].volume.request(volume)?;
         }
         Ok(())
     }
@@ -123,11 +152,27 @@ impl RelayControl {
         volume: watch::Sender<Volume>,
         media: watch::Receiver<Option<MediaProgress>>,
     ) {
-        self.0
-            .lock()
-            .unwrap()
-            .targets
-            .insert(endpoint, Target { volume, media });
+        self.0.lock().unwrap().targets.insert(
+            endpoint,
+            Target {
+                volume: Gain::Watch(volume),
+                media,
+            },
+        );
+    }
+    pub(crate) fn register_session(
+        &self,
+        endpoint: SocketAddr,
+        handle: sender::pool::SessionHandle,
+    ) {
+        let media = handle.progress.clone();
+        self.0.lock().unwrap().targets.insert(
+            endpoint,
+            Target {
+                volume: Gain::Session(handle),
+                media,
+            },
+        );
     }
     pub(crate) fn invalidate(&self) {
         self.0.lock().unwrap().targets.clear();
