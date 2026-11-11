@@ -60,6 +60,15 @@ pub struct SessionPool {
     audio: broadcast::Receiver<Arc<AudioPacket>>,
     entries: BTreeMap<String, Entry>,
 }
+
+/// Runtime operations accepted, not a claim of audible playback or group adoption.
+/// Cleanup errors do not discard the remaining requested changes.
+pub struct SelectionResult {
+    pub requested: Vec<String>,
+    pub started: Vec<(String, SessionHandle)>,
+    pub removed: Vec<(String, Result<StreamStats>)>,
+    pub start_errors: Vec<(String, anyhow::Error)>,
+}
 impl SessionPool {
     pub fn new(audio: broadcast::Receiver<Arc<AudioPacket>>) -> Self {
         Self {
@@ -112,6 +121,57 @@ impl SessionPool {
         plan.retained = retained;
         Ok(plan)
     }
+    /// Apply a complete desired logical selection using caller-authenticated
+    /// sessions for precisely the additions in a freshly computed plan.
+    /// Preflight rejects missing/extra/mismatched sessions before any mutation.
+    /// Retained workers keep their PCM receiver, clock and volume handle.
+    ///
+    /// This is not rollback-atomic: cancellation during bounded teardown can
+    /// leave a partial selection. The owner must serialize requests, inspect
+    /// live state and publish confirmed topology, never optimistically copy the
+    /// requested list into MRP. Dropped unused prepared sessions close normally.
+    pub async fn apply_selection(
+        &mut self,
+        catalog: &crate::outputs::OutputCatalog,
+        selected: &[String],
+        prepared: Vec<(String, Session)>,
+    ) -> Result<SelectionResult> {
+        let plan = self.plan_selection(catalog, selected)?;
+        if prepared.len() != plan.adding.len() {
+            bail!("prepared sessions do not match selection additions");
+        }
+        let mut sessions = BTreeMap::new();
+        for (uid, session) in prepared {
+            if !plan
+                .adding
+                .iter()
+                .any(|r| r.uid == uid && r.address == session.endpoint())
+                || sessions.insert(uid, session).is_some()
+            {
+                bail!("duplicate or mismatched prepared session");
+            }
+        }
+        let mut result = SelectionResult {
+            requested: plan.selected,
+            started: Vec::new(),
+            removed: Vec::new(),
+            start_errors: Vec::new(),
+        };
+        // Remove conflicting endpoints before starting replacements. A failed
+        // worker's cleanup can fail too; record it without blocking recovery.
+        for receiver in plan.removing {
+            let removed = self.remove(&receiver.uid).await;
+            result.removed.push((receiver.uid, removed));
+        }
+        for (uid, session) in sessions {
+            match self.add(&uid, session) {
+                Ok(handle) => result.started.push((uid, handle)),
+                Err(error) => result.start_errors.push((uid, error)),
+            }
+        }
+        Ok(result)
+    }
+
     /// Accept a prepared session without resetting existing targets or media clock.
     pub fn add(&mut self, uid: &str, session: Session) -> Result<SessionHandle> {
         let endpoint = session.endpoint();
@@ -264,6 +324,53 @@ mod tests {
             }
             Ok(stats)
         }).unwrap()
+    }
+    #[tokio::test]
+    async fn apply_selection_preflights_before_removal_and_keeps_surviving_worker() {
+        use crate::outputs::{OutputCatalog, OutputRoute, ReceiverEndpoint};
+        let (audio, packets) = broadcast::channel(16);
+        let mut pool = SessionPool::new(packets);
+        let (events, mut received) = mpsc::unbounded_channel();
+        let live = add(&mut pool, "a", 7001, events.clone());
+        let removed = add(&mut pool, "b", 7002, events);
+        let route = |id: &str, member: &str, port| OutputRoute {
+            uid: id.into(),
+            name: id.into(),
+            model: "".into(),
+            aliases: vec![],
+            receivers: vec![ReceiverEndpoint {
+                uid: member.into(),
+                address: ([127, 0, 0, 1], port).into(),
+            }],
+        };
+        let catalog =
+            OutputCatalog::new(vec![route("keep", "a", 7001), route("new", "c", 7003)]).unwrap();
+        // Missing authenticated addition must not remove either old worker.
+        assert!(
+            pool.apply_selection(&catalog, &["keep".into(), "new".into()], vec![])
+                .await
+                .is_err()
+        );
+        assert_eq!(pool.len(), 2);
+        assert_eq!(*removed.state.borrow(), SessionState::Running);
+        let result = pool
+            .apply_selection(&catalog, &["keep".into()], vec![])
+            .await
+            .unwrap();
+        assert_eq!(result.removed.len(), 1);
+        assert_eq!(result.removed[0].0, "b");
+        assert!(result.started.is_empty() && result.start_errors.is_empty());
+        assert_eq!(*removed.state.borrow(), SessionState::Ended);
+        audio
+            .send(Arc::new(
+                MediaClock::now().packet(352, &[0; PACKET_BYTES]).unwrap(),
+            ))
+            .unwrap();
+        assert_eq!(received.recv().await.unwrap(), ("a".into(), 352));
+        assert_eq!(*live.state.borrow(), SessionState::Running);
+        let result = pool.apply_selection(&catalog, &[], vec![]).await.unwrap();
+        assert_eq!(result.removed.len(), 1);
+        assert!(pool.is_empty());
     }
     #[tokio::test]
     async fn selection_plan_retains_live_worker_but_replaces_completed_worker() {
