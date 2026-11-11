@@ -457,6 +457,12 @@ pub struct ControllerVerify {
 }
 
 impl ControllerVerify {
+    /// Ephemeral pair-verify shared secret for session/event/media key derivation.
+    /// This is not the stored long-term signing key.
+    pub fn session_key(&self) -> Option<&[u8; 32]> {
+        self.shared.as_ref()
+    }
+
     pub fn new(identity: Identity, accessory: Accessory) -> Self {
         Self {
             identity,
@@ -480,6 +486,9 @@ impl ControllerVerify {
             .require(tlv8::PUBLIC_KEY, "нет PublicKey в M2")?
             .try_into()
             .map_err(|_| Error::Malformed("длина ключа X25519"))?;
+        if msg.state()? != 2 {
+            return Err(Error::UnexpectedState(msg.state()?));
+        }
         let shared = self
             .secret
             .diffie_hellman(&PublicKey::from(server_pub))
@@ -529,6 +538,9 @@ impl ControllerVerify {
 
     pub fn check_m4(&self, m4: &[u8]) -> Result<ControlKeys, Error> {
         let msg = Tlv8::decode(m4)?;
+        if msg.state()? != 4 {
+            return Err(Error::UnexpectedState(msg.state()?));
+        }
         if msg.get(tlv8::ERROR).is_some() {
             return Err(Error::Auth("приёмник отклонил pair-verify"));
         }
@@ -541,6 +553,42 @@ impl ControllerVerify {
 mod tests {
     use super::*;
     use crate::store::MemoryStore;
+
+    #[test]
+    fn controller_verify_requires_m4_state_before_releasing_keys() {
+        let mut verify = ControllerVerify::new(
+            controller(),
+            Accessory {
+                id: b"acc-1".to_vec(),
+                public_key: accessory().public_key(),
+            },
+        );
+        assert!(verify.session_key().is_none());
+        verify.shared = Some([7; 32]);
+        for state in [1, 2, 3, 5, 6] {
+            assert!(
+                verify
+                    .check_m4(&Tlv8::new().with(tlv8::STATE, [state]).encode())
+                    .is_err()
+            );
+        }
+        assert!(verify.check_m4(&[]).is_err());
+        assert!(
+            verify
+                .check_m4(
+                    &Tlv8::new()
+                        .with(tlv8::STATE, [4])
+                        .with(tlv8::ERROR, [2])
+                        .encode()
+                )
+                .is_err()
+        );
+        assert!(
+            verify
+                .check_m4(&Tlv8::new().with(tlv8::STATE, [4]).encode())
+                .is_ok()
+        );
+    }
 
     fn accessory() -> Identity {
         Identity::from_seed("acc-1", &[1; 32])

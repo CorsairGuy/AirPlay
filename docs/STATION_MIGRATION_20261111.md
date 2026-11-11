@@ -12,7 +12,7 @@ Second port: SessionConfig.preserve_receiver_volume defaults false for compatibi
 
 | Area | Station source | Core status / next dependency |
 |---|---|---|
-| Persistent pairing, native PIN UI | station-onepath29dcc54..13cf9f2; remote equivalents | Core pair primitives exist; sender persistence and MRP59/60/61 orchestration need audit/port |
+| Persistent pairing, native PIN UI | station-onepath29dcc54..13cf9f2; remote equivalents | Sender accepts saved credentials and performs pair-verify; first PIN acquisition, persistence adapter and MRP59/60/61 orchestration remain |
 | Discovery, logical groups, cluster membership and volume | station-onepath group commits; remote outputs.rs | Core Coordinator exists but is inactive; core MRP Feed currently has no output membership. Port logical/physical mapping before claiming button support |
 | PTP sender + participant list |6226d27..e316dbd and remote equivalents | Core clocks/coordinator primitives exist; runtime wiring and sender negotiation remain. Separate NQPTP smi10/smi11 adapters from core |
 | Continuous pause/seek/track sessions |8c349ad..37e4d66, remote outputs/sender | Port state machine without Station process/file IPC; preserve generation and nonce/timeline invariants |
@@ -32,3 +32,5 @@ At home, use a separate silent diagnostic receiver, not the working Station. Rec
 User is away and cannot hear audio. Read-only diagnosis and offline tests only; no Station install/restart/playback without new approval. No GitHub push without approval. Preserve unrelated pre-existing dirty files events.rs, audio_stream/net.rs and clock tests.
 
 Third port: SRP M3 proof computation now runs in Tokio's blocking pool, with a bounded caller deadline, retaining proof state and receiver proof verification. It does not own the RTSP connection; cancellation drops that connection while finite CPU work can finish separately. Real transient pairing/key agreement test on a current-thread runtime passed; RTP/sender total44 tests passed. Persistent pairing/PIN UI and PTP runtime wiring remain separate ports.
+
+Fourth port: caller-supplied PairingCredentials selects pair-verify/HKP3 without PIN start or pair-setup; absent credentials keeps transient/HKP4. Credentials Debug is redacted, no hidden fallback on authentication failure, shared secret stays fresh per verify handshake. Core ControllerVerify validates M2/M4 states. Loopback exchange authenticates against a pinned receiver key and checks matching channel keys; malformed/incorrect M4 states rejected. Pair/RTP/sender54 tests passed. No live device test or installation. This is reconnect support, not the complete first-time PIN UX or persistent storage implementation.

@@ -6,7 +6,10 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use crypto::kdf::ControlKeys;
-use pair::{Identity as PairIdentity, hap::ControllerSetup};
+use pair::{
+    Identity as PairIdentity,
+    hap::{Accessory, ControllerSetup, ControllerVerify},
+};
 use rand::RngCore;
 use tokio::{
     net::{TcpStream, UdpSocket},
@@ -83,6 +86,9 @@ pub struct SessionConfig {
     /// Leave the receiver's gain untouched until the caller publishes a volume
     /// revision. The initial watch value is a placeholder in this mode.
     pub preserve_receiver_volume: bool,
+    /// Credentials obtained by a previously completed PIN pairing. The adapter
+    /// owns secure persistence; None keeps the transient3939 mode.
+    pub pairing: Option<PairingCredentials>,
     pub request_timeout: Duration,
 }
 
@@ -94,6 +100,7 @@ impl SessionConfig {
             latency_frames: 22_050,
             volume: Volume(-30.0),
             preserve_receiver_volume: false,
+            pairing: None,
             request_timeout: Duration::from_secs(8),
         }
     }
@@ -120,6 +127,40 @@ impl SessionConfig {
             bail!("sender identity fields must contain 1..256 bytes");
         }
         Ok(())
+    }
+}
+
+#[derive(Clone)]
+pub struct PairingCredentials {
+    controller: PairIdentity,
+    accessory_id: Vec<u8>,
+    accessory_key: [u8; 32],
+}
+
+impl PairingCredentials {
+    pub fn new(
+        controller: PairIdentity,
+        accessory_id: Vec<u8>,
+        accessory_key: [u8; 32],
+    ) -> Result<Self> {
+        if controller.pairing_id.is_empty()
+            || controller.pairing_id.len() > 256
+            || accessory_id.is_empty()
+            || accessory_id.len() > 256
+        {
+            bail!("pairing identifiers must contain 1..256 bytes");
+        }
+        Ok(Self {
+            controller,
+            accessory_id,
+            accessory_key,
+        })
+    }
+}
+
+impl std::fmt::Debug for PairingCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PairingCredentials { private }")
     }
 }
 
@@ -194,26 +235,31 @@ impl Session {
             active_remote,
             config.request_timeout,
         );
-        let pair = ControllerSetup::new(
-            PairIdentity::from_seed(config.identity.device_id.clone(), &identity_seed),
-            "3939",
-            true,
-        );
-        rtsp.pair_post("/pair-pin-start", Vec::new()).await?;
-        let m2 = rtsp.pair_post("/pair-setup", pair.m1()).await?;
-        let (pair, m3) = timeout(config.request_timeout, setup_proof(pair, m2.body))
-            .await
-            .context("pairing proof deadline exceeded")??;
-        let m4 = rtsp.pair_post("/pair-setup", m3).await?;
-        // Unlike the source draft, verify the receiver's SRP proof before using
-        // its control/session keys, using the shared core implementation.
-        let keys = pair
-            .check_m4(&m4.body)?
-            .ok_or_else(|| anyhow!("transient pairing did not produce control keys"))?;
-        let shared = pair
-            .session_key()
-            .ok_or_else(|| anyhow!("missing transient session key"))?
-            .to_vec();
+        let (keys, shared) = if let Some(credentials) = &config.pairing {
+            verify_pairing(&mut rtsp, credentials).await?
+        } else {
+            let pair = ControllerSetup::new(
+                PairIdentity::from_seed(config.identity.device_id.clone(), &identity_seed),
+                "3939",
+                true,
+            );
+            rtsp.pair_post("/pair-pin-start", Vec::new()).await?;
+            let m2 = rtsp.pair_post("/pair-setup", pair.m1()).await?;
+            let (pair, m3) = timeout(config.request_timeout, setup_proof(pair, m2.body))
+                .await
+                .context("pairing proof deadline exceeded")??;
+            let m4 = rtsp.pair_post("/pair-setup", m3).await?;
+            // Unlike the source draft, verify the receiver's SRP proof before using
+            // its control/session keys, using the shared core implementation.
+            let keys = pair
+                .check_m4(&m4.body)?
+                .ok_or_else(|| anyhow!("transient pairing did not produce control keys"))?;
+            let shared = pair
+                .session_key()
+                .ok_or_else(|| anyhow!("missing transient session key"))?
+                .to_vec();
+            (keys, shared)
+        };
         rtsp.conn.encrypt(keys);
 
         let timing = Arc::new(UdpSocket::bind((local_ip, 0)).await?);
@@ -634,6 +680,28 @@ fn binary_plist(value: plist::Value) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+async fn verify_pairing(
+    rtsp: &mut Rtsp,
+    credentials: &PairingCredentials,
+) -> Result<(ControlKeys, Vec<u8>)> {
+    let mut verify = ControllerVerify::new(
+        credentials.controller.clone(),
+        Accessory {
+            id: credentials.accessory_id.clone(),
+            public_key: credentials.accessory_key,
+        },
+    );
+    let m2 = rtsp.verify_post(verify.m1()).await?;
+    let m3 = verify.m3(&m2.body)?;
+    let m4 = rtsp.verify_post(m3).await?;
+    let keys = verify.check_m4(&m4.body)?;
+    let shared = verify
+        .session_key()
+        .context("missing pair-verify shared secret")?
+        .to_vec();
+    Ok((keys, shared))
+}
+
 async fn setup_proof(mut pair: ControllerSetup, m2: Vec<u8>) -> Result<(ControllerSetup, Vec<u8>)> {
     // 3072-bit SRP exponentiation must not stall media/control tasks on the
     // current-thread runtime. Cancellation closes the socket; the finite CPU
@@ -712,6 +780,71 @@ async fn timing_server(socket: Arc<UdpSocket>, peer: std::net::IpAddr) {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn stored_pairing_verifies_without_pin_or_new_pair_setup() {
+        use pair::{
+            PairingStore,
+            hap::{PairVerify, VerifyOutcome},
+        };
+        let controller = PairIdentity::from_seed("controller", &[7; 32]);
+        let accessory = PairIdentity::from_seed("receiver", &[8; 32]);
+        let credentials = PairingCredentials::new(
+            controller.clone(),
+            b"receiver".to_vec(),
+            accessory.public_key(),
+        )
+        .unwrap();
+        assert_eq!(format!("{credentials:?}"), "PairingCredentials { private }");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        let peer = tokio::spawn(async move {
+            let store = pair::MemoryStore::default();
+            store.add(controller.pairing_id.as_bytes(), controller.public_key());
+            let mut verifier = PairVerify::new(accessory);
+            let mut connection = Connection::new(server);
+            for step in 0..2 {
+                let request = connection.event_request().await.unwrap();
+                assert_eq!(request.uri, "/pair-verify");
+                assert_eq!(request.headers.get("X-Apple-HKP"), Some("3"));
+                let outcome = verifier.handle(&request.body, &store).unwrap();
+                let (body, keys) = match outcome {
+                    VerifyOutcome::Continue(reply) => {
+                        assert_eq!(step, 0);
+                        (reply, None)
+                    }
+                    VerifyOutcome::Verified { reply, keys, .. } => {
+                        assert_eq!(step, 1);
+                        (reply, Some(keys))
+                    }
+                    _ => panic!("verification rejected"),
+                };
+                let mut response = rtsp::Response::to(&request, 200);
+                response.body = body;
+                let mut bytes = Vec::new();
+                response.encode(&mut bytes);
+                connection.send(&bytes).await.unwrap();
+                if let Some(keys) = keys {
+                    return keys;
+                }
+            }
+            panic!("missing verified keys")
+        });
+        let mut rtsp = Rtsp::new(
+            Connection::new(client),
+            "rtsp://test/1".into(),
+            "test".into(),
+            1,
+            Duration::from_secs(1),
+        );
+        let (keys, shared) = verify_pairing(&mut rtsp, &credentials).await.unwrap();
+        let receiver = peer.await.unwrap();
+        assert_eq!(keys.write, receiver.read);
+        assert_eq!(keys.read, receiver.write);
+        assert_eq!(shared.len(), 32);
+    }
     #[tokio::test(flavor = "current_thread")]
     async fn offloaded_setup_keeps_proof_state_for_receiver_verification() {
         use pair::{

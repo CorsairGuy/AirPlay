@@ -135,10 +135,23 @@ impl Rtsp {
     }
 
     pub(crate) async fn pair_post(&mut self, path: &str, body: Vec<u8>) -> Result<rtsp::Response> {
+        self.pair_request(path, body, "4").await
+    }
+
+    pub(crate) async fn verify_post(&mut self, body: Vec<u8>) -> Result<rtsp::Response> {
+        self.pair_request("/pair-verify", body, "3").await
+    }
+
+    async fn pair_request(
+        &mut self,
+        path: &str,
+        body: Vec<u8>,
+        hkp: &str,
+    ) -> Result<rtsp::Response> {
         let mut req = rtsp::Request::new("POST", path, "HTTP/1.1");
         req.headers.insert("User-Agent", "AirPlay/320.20");
         req.headers.insert("Connection", "keep-alive");
-        req.headers.insert("X-Apple-HKP", "4");
+        req.headers.insert("X-Apple-HKP", hkp);
         req.headers
             .insert("Content-Type", "application/octet-stream");
         req.body = body;

@@ -214,6 +214,15 @@ CLI по умолчанию имеет общий initial volume; опциона
 latency22050 кадров(500мс), volume−30dB, request_timeout8с. Допустимая latency:
 11025..88200 кадров(250..2000мс), как в объявленном PCM-потоке.
 
+`config.preserve_receiver_volume = true` оставляет громкость приёмника без изменения
+до явного обновления volume watch, даже если новое значение равно начальному.
+`config.pairing = Some(PairingCredentials::new(controller, accessory_id, accessory_key)?)`
+использует сохранённую identity контроллера и закреплённый ключ приёмника для
+pair-verify (HKP3), без нового PIN/pair-setup. При ошибке проверки нет скрытого
+перехода к другому режиму. Сохранение/загрузка credentials и первичное PIN-сопряжение
+принадлежат приложению; библиотека не читает файлы и не выбирает PIN сама.
+`None` сохраняет transient3939. Debug credentials скрывает приватное содержимое.
+
 `Session::connect(config).await` выполняет сопряжение и RTSP startup. Это
 подтверждение setup, **не** акустическая готовность/доставка. После connect:
 
@@ -226,7 +235,7 @@ latency22050 кадров(500мс), volume−30dB, request_timeout8с. Допу�
    Закрытие audio producer означает EOF; stop=true или закрытие stop producer
    останавливает её. Volume producer можно закрыть: последнее значение остаётся.
 4. После разрыва приложение само принимает решение о новом подключении. Каждая
-   новая сессия выполняет новое SRP и получает новый SHK. Нельзя сбрасывать nonce
+   новая сессия выполняет новое transient SRP или pair-verify и получает новый SHK. Нельзя сбрасывать nonce
    упаковщика с прежним ключом.
 
 `MediaClock::at(Instant, ntp32_32)` позволяет задать тестовую/внешнюю эпоху.
