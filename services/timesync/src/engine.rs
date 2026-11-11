@@ -114,6 +114,28 @@ mod tests {
         )
         .unwrap()
     }
+    #[test]
+    fn membership_updates_preserve_master_epoch_and_reject_invalid_input() {
+        let mut e = engine();
+        e.tick(local().at(10), own(10)).unwrap();
+        let selected = e.snapshot().selection;
+        assert_eq!(selected.role, Role::Master);
+        let next: IpAddr = "192.0.2.2".parse().unwrap();
+        e.set_peers(&[next], local().at(11), own(11)).unwrap();
+        assert_eq!(e.snapshot().selection, selected);
+        let batch = e.tick(local().at(12), own(12)).unwrap();
+        assert!(!batch.is_empty());
+        assert!(batch.iter().all(|packet| packet.datagram.peer == next));
+        assert!(
+            e.set_peers(&["224.0.0.1".parse().unwrap()], local().at(13), own(13))
+                .is_err()
+        );
+        assert_eq!(e.peers, vec![next]);
+        assert_eq!(e.snapshot().selection, selected);
+        e.set_peers(&[], local().at(14), own(14)).unwrap();
+        assert_eq!(e.snapshot().selection, selected);
+        assert!(e.tick(local().at(15), own(15)).unwrap().is_empty());
+    }
     fn remote() -> Master {
         let mut m = Master::new(Domain::new(50, 1).unwrap()).unwrap();
         m.set_peers(&[peer()]).unwrap();
@@ -272,6 +294,30 @@ mod tests {
     }
 }
 impl Engine {
+    /// Update the common service's aggregate peer set without rebuilding its
+    /// physical clock or local-master epoch. Removing a selected foreign master
+    /// still follows normal role selection and invalidates its old mapping.
+    pub fn set_peers(
+        &mut self,
+        peers: &[IpAddr],
+        now: LocalInstant,
+        own: Reading,
+    ) -> io::Result<()> {
+        let mut check = Master::new(self.own).map_err(io::Error::other)?;
+        check.set_peers(peers).map_err(io::Error::other)?;
+        self.validate(now, own)?;
+        let next = self
+            .controller
+            .set_peers(peers, now)
+            .map_err(io::Error::other)?;
+        self.peers = peers.to_vec();
+        self.link.set_peers(peers).map_err(io::Error::other)?;
+        if let Some(master) = self.master.as_mut() {
+            master.set_peers(peers).map_err(io::Error::other)?;
+        }
+        self.transition(next)?;
+        self.refresh(now, own)
+    }
     pub fn new(
         own: Domain,
         now: LocalInstant,

@@ -4,19 +4,19 @@
 //! acoustic readiness. No multicast or complete BMCA topology implementation.
 use crate::{
     engine::{Emission, Engine, Snapshot},
-    sender::{ClockSource, Config as NetworkConfig, Ports, Source},
+    sender::{ClockSource, Config as NetworkConfig, Peer, Ports, Source},
 };
 use clock::{follower, probe, role};
 use std::{
     collections::{BTreeMap, VecDeque},
     io,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     sync::Arc,
     time::Duration,
 };
 use tokio::{
     net::UdpSocket,
-    sync::{oneshot, watch},
+    sync::{mpsc, oneshot, watch},
     task::JoinHandle,
     time::{MissedTickBehavior, interval, timeout},
 };
@@ -32,6 +32,36 @@ pub struct Service {
     status: watch::Sender<Snapshot>,
     stop: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<io::Result<()>>>,
+    peers: mpsc::Sender<PeerRequest>,
+}
+struct PeerRequest {
+    peers: Vec<Peer>,
+    reply: oneshot::Sender<io::Result<()>>,
+}
+fn peer_table(bind: IpAddr, peers: &[Peer]) -> io::Result<BTreeMap<IpAddr, Ports>> {
+    let mut table = BTreeMap::new();
+    if peers.len() > 64 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "too many timing peers",
+        ));
+    }
+    for peer in peers {
+        if peer.ports.event == 0
+            || peer.ports.general == 0
+            || peer.ip.is_unspecified()
+            || peer.ip.is_multicast()
+            || matches!(peer.ip, IpAddr::V4(ip) if ip.is_broadcast())
+            || peer.ip.is_ipv4() != bind.is_ipv4()
+            || table.insert(peer.ip, peer.ports).is_some()
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid/duplicate timing peer",
+            ));
+        }
+    }
+    Ok(table)
 }
 
 #[cfg(test)]
@@ -43,7 +73,7 @@ mod tests {
         ptp_sender::Master,
         role::{Policy, Role},
     };
-    struct TestClock;
+    pub(super) struct TestClock;
     impl ClockSource for TestClock {
         fn sample(&self) -> io::Result<(LocalInstant, Reading)> {
             let now = clock::now_ns();
@@ -53,7 +83,7 @@ mod tests {
             ))
         }
     }
-    fn config(peer: Peer, policy: Policy) -> Config {
+    pub(super) fn config(peer: Peer, policy: Policy) -> Config {
         Config {
             probe: None,
             network: NetworkConfig {
@@ -79,7 +109,7 @@ mod tests {
             },
         }
     }
-    async fn wait_for(
+    pub(super) async fn wait_for(
         rx: &mut watch::Receiver<Snapshot>,
         test: impl Fn(Snapshot) -> bool,
     ) -> Snapshot {
@@ -260,6 +290,73 @@ mod tests {
         service.shutdown().await.unwrap();
     }
 }
+#[cfg(test)]
+mod peer_update_tests {
+    use super::tests::{TestClock, config, wait_for};
+    use super::*;
+    use clock::role::{Policy, Role};
+    #[tokio::test]
+    async fn live_peer_changes_reuse_sockets_source_and_master_epoch() {
+        let event = UdpSocket::bind("127.0.0.2:0").await.unwrap();
+        let general = UdpSocket::bind("127.0.0.2:0").await.unwrap();
+        let peer = Peer {
+            ip: event.local_addr().unwrap().ip(),
+            ports: Ports {
+                event: event.local_addr().unwrap().port(),
+                general: general.local_addr().unwrap().port(),
+            },
+        };
+        let service = Service::bind(config(peer, Policy::Elect), Arc::new(TestClock))
+            .await
+            .unwrap();
+        let addresses = service.addresses();
+        let mut status = service.subscribe();
+        let selected = wait_for(&mut status, |s| s.selection.role == Role::Master)
+            .await
+            .selection;
+        let next_event = UdpSocket::bind("127.0.0.3:0").await.unwrap();
+        let next_general = UdpSocket::bind("127.0.0.3:0").await.unwrap();
+        let next = Peer {
+            ip: next_event.local_addr().unwrap().ip(),
+            ports: Ports {
+                event: next_event.local_addr().unwrap().port(),
+                general: next_general.local_addr().unwrap().port(),
+            },
+        };
+        service.set_peers(vec![next]).await.unwrap();
+        assert_eq!(service.addresses(), addresses);
+        assert_eq!(status.borrow().selection, selected);
+        let mut buffer = [0; 1024];
+        let (_, source) = timeout(Duration::from_secs(1), next_event.recv_from(&mut buffer))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(source, addresses.0);
+        assert!(
+            service
+                .set_peers(vec![Peer {
+                    ip: "224.0.0.1".parse().unwrap(),
+                    ..next
+                }])
+                .await
+                .is_err()
+        );
+        service.set_peers(vec![]).await.unwrap();
+        while next_event.try_recv(&mut buffer).is_ok() {}
+        assert!(
+            timeout(
+                Duration::from_millis(100),
+                next_event.recv_from(&mut buffer)
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(service.addresses(), addresses);
+        assert_eq!(status.borrow().selection, selected);
+        assert!(status.borrow().mapping.is_some());
+        service.shutdown().await.unwrap();
+    }
+}
 struct StatusGuard(watch::Sender<Snapshot>);
 impl Drop for StatusGuard {
     fn drop(&mut self) {
@@ -278,19 +375,7 @@ impl Service {
                 "specific bind IP and <=64 peers required",
             ));
         }
-        let mut peers = BTreeMap::new();
-        for peer in &network.peers {
-            if peer.ports.event == 0
-                || peer.ports.general == 0
-                || peer.ip.is_ipv4() != network.bind_ip.is_ipv4()
-                || peers.insert(peer.ip, peer.ports).is_some()
-            {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "invalid/duplicate timing peer",
-                ));
-            }
-        }
+        let mut peers = peer_table(network.bind_ip, &network.peers)?;
         let (initial, reading) = clock.sample()?;
         if reading.domain() != network.domain {
             return Err(io::Error::new(
@@ -321,6 +406,7 @@ impl Service {
         let (status, _) = watch::channel(Snapshot::inactive());
         let worker_status = status.clone();
         let (stop, mut stopped) = oneshot::channel();
+        let (peer_control, mut peer_requests) = mpsc::channel::<PeerRequest>(8);
         let task = tokio::spawn(async move {
             let _guard = StatusGuard(worker_status.clone());
             let mut tick = interval(Duration::from_millis(25));
@@ -332,6 +418,24 @@ impl Service {
                     biased;
                     _=&mut stopped=>return Ok(()),
                     _=tick.tick()=>{let (local,own)=source.sample()?;engine.tick(local,own)?},
+                    request=peer_requests.recv()=>{
+                        let Some(request) = request else { return Ok(()); };
+                        // A cancelled caller must reconcile state: once queued,
+                        // an update may still apply. Ack means applied locally,
+                        // never receiver adoption or measured synchronization.
+                        let result = match peer_table(network.bind_ip, &request.peers) {
+                            Err(error) => Err(error),
+                            Ok(next) => {
+                                let (local, own) = source.sample()?;
+                                engine.set_peers(&next.keys().copied().collect::<Vec<_>>(), local, own)?;
+                                peers = next;
+                                worker_status.send_replace(engine.snapshot());
+                                Ok(())
+                            },
+                        };
+                        let _ = request.reply.send(result);
+                        continue;
+                    },
                     received=event.recv_from(&mut event_buffer)=>{
                         let (size,addr)=received?;let (local,own)=source.sample()?;
                         engine.receive(addr.ip(),&event_buffer[..size],local,own)?
@@ -350,6 +454,7 @@ impl Service {
             status,
             stop: Some(stop),
             task: Some(task),
+            peers: peer_control,
         })
     }
     pub fn addresses(&self) -> (SocketAddr, SocketAddr) {
@@ -357,6 +462,28 @@ impl Service {
     }
     pub fn subscribe(&self) -> watch::Receiver<Snapshot> {
         self.status.subscribe()
+    }
+    /// Replace the aggregate peers of this ONE service. The application owner
+    /// must union all active consumers; individual groups must not overwrite
+    /// one another's peers. Sockets/source remain alive, including an empty set.
+    /// Bounded queue: retry WouldBlock; cancellation after enqueue is not rollback.
+    pub async fn set_peers(&self, peers: Vec<Peer>) -> io::Result<()> {
+        peer_table(self.addresses.0.ip(), &peers)?;
+        let (reply, result) = oneshot::channel();
+        self.peers
+            .try_send(PeerRequest { peers, reply })
+            .map_err(|error| {
+                io::Error::new(
+                    match error {
+                        mpsc::error::TrySendError::Full(_) => io::ErrorKind::WouldBlock,
+                        mpsc::error::TrySendError::Closed(_) => io::ErrorKind::NotConnected,
+                    },
+                    "timing peer update unavailable",
+                )
+            })?;
+        result
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::NotConnected, "clock service ended"))?
     }
     pub async fn shutdown(mut self) -> io::Result<()> {
         self.status.send_replace(Snapshot::inactive());
