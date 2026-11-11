@@ -246,6 +246,7 @@ name = "ap_sender"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ap_clock",
  "ap_crypto",
  "ap_pair",
  "ap_rtp",

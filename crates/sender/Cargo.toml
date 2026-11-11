@@ -13,6 +13,7 @@ workspace = true
 
 [dependencies]
 anyhow.workspace = true
+clock.workspace = true
 tokio.workspace = true
 plist.workspace = true
 rand.workspace = true

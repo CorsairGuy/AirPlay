@@ -17,6 +17,7 @@ pub mod outputs;
 mod packet;
 pub mod pool;
 mod session;
+pub mod timing;
 mod transport;
 
 pub use local::{LocalSink, run_local};
