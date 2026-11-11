@@ -78,6 +78,26 @@ impl SessionPool {
     /// preflight. RTSP acceptance is observed on each control's applied watch;
     /// it does not prove group adoption. No session/packetizer is recreated.
     pub fn set_ptp_peers(&self, receivers: &[std::net::IpAddr]) -> Result<()> {
+        self.update_ptp_peers(receivers, false)
+    }
+    /// Reconcile the peer list against actual running workers, not requested
+    /// discovery rows. Ended workers do not keep a peer alive. Canonical peer
+    /// controls suppress duplicates; no session/clock/RTP stream is restarted.
+    pub fn sync_ptp_members(&self) -> Result<Vec<std::net::IpAddr>> {
+        let mut ips: Vec<_> = self
+            .entries
+            .values()
+            .filter(|entry| *entry.handle.state.borrow() == SessionState::Running)
+            .map(|entry| entry.endpoint.ip())
+            .collect();
+        ips.sort_unstable();
+        ips.dedup();
+        if !ips.is_empty() {
+            self.update_ptp_peers(&ips, true)?;
+        }
+        Ok(ips)
+    }
+    fn update_ptp_peers(&self, receivers: &[std::net::IpAddr], running_only: bool) -> Result<()> {
         if self.entries.is_empty() {
             bail!("no PTP sessions");
         }
@@ -85,6 +105,9 @@ impl SessionPool {
         let mut pending = Vec::new();
         for entry in self.entries.values() {
             if *entry.handle.state.borrow() != SessionState::Running {
+                if running_only {
+                    continue;
+                }
                 bail!("inactive PTP member");
             }
             let control = entry
@@ -493,6 +516,18 @@ mod tests {
         assert_eq!(a.requested_volume(), gain);
         assert_eq!(b.requested_volume(), gain);
         pool.shutdown().await;
+    }
+    #[tokio::test]
+    async fn ptp_reconciliation_rejects_running_ntp_workers_and_accepts_empty_pool() {
+        let (_source, packets) = broadcast::channel(4);
+        let mut pool = SessionPool::new(packets);
+        assert!(pool.sync_ptp_members().unwrap().is_empty());
+        let (events, _received) = mpsc::unbounded_channel();
+        let handle = add(&mut pool, "ntp", 7001, events);
+        assert!(pool.sync_ptp_members().is_err());
+        assert_eq!(*handle.state.borrow(), SessionState::Running);
+        pool.shutdown().await;
+        assert!(pool.sync_ptp_members().unwrap().is_empty());
     }
     #[tokio::test]
     async fn group_volume_batch_keeps_balance_and_rejects_missing_members() {

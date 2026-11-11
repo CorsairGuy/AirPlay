@@ -12,6 +12,11 @@ use tokio::sync::{mpsc, watch};
 /// Application supplies authentication/configuration. Dropping this future
 /// must release pending pairing resources; do not detach network work here.
 pub trait SessionPreparer: Send {
+    /// Nonblocking reconciliation after pool changes and periodic task-state
+    /// observation. Failure terminates the owner and awaits pool cleanup.
+    fn active(&mut self, _pool: &SessionPool) -> Result<()> {
+        Ok(())
+    }
     /// Validated complete physical selection, before preparing any additions.
     /// Pure configuration/preflight only: no I/O or mutation of live sessions.
     fn selection(&mut self, _receivers: &[ReceiverEndpoint]) -> Result<()> {
@@ -119,6 +124,7 @@ pub async fn run_discovered(
             }
             request = requests.recv() => match request { Some(request) => request, None => break },
             _ = tick.tick() => {
+                if preparer.active(&pool).is_err() { last_error=Some(100); break; }
                 publish(&updates,Snapshot {selected: confirmed(&pool,&catalog,&desired),last_error});
                 continue;
             }
@@ -232,6 +238,11 @@ pub async fn run_discovered(
                 Err(_) => 100,
             },
         };
+        if preparer.active(&pool).is_err() {
+            let _ = request.reply.send(100);
+            last_error = Some(100);
+            break;
+        }
         last_error = (code != 0).then_some(code);
         publish(
             &updates,
@@ -256,6 +267,43 @@ pub async fn run_discovered(
 mod tests {
     use super::*;
     use sender::outputs::OutputRoute;
+    struct FailedReconciliation;
+    impl SessionPreparer for FailedReconciliation {
+        fn active(&mut self, _: &SessionPool) -> Result<()> {
+            anyhow::bail!("offline reconciliation failure")
+        }
+        async fn prepare(&mut self, _: ReceiverEndpoint) -> Result<Session> {
+            panic!("no authentication expected")
+        }
+    }
+    #[tokio::test]
+    async fn reconciliation_failure_ends_worker_and_publishes_empty_error_state() {
+        let (_source, audio) = tokio::sync::broadcast::channel(4);
+        let (_control, requests) = crate::output_control::OutputControl::channel(4);
+        let (updates, state) = watch::channel(Snapshot::default());
+        let (_stop, stopped) = watch::channel(false);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            run(
+                SessionPool::new(audio),
+                requests,
+                catalog(),
+                vec![],
+                FailedReconciliation,
+                updates,
+                stopped,
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            *state.borrow(),
+            Snapshot {
+                selected: vec![],
+                last_error: Some(100)
+            }
+        );
+    }
     struct RejectSelection(Arc<std::sync::atomic::AtomicBool>);
     impl SessionPreparer for RejectSelection {
         fn selection(&mut self, receivers: &[ReceiverEndpoint]) -> Result<()> {

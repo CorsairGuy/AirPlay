@@ -183,13 +183,13 @@ async fn ptp_negotiates_setpeers_sends_d7_and_rejects_ntp_downgrade() {
             let session = session.unwrap();
             assert!(session._timing_task.is_none());
             let (audio, packets) = broadcast::channel(4);
-            let (_gain, gains) = watch::channel(Volume::MUTE);
-            let (_stop, stopped) = watch::channel(false);
             let peers = session.ptp_peer_control().unwrap();
             let mut applied = peers.applied();
-            let (progress, mut observed) = watch::channel(None);
-            let running =
-                tokio::spawn(session.run_with_progress(packets, gains, stopped, progress));
+            let mut pool = crate::pool::SessionPool::new(packets);
+            let handle = pool.add("receiver", session).unwrap();
+            let mut observed = handle.progress;
+            assert_eq!(pool.sync_ptp_members().unwrap(), vec![endpoint.ip()]);
+            pool.sync_ptp_members().unwrap();
             let clock = MediaClock::now();
             let frame = clock
                 .packet_with_ptp(0, &[0; PACKET_BYTES], domain, |_| {
@@ -246,12 +246,10 @@ async fn ptp_negotiates_setpeers_sends_d7_and_rejects_ntp_downgrade() {
             // The mock rejects any extra SETPEERS: reordered/duplicate discovery
             // addresses must not trigger another RTSP operation or RTP reset.
             drop(audio);
-            let stats = timeout(Duration::from_secs(3), running)
-                .await
-                .unwrap()
-                .unwrap()
-                .unwrap();
+            let mut ended = timeout(Duration::from_secs(3), pool.drain()).await.unwrap();
+            let stats = ended.pop().unwrap().1.unwrap();
             assert_eq!(stats.packets_sent, 2);
+            assert!(pool.sync_ptp_members().unwrap().is_empty());
         } else {
             assert!(session.err().unwrap().to_string().contains("PTP timing"));
         }

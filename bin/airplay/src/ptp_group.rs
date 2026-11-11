@@ -156,6 +156,12 @@ struct QualifiedPreparer<P> {
     group: u128,
 }
 impl<P: SessionPreparer> SessionPreparer for QualifiedPreparer<P> {
+    fn active(&mut self, pool: &SessionPool) -> Result<()> {
+        self.timeline.reading_at(std::time::Instant::now())?;
+        self.inner.active(pool)?;
+        pool.sync_ptp_members()?;
+        Ok(())
+    }
     fn selection(&mut self, receivers: &[ReceiverEndpoint]) -> Result<()> {
         self.timeline.reading_at(std::time::Instant::now())?;
         self.inner.selection(receivers)
