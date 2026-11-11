@@ -76,6 +76,67 @@ fn command_reply(identifier: Option<&str>, error: u64) -> Node {
         );
     model::envelope("SEND_COMMAND_RESULT_MESSAGE", body, identifier)
 }
+
+/// Queue output selection without awaiting pairing/teardown on the MRP reader.
+fn dispatch_output(
+    message: &Node,
+    control: &Control,
+    tx: &mpsc::Sender<Output>,
+    pending: &mut tokio::task::JoinSet<()>,
+) -> Result<bool> {
+    if message.number(f("ProtocolMessage", "type"))
+        != Some(kind("MODIFY_OUTPUT_CONTEXT_REQUEST_MESSAGE") as u64)
+    {
+        return Ok(false);
+    }
+    let Some(backend) = &control.outputs else {
+        return Ok(false);
+    };
+    while pending.try_join_next().is_some() {}
+    let id = message
+        .string(f("ProtocolMessage", "identifier"))
+        .map(str::to_owned);
+    let parsed = (|| -> Result<_> {
+        let body = message.nested(schema::extension(kind(
+            "MODIFY_OUTPUT_CONTEXT_REQUEST_MESSAGE",
+        )))?;
+        let body = mrp::wire::Node::parse(&body.encode())?;
+        mrp::output_context::Request::parse(&body)?;
+        Ok(body)
+    })();
+    let result = if pending.len() >= 32 {
+        Err(100)
+    } else {
+        match parsed {
+            Ok(body) => backend.submit(body).map_err(|_| 100),
+            Err(_) => Err(18),
+        }
+    };
+    let tx = tx.clone();
+    // At most32 pending operations per connection; a rejected request replies
+    // immediately without spawning another potentially blocked writer task.
+    if let Err(error) = result {
+        // If even this bounded queue is full, the existing writer/reader
+        // connection will close rather than acknowledging an unapplied change.
+        tx.try_send(Output::Messages(vec![reply(id.as_deref(), error)]))
+            .map_err(|_| anyhow::anyhow!("output response queue full or closed"))?;
+        return Ok(true);
+    }
+    let result = result.unwrap();
+    pending.spawn(async move {
+        let error = match tokio::time::timeout(tokio::time::Duration::from_secs(120), result).await
+        {
+            Ok(Ok(code)) => code,
+            _ => 100,
+        };
+        let _ = tokio::time::timeout(
+            tokio::time::Duration::from_secs(5),
+            tx.send(Output::Messages(vec![reply(id.as_deref(), error)])),
+        )
+        .await;
+    });
+    Ok(true)
+}
 async fn handle(
     message: Node,
     identity: &Identity,
@@ -197,13 +258,14 @@ pub async fn connection(
     let mut previous = updates.borrow().clone();
     let opened = std::time::Instant::now();
     let mut last = 0u64;
+    let mut pending = tokio::task::JoinSet::new();
     println!("{} MRP connection opened", crate::station_mrp::stamp::now());
     let result:Result<()>=async{loop{tokio::select!{
   count=read.read(&mut chunk)=>{let count=count?;if count==0{break}buffer.extend_from_slice(&chunk[..count]);while buffer.len()>=32{
    let size=u32::from_be_bytes(buffer[..4].try_into()?)as usize;if !(32..=4*1024*1024).contains(&size){bail!("invalid data frame size")};if buffer.len()<size{break}
    let rest=buffer.split_off(size);let frame=std::mem::replace(&mut buffer,rest);let seq=u64::from_be_bytes(frame[20..28].try_into()?);
    if &frame[4..8]==b"sync"{tx.send(Output::Ack(seq)).await?}
-   if size>32{let value=match model::decode_plist(&frame[32..]){Ok(v)=>v,Err(error)=>{crate::station_elog!("MRP frame skipped, bad plist: {error:#}");continue}};if let Some(data)=value.as_dictionary().and_then(|v|v.get("params")).and_then(Value::as_dictionary).and_then(|v|v.get("data")).and_then(Value::as_data){let messages=match wire::decode_packet(data){Ok(m)=>m,Err(error)=>{crate::station_elog!("MRP frame skipped, bad protobuf: {error:#}");continue}};for message in messages{let current=updates.borrow().clone();let typ=message.number(f("ProtocolMessage","type")).unwrap_or(0);let id=message.string(f("ProtocolMessage","identifier")).map(str::to_owned);let out=match handle(message,&identity,&current,&control,&mut subscribed).await{Ok(out)=>out,Err(error)=>{crate::station_elog!("MRP message type={typ} failed: {error:#}");if id.is_some(){vec![reply(id.as_deref(),6)]}else{Vec::new()}}};last=typ;if !out.is_empty(){tx.send(Output::Messages(out)).await?}}}}
+   if size>32{let value=match model::decode_plist(&frame[32..]){Ok(v)=>v,Err(error)=>{crate::station_elog!("MRP frame skipped, bad plist: {error:#}");continue}};if let Some(data)=value.as_dictionary().and_then(|v|v.get("params")).and_then(Value::as_dictionary).and_then(|v|v.get("data")).and_then(Value::as_data){let messages=match wire::decode_packet(data){Ok(m)=>m,Err(error)=>{crate::station_elog!("MRP frame skipped, bad protobuf: {error:#}");continue}};for message in messages{if dispatch_output(&message,&control,&tx,&mut pending)?{continue;}let current=updates.borrow().clone();let typ=message.number(f("ProtocolMessage","type")).unwrap_or(0);let id=message.string(f("ProtocolMessage","identifier")).map(str::to_owned);let out=match handle(message,&identity,&current,&control,&mut subscribed).await{Ok(out)=>out,Err(error)=>{crate::station_elog!("MRP message type={typ} failed: {error:#}");if id.is_some(){vec![reply(id.as_deref(),6)]}else{Vec::new()}}};last=typ;if !out.is_empty(){tx.send(Output::Messages(out)).await?}}}}
   }},
   changed=updates.changed()=>{if changed.is_err(){break}let current=updates.borrow_and_update().clone();if subscribed{
    let mut output=Vec::new();if current.source!=previous.source{output.extend(model::announcement(&identity,&current));}else{output.extend(model::state_change(&identity,&previous,&current));}
@@ -250,6 +312,67 @@ mod tests {
     fn headers_are_fixed_size() {
         assert_eq!(framed(b"rply", 17, &[]).len(), 32);
         assert_eq!(&framed(b"sync", 17, b"123")[20..28], &17u64.to_be_bytes());
+    }
+
+    #[tokio::test]
+    async fn queued_output_reply_preserves_request_id_and_disconnect_cancels_wait() {
+        let (feed, _) = watch::channel(Feed::default());
+        let (backend, mut requests) = crate::output_control::OutputControl::channel(2);
+        let control = Control::new(feed, crate::remote::Remote::new()).with_outputs(backend);
+        let (tx, mut replies) = mpsc::channel(4);
+        let mut pending = tokio::task::JoinSet::new();
+        let message = model::envelope(
+            "MODIFY_OUTPUT_CONTEXT_REQUEST_MESSAGE",
+            Node::default().text(5, "group").clone(),
+            Some("selection-id"),
+        );
+        assert!(dispatch_output(&message, &control, &tx, &mut pending).unwrap());
+        let request = requests.recv().await.unwrap();
+        assert_eq!(request.body.string(5), Some("group"));
+        assert!(
+            replies.try_recv().is_err(),
+            "do not acknowledge before backend result"
+        );
+        request.reply.send(39).unwrap();
+        let Output::Messages(messages) = replies.recv().await.unwrap() else {
+            panic!("wrong output")
+        };
+        assert_eq!(
+            messages[0].string(f("ProtocolMessage", "identifier")),
+            Some("selection-id")
+        );
+        assert_eq!(
+            messages[0].number(f("ProtocolMessage", "errorCode")),
+            Some(39)
+        );
+        assert!(dispatch_output(&message, &control, &tx, &mut pending).unwrap());
+        let mut request = requests.recv().await.unwrap();
+        pending.shutdown().await;
+        request.reply.closed().await;
+    }
+
+    #[tokio::test]
+    async fn full_output_worker_queue_fails_without_blocking_reader() {
+        let (feed, _) = watch::channel(Feed::default());
+        let (backend, _requests) = crate::output_control::OutputControl::channel(1);
+        let control = Control::new(feed, crate::remote::Remote::new()).with_outputs(backend);
+        let (tx, mut replies) = mpsc::channel(4);
+        let mut pending = tokio::task::JoinSet::new();
+        let message = model::envelope(
+            "MODIFY_OUTPUT_CONTEXT_REQUEST_MESSAGE",
+            Node::default().text(2, "peer").clone(),
+            Some("id"),
+        );
+        assert!(dispatch_output(&message, &control, &tx, &mut pending).unwrap());
+        assert!(dispatch_output(&message, &control, &tx, &mut pending).unwrap());
+        let Output::Messages(messages) = replies.recv().await.unwrap() else {
+            panic!("wrong output")
+        };
+        assert_eq!(
+            messages[0].number(f("ProtocolMessage", "errorCode")),
+            Some(100)
+        );
+        pending.shutdown().await;
     }
 
     #[tokio::test]

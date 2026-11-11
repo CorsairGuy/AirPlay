@@ -30,6 +30,7 @@ pub struct Card {
     remote: Remote,
     /// Программа, которая встраивает приёмник, получает события как обычно.
     inner: Arc<dyn Events>,
+    outputs: Option<crate::output_control::OutputControl>,
 }
 
 /// SHA-256 в hex, как `hash()` в sources.rs станции.
@@ -39,6 +40,24 @@ fn hash(bytes: &[u8]) -> String {
 
 impl Card {
     pub fn new(device: Device, remote: Remote, inner: Arc<dyn Events>) -> Arc<Self> {
+        Self::create(device, remote, inner, None)
+    }
+
+    pub fn new_with_outputs(
+        device: Device,
+        remote: Remote,
+        inner: Arc<dyn Events>,
+        outputs: crate::output_control::OutputControl,
+    ) -> Arc<Self> {
+        Self::create(device, remote, inner, Some(outputs))
+    }
+
+    fn create(
+        device: Device,
+        remote: Remote,
+        inner: Arc<dyn Events>,
+        outputs: Option<crate::output_control::OutputControl>,
+    ) -> Arc<Self> {
         // ВРЕМЕННЫЙ ОПЫТ: подмена данных карточки переменными окружения,
         // чтобы найти, чем она отличается от станции. Убрать после опыта.
         let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
@@ -60,6 +79,7 @@ impl Card {
             feed,
             remote,
             inner,
+            outputs,
         })
     }
 
@@ -86,7 +106,10 @@ impl Card {
     where
         S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
     {
-        let control = Control::new(self.feed.clone(), self.remote.clone());
+        let mut control = Control::new(self.feed.clone(), self.remote.clone());
+        if let Some(outputs) = &self.outputs {
+            control = control.with_outputs(outputs.clone());
+        }
         server::connection(
             stream,
             self.identity.clone(),

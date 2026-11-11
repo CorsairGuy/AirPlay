@@ -10,11 +10,21 @@ use tokio::sync::watch;
 pub struct Control {
     pub feed: watch::Sender<Feed>,
     remote: Remote,
+    pub(crate) outputs: Option<crate::output_control::OutputControl>,
 }
 
 impl Control {
     pub fn new(feed: watch::Sender<Feed>, remote: Remote) -> Self {
-        Self { feed, remote }
+        Self {
+            feed,
+            remote,
+            outputs: None,
+        }
+    }
+
+    pub fn with_outputs(mut self, outputs: crate::output_control::OutputControl) -> Self {
+        self.outputs = Some(outputs);
+        self
     }
 
     pub async fn volume(&self, value: f32) -> Result<()> {
