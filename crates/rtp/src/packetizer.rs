@@ -15,6 +15,7 @@ pub enum PacketizeError {
     NonMonotonicFrameIndex,
     FrameIndexOverflow,
     NonceExhausted,
+    InvalidRenderLatency,
 }
 
 impl fmt::Display for PacketizeError {
@@ -26,6 +27,7 @@ impl fmt::Display for PacketizeError {
             Self::NonMonotonicFrameIndex => "PCM frame index overlaps previously packetized frames",
             Self::FrameIndexOverflow => "PCM frame index overflow",
             Self::NonceExhausted => "audio nonce exhausted; establish a new keyed session",
+            Self::InvalidRenderLatency => "receiver render latency exceeds total playout lead",
         })
     }
 }
@@ -85,6 +87,7 @@ pub struct PcmPacketizer {
     sequence: u16,
     next_nonce: Option<u64>,
     latency_frames: u32,
+    mapping_lead_frames: u32,
     first_index: Option<u64>,
     next_min_index: Option<u64>,
     cache: Vec<Option<(u16, Vec<u8>)>>,
@@ -98,10 +101,28 @@ impl PcmPacketizer {
             sequence,
             next_nonce: Some(0),
             latency_frames,
+            mapping_lead_frames: latency_frames,
             first_index: None,
             next_min_index: None,
             cache: (0..RETRANSMIT_CACHE_PACKETS).map(|_| None).collect(),
         }
+    }
+
+    /// AP2 adds its render minimum after the RTP/NTP mapping. Keep the RTP
+    /// origin and total local deadline, but put only the remaining lead in sync.
+    pub fn with_render_latency(
+        key: [u8; 32],
+        ssrc: u32,
+        sequence: u16,
+        total_frames: u32,
+        render_frames: u32,
+    ) -> Result<Self, PacketizeError> {
+        let lead = total_frames
+            .checked_sub(render_frames)
+            .ok_or(PacketizeError::InvalidRenderLatency)?;
+        let mut packetizer = Self::new(key, ssrc, sequence, total_frames);
+        packetizer.mapping_lead_frames = lead;
+        Ok(packetizer)
     }
 
     /// Timestamp announced by the caller's initial FLUSH before audio starts.
@@ -147,7 +168,7 @@ impl PcmPacketizer {
             ssrc: self.ssrc,
         };
         let audio = self.cipher.seal(&header, pcm, nonce);
-        let sync = sync_packet(timestamp, self.latency_frames, produced_ntp, first);
+        let sync = sync_packet(timestamp, self.mapping_lead_frames, produced_ntp, first);
         self.cache[self.sequence as usize % RETRANSMIT_CACHE_PACKETS] =
             Some((self.sequence, audio.clone()));
         self.first_index = Some(origin);
@@ -188,6 +209,24 @@ impl PcmPacketizer {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ap2_render_min_is_counted_once_without_changing_audio_timestamp() {
+        for render in [0, 8_820, 11_025, 22_050] {
+            let mut corrected =
+                super::PcmPacketizer::with_render_latency([7; 32], 1, 9, 22_050, render).unwrap();
+            let mut legacy = super::PcmPacketizer::new([7; 32], 1, 9, 22_050);
+            assert_eq!(corrected.initial_timestamp(), legacy.initial_timestamp());
+            for frame in [0, u32::MAX as u64 + 352] {
+                let p = corrected.packetize(&[0; 1408], frame, 123).unwrap();
+                let old = legacy.packetize(&[0; 1408], frame, 123).unwrap();
+                assert_eq!(p.audio, old.audio);
+                let mapped = u32::from_be_bytes(p.sync[4..8].try_into().unwrap());
+                assert_eq!(p.header.timestamp.wrapping_sub(mapped) + render, 22_050);
+                assert_eq!(u64::from_be_bytes(p.sync[8..16].try_into().unwrap()), 123);
+            }
+        }
+        assert!(super::PcmPacketizer::with_render_latency([0; 32], 1, 1, 22_050, 22_051).is_err());
+    }
     use super::*;
     fn request(first: u16, count: u16) -> [u8; 8] {
         let mut p = [0x80, 0x55, 0xaa, 0xbb, 0, 0, 0, 0];

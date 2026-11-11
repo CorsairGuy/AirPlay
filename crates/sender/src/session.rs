@@ -329,8 +329,14 @@ impl Session {
                 .ok_or_else(|| anyhow!("no data port in SETUP reply"))?;
             let control_port = optional_port(first.get("controlPort"))?
                 .ok_or_else(|| anyhow!("no control port in SETUP reply"))?;
-            let packetizer =
-                rtp::PcmPacketizer::new(shk, session_id, first_sequence, config.latency_frames);
+            let render_frames = receiver_render_frames(first.get("latencyMin"))?;
+            let packetizer = rtp::PcmPacketizer::with_render_latency(
+                shk,
+                session_id,
+                first_sequence,
+                config.latency_frames,
+                render_frames,
+            )?;
             rtsp.request("RECORD", None, Vec::new(), None, &[]).await?;
             rtsp.request(
                 "FLUSH",
@@ -601,6 +607,18 @@ fn binary_plist(value: plist::Value) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+// Fallback is the minimum explicitly requested in this session's SETUP, not a
+// measured receiver delay. Same correction as Station cf1894c (audibly verified).
+fn receiver_render_frames(value: Option<&plist::Value>) -> Result<u32> {
+    match value {
+        None => Ok(11_025),
+        Some(value) => value
+            .as_unsigned_integer()
+            .and_then(|n| u32::try_from(n).ok())
+            .ok_or_else(|| anyhow!("invalid receiver latencyMin")),
+    }
+}
+
 fn optional_port(value: Option<&plist::Value>) -> Result<Option<u16>> {
     match value {
         None => Ok(None),
@@ -655,6 +673,20 @@ async fn timing_server(socket: Arc<UdpSocket>, peer: std::net::IpAddr) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn negotiated_render_min_is_validated_and_absence_uses_request() {
+        assert_eq!(super::receiver_render_frames(None).unwrap(), 11_025);
+        assert_eq!(
+            super::receiver_render_frames(Some(&8_820u64.into())).unwrap(),
+            8_820
+        );
+        assert_eq!(
+            super::receiver_render_frames(Some(&0u64.into())).unwrap(),
+            0
+        );
+        assert!(super::receiver_render_frames(Some(&"invalid".into())).is_err());
+        assert!(super::receiver_render_frames(Some(&u64::MAX.into())).is_err());
+    }
     use super::*;
 
     #[tokio::test]
