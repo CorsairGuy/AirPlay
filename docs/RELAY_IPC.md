@@ -1,5 +1,9 @@
 # Relay process IPC v1 (candidate)
 
+<!-- current-status-20261112 -->
+> Сверено12ноября2026. Текущий статус и ограничения — [STATUS](STATUS.md). Датированные замеры и этапы ниже сохранены как история, их слова «ещё не реализовано/не установлено» относятся к указанному этапу, а не автоматически к нынешнему main.
+
+
 Opt-in `airplay send --control-socket /absolute/private-dir/session.sock`.
 The directory must already exist, belong to the effective user and have no group/other
 permissions. Socket mode0600; peers must have the same effective UID. No TCP listener.

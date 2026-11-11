@@ -1,5 +1,9 @@
 # Partial card updates and cached artwork
 
+<!-- current-status-20261112 -->
+> Сверено12ноября2026. Текущий статус и ограничения — [STATUS](STATUS.md). Датированные замеры и этапы ниже сохранены как история, их слова «ещё не реализовано/не установлено» относятся к указанному этапу, а не автоматически к нынешнему main.
+
+
 DeviceInfoUpdate now changes its existing type field in place, keeping field1
 first. Although protobuf permits other field orders, the standard pyatv AirPlay
 decoder requires leading0x08 and otherwise discards following messages in the

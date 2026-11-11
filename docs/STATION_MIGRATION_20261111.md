@@ -1,5 +1,9 @@
 # Migration checkpoint, 11 November 2026
 
+<!-- current-status-20261112 -->
+> Сверено12ноября2026. Текущий статус и ограничения — [STATUS](STATUS.md). Датированные замеры и этапы ниже сохранены как история, их слова «ещё не реализовано/не установлено» относятся к указанному этапу, а не автоматически к нынешнему main.
+
+
 Target remains a device-independent engine. Station-specific Quasar, ALSA capture/output, LED and installation stay in the Station adapter. Do not copy hard-coded paths, Station names, process control or NQPTP shared-memory assumptions into protocol crates.
 
 ## First port: receiver render minimum
@@ -10,14 +14,15 @@ Station cf1894c corrected double-counting250ms and user confirmed acoustic align
 
 Second port: SessionConfig.preserve_receiver_volume defaults false for compatibility. When enabled, SETUP sends no initial volume; the run control worker waits for an explicit watch revision, including one equal to the initial placeholder. A queued final request is retained even when its writer closes. Coalescing and RTSP/media isolation remain. Offline RTP/sender tests:43 passed. This is a library policy only; CLI/group adapter wiring remains to be migrated.
 
-| Area | Station source | Core status / next dependency |
-|---|---|---|
-| Persistent pairing, native PIN UI | station-onepath29dcc54..13cf9f2; remote equivalents | Sender pair-verify, PIN setup, MRP59/60/61 bridge and application pairing store implemented; active Card output-selection integration remains |
-| Discovery, logical groups, cluster membership and volume | station-onepath group commits; remote outputs.rs | Core Coordinator exists but is inactive; core MRP Feed currently has no output membership. Port logical/physical mapping before claiming button support |
-| PTP sender + participant list |6226d27..e316dbd and remote equivalents | Core clocks/coordinator primitives exist; runtime wiring and sender negotiation remain. Separate NQPTP smi10/smi11 adapters from core |
-| Continuous pause/seek/track sessions |8c349ad..37e4d66, remote outputs/sender | Port state machine without Station process/file IPC; preserve generation and nonce/timeline invariants |
-| One native PCM source |bc9cda1; remote7e5869c/3e33824 | Keep mini2tap/reader as Station capture adapter; core takes source-owned PCM, not CDN credentials |
-| Recovery and autostart | existing guard/recovery, S90group-sync, a538a30 | Existing mechanisms are implemented, not new tasks; retain in adapter and verify integration |
+| Область | Текущее состояние12ноября |
+|---|---|
+| Pairing/PIN/store | Примитивы и helpers перенесены; active controller PIN integration остаётся |
+| Catalog/outputs/volume | API и worker перенесены; native topology/button/slider требуют доказательства |
+| PTP | План, transport/d7, live peers, common source/service ownership и local supervision реализованы opt-in |
+| Continuous | Полный поздний pause/seek/track/gap/generation автомат ещё не перенесён |
+| Native PCM / recovery | Станционный адаптер; сохранить готовые tap/guard/autostart при переходе на ядро |
+
+Далее — хронологические записи, включая уже заменённые промежуточные ограничения. Актуальный план — STATUS.md.
 
 ## Group-button evidence
 

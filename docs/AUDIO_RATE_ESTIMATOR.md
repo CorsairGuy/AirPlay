@@ -1,5 +1,9 @@
 # Hardware audio rate estimator
 
+<!-- current-status-20261112 -->
+> Сверено12ноября2026. Текущий статус и ограничения — [STATUS](STATUS.md). Датированные замеры и этапы ниже сохранены как история, их слова «ещё не реализовано/не установлено» относятся к указанному этапу, а не автоматически к нынешнему main.
+
+
 `ap_clock::AudioRateEstimator` measures frames per second using cumulative
 **presented** frame counts and timestamps from one monotonic clock domain.
 It is independent of the audio backend and does not change playback, packet
