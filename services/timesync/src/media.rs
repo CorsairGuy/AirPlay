@@ -117,11 +117,16 @@ impl MasterLease {
     pub fn subscribe(&self) -> watch::Receiver<bool> {
         self.stop.subscribe()
     }
+    /// Fail the whole group explicitly (for example, local renderer failure).
+    /// Cancellation is latched and cannot be reset by subsequent clock updates.
+    pub fn cancel(&self) {
+        self.stop.send_replace(true);
+        self.task.abort();
+    }
 }
 impl Drop for MasterLease {
     fn drop(&mut self) {
-        self.stop.send_replace(true);
-        self.task.abort();
+        self.cancel();
     }
 }
 impl MasterTimeline {

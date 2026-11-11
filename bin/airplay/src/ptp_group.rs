@@ -56,6 +56,50 @@ impl PtpGroup {
     /// cancels producer and renderer. Worker awaits bounded pool cleanup.
     pub async fn run(
         self,
+        pool: SessionPool,
+        requests: mpsc::Receiver<OutputRequest>,
+        discovery: watch::Receiver<Arc<OutputCatalog>>,
+        local_ids: Vec<String>,
+        preparer: impl SessionPreparer,
+        updates: watch::Sender<output_worker::Snapshot>,
+    ) -> Result<()> {
+        self.run_worker(pool, requests, discovery, local_ids, preparer, updates)
+            .await
+    }
+    /// Supervise the existing renderer and selection worker in one task.
+    /// Local EOF drains before stopping the group; local failure cancels it
+    /// immediately. Both futures are awaited, including pool teardown. The
+    /// platform adapter alone restores direct routing after this returns.
+    pub async fn run_with_local(
+        self,
+        pool: SessionPool,
+        requests: mpsc::Receiver<OutputRequest>,
+        discovery: watch::Receiver<Arc<OutputCatalog>>,
+        local_ids: Vec<String>,
+        preparer: impl SessionPreparer,
+        updates: watch::Sender<output_worker::Snapshot>,
+        sink: impl sender::LocalSink,
+        packets: tokio::sync::broadcast::Receiver<Arc<AudioPacket>>,
+        latency: std::time::Duration,
+    ) -> Result<()> {
+        let worker = self.run_worker(pool, requests, discovery, local_ids, preparer, updates);
+        let local = sender::run_local(sink, packets, latency, self.stop());
+        tokio::pin!(worker, local);
+        tokio::select! {
+            result = &mut worker => {
+                self.lease.cancel();
+                let local_result = local.await;
+                result.and(local_result)
+            },
+            result = &mut local => {
+                self.lease.cancel();
+                let worker_result = worker.await;
+                result.and(worker_result)
+            },
+        }
+    }
+    async fn run_worker(
+        &self,
         mut pool: SessionPool,
         requests: mpsc::Receiver<OutputRequest>,
         discovery: watch::Receiver<Arc<OutputCatalog>>,
@@ -231,6 +275,164 @@ mod tests {
         assert!(producer.packet(0, &[0; sender::PACKET_BYTES]).is_err());
     }
     struct Pending(Arc<AtomicBool>);
+    struct TestSink {
+        entered: Arc<AtomicBool>,
+        written: Arc<tokio::sync::Notify>,
+        dropped: Arc<AtomicBool>,
+        finished: Arc<AtomicBool>,
+        expected: Arc<AudioPacket>,
+        fail: bool,
+    }
+    impl Drop for TestSink {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::SeqCst);
+        }
+    }
+    impl sender::LocalSink for TestSink {
+        async fn write(&mut self, packet: Arc<AudioPacket>, play_at: Instant) -> Result<()> {
+            assert!(Arc::ptr_eq(&packet, &self.expected));
+            assert_eq!(play_at, packet.play_at(Duration::from_millis(500)).unwrap());
+            while !self.entered.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+            self.written.notify_one();
+            if self.fail {
+                bail!("offline local sink failure");
+            }
+            std::future::pending().await
+        }
+        async fn finish(&mut self) -> Result<()> {
+            self.finished.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+    #[tokio::test]
+    async fn supervised_local_failure_and_clock_loss_release_sink_and_pending_auth() {
+        for fail in [true, false] {
+            let (updates, _user, group, origin) = fixture();
+            let producer = group.producer(MediaClock::at(origin, 0));
+            let packet = Arc::new(producer.packet(0, &[0; sender::PACKET_BYTES]).unwrap());
+            let (pcm, audio) = tokio::sync::broadcast::channel(4);
+            let local_audio = pcm.subscribe();
+            pcm.send(packet.clone()).unwrap();
+            let (control, requests) = crate::output_control::OutputControl::channel(4);
+            let catalog = OutputCatalog::new(vec![sender::outputs::OutputRoute {
+                uid: "row".into(),
+                name: "speaker".into(),
+                model: String::new(),
+                aliases: vec![],
+                receivers: vec![ReceiverEndpoint {
+                    uid: "peer".into(),
+                    address: ([127, 0, 0, 1], 7000).into(),
+                }],
+            }])
+            .unwrap();
+            let (_catalog, discovery) = watch::channel(Arc::new(catalog));
+            let (state, _) = watch::channel(output_worker::Snapshot::default());
+            let entered = Arc::new(AtomicBool::new(false));
+            let auth_dropped = Arc::new(AtomicBool::new(false));
+            let sink_dropped = Arc::new(AtomicBool::new(false));
+            let finished = Arc::new(AtomicBool::new(false));
+            let written = Arc::new(tokio::sync::Notify::new());
+            let reply = control
+                .submit(mrp::wire::Node::default().text(2, "row").clone())
+                .unwrap();
+            let task = tokio::spawn(group.run_with_local(
+                SessionPool::new(audio),
+                requests,
+                discovery,
+                vec![],
+                Blocked {
+                    entered: entered.clone(),
+                    dropped: auth_dropped.clone(),
+                },
+                state,
+                TestSink {
+                    entered,
+                    written: written.clone(),
+                    dropped: sink_dropped.clone(),
+                    finished: finished.clone(),
+                    expected: packet,
+                    fail,
+                },
+                local_audio,
+                Duration::from_millis(500),
+            ));
+            tokio::time::timeout(Duration::from_secs(1), written.notified())
+                .await
+                .unwrap();
+            if !fail {
+                updates.send_replace(Snapshot::inactive());
+            }
+            let result = tokio::time::timeout(Duration::from_secs(1), task)
+                .await
+                .unwrap()
+                .unwrap();
+            if fail {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("offline local sink failure")
+                );
+            } else {
+                result.unwrap();
+            }
+            assert!(auth_dropped.load(Ordering::SeqCst));
+            assert!(sink_dropped.load(Ordering::SeqCst));
+            assert!(
+                !finished.load(Ordering::SeqCst),
+                "cancellation must not drain the sink"
+            );
+            assert!(reply.await.is_err());
+            assert!(producer.packet(0, &[0; sender::PACKET_BYTES]).is_err());
+        }
+    }
+    #[tokio::test]
+    async fn local_eof_drains_and_stops_worker_even_with_live_controller() {
+        let (_updates, _user, group, origin) = fixture();
+        let producer = group.producer(MediaClock::at(origin, 0));
+        let expected = Arc::new(producer.packet(0, &[0; sender::PACKET_BYTES]).unwrap());
+        let (pcm, audio) = tokio::sync::broadcast::channel(4);
+        let local_audio = pcm.subscribe();
+        drop(pcm);
+        let (_control, requests) = crate::output_control::OutputControl::channel(4);
+        let (_catalog, discovery) = watch::channel(Arc::new(OutputCatalog::new(vec![]).unwrap()));
+        let (state, _) = watch::channel(output_worker::Snapshot::default());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let finished = Arc::new(AtomicBool::new(false));
+        let entered = Arc::new(AtomicBool::new(false));
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            group.run_with_local(
+                SessionPool::new(audio),
+                requests,
+                discovery,
+                vec![],
+                Blocked {
+                    entered: entered.clone(),
+                    dropped: Arc::new(AtomicBool::new(false)),
+                },
+                state,
+                TestSink {
+                    entered,
+                    written: Arc::new(tokio::sync::Notify::new()),
+                    dropped: dropped.clone(),
+                    finished: finished.clone(),
+                    expected,
+                    fail: false,
+                },
+                local_audio,
+                Duration::from_millis(500),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(finished.load(Ordering::SeqCst));
+        assert!(dropped.load(Ordering::SeqCst));
+        assert!(producer.packet(0, &[0; sender::PACKET_BYTES]).is_err());
+    }
     impl Drop for Pending {
         fn drop(&mut self) {
             self.0.store(true, Ordering::SeqCst);
