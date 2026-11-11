@@ -35,8 +35,49 @@ pub struct Service {
     peers: mpsc::Sender<PeerRequest>,
 }
 struct PeerRequest {
+    owner: u128,
     peers: Vec<Peer>,
     reply: oneshot::Sender<io::Result<()>>,
+}
+/// Prepare the union before mutating engine or ownership. One group's removal
+/// must not withdraw another group's shared peer; port conflicts fail closed.
+fn peer_union(
+    bind: IpAddr,
+    owners: &BTreeMap<u128, Vec<Peer>>,
+    owner: u128,
+    peers: Vec<Peer>,
+) -> io::Result<(BTreeMap<u128, Vec<Peer>>, BTreeMap<IpAddr, Ports>)> {
+    peer_table(bind, &peers)?;
+    let mut next = owners.clone();
+    if peers.is_empty() {
+        next.remove(&owner);
+    } else {
+        next.insert(owner, peers);
+    }
+    if next.len() > 64 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "too many timing consumers",
+        ));
+    }
+    let mut union: BTreeMap<IpAddr, Ports> = BTreeMap::new();
+    for peer in next.values().flatten() {
+        if let Some(old) = union.insert(peer.ip, peer.ports) {
+            if old.event != peer.ports.event || old.general != peer.ports.general {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "timing peer port conflict",
+                ));
+            }
+        }
+    }
+    if union.len() > 64 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "too many aggregate timing peers",
+        ));
+    }
+    Ok((next, union))
 }
 fn peer_table(bind: IpAddr, peers: &[Peer]) -> io::Result<BTreeMap<IpAddr, Ports>> {
     let mut table = BTreeMap::new();
@@ -295,6 +336,35 @@ mod peer_update_tests {
     use super::tests::{TestClock, config, wait_for};
     use super::*;
     use clock::role::{Policy, Role};
+    #[test]
+    fn shared_peers_survive_one_owner_removal_and_conflicts_are_atomic() {
+        let bind = "127.0.0.1".parse().unwrap();
+        let peer = Peer {
+            ip: "127.0.0.2".parse().unwrap(),
+            ports: Ports {
+                event: 10001,
+                general: 10002,
+            },
+        };
+        let (owners, _) = peer_union(bind, &BTreeMap::new(), 1, vec![peer]).unwrap();
+        let (owners, union) = peer_union(bind, &owners, 2, vec![peer]).unwrap();
+        assert_eq!(union.len(), 1);
+        let (owners, union) = peer_union(bind, &owners, 1, vec![]).unwrap();
+        assert_eq!(owners.len(), 1);
+        assert_eq!(union.len(), 1);
+        let conflict = Peer {
+            ports: Ports {
+                event: 10003,
+                ..peer.ports
+            },
+            ..peer
+        };
+        assert!(peer_union(bind, &owners, 3, vec![conflict]).is_err());
+        assert_eq!(owners.len(), 1);
+        let (owners, union) = peer_union(bind, &owners, 2, vec![]).unwrap();
+        assert!(owners.is_empty());
+        assert!(union.is_empty());
+    }
     #[tokio::test]
     async fn live_peer_changes_reuse_sockets_source_and_master_epoch() {
         let event = UdpSocket::bind("127.0.0.2:0").await.unwrap();
@@ -323,7 +393,7 @@ mod peer_update_tests {
                 general: next_general.local_addr().unwrap().port(),
             },
         };
-        service.set_peers(vec![next]).await.unwrap();
+        service.set_group_peers(1, vec![next]).await.unwrap();
         assert_eq!(service.addresses(), addresses);
         assert_eq!(status.borrow().selection, selected);
         let mut buffer = [0; 1024];
@@ -341,7 +411,14 @@ mod peer_update_tests {
                 .await
                 .is_err()
         );
+        // Releasing the base receiver interest must keep the outgoing group.
         service.set_peers(vec![]).await.unwrap();
+        timeout(Duration::from_secs(1), next_event.recv_from(&mut buffer))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(service.set_group_peers(0, vec![next]).await.is_err());
+        service.set_group_peers(1, vec![]).await.unwrap();
         while next_event.try_recv(&mut buffer).is_ok() {}
         assert!(
             timeout(
@@ -376,6 +453,10 @@ impl Service {
             ));
         }
         let mut peers = peer_table(network.bind_ip, &network.peers)?;
+        let mut owners = BTreeMap::new();
+        if !network.peers.is_empty() {
+            owners.insert(0, network.peers.clone());
+        }
         let (initial, reading) = clock.sample()?;
         if reading.domain() != network.domain {
             return Err(io::Error::new(
@@ -423,12 +504,13 @@ impl Service {
                         // A cancelled caller must reconcile state: once queued,
                         // an update may still apply. Ack means applied locally,
                         // never receiver adoption or measured synchronization.
-                        let result = match peer_table(network.bind_ip, &request.peers) {
+                        let result = match peer_union(network.bind_ip, &owners, request.owner, request.peers) {
                             Err(error) => Err(error),
-                            Ok(next) => {
+                            Ok((next_owners, next)) => {
                                 let (local, own) = source.sample()?;
                                 engine.set_peers(&next.keys().copied().collect::<Vec<_>>(), local, own)?;
                                 peers = next;
+                                owners = next_owners;
                                 worker_status.send_replace(engine.snapshot());
                                 Ok(())
                             },
@@ -463,15 +545,33 @@ impl Service {
     pub fn subscribe(&self) -> watch::Receiver<Snapshot> {
         self.status.subscribe()
     }
-    /// Replace the aggregate peers of this ONE service. The application owner
-    /// must union all active consumers; individual groups must not overwrite
-    /// one another's peers. Sockets/source remain alive, including an empty set.
+    /// Replace base receiver/service peers (owner zero). Group-owned peers are
+    /// retained independently. Sockets/source remain alive, including no peers.
     /// Bounded queue: retry WouldBlock; cancellation after enqueue is not rollback.
     pub async fn set_peers(&self, peers: Vec<Peer>) -> io::Result<()> {
+        self.update_peers(0, peers).await
+    }
+    /// Replace one consumer's peers in the common service's union. Owner is an
+    /// application lifecycle token, not proof of native AirPlay group adoption.
+    /// An empty list releases only this owner; explicit release is required.
+    pub async fn set_group_peers(&self, owner: u128, peers: Vec<Peer>) -> io::Result<()> {
+        if owner == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "reserved timing owner",
+            ));
+        }
+        self.update_peers(owner, peers).await
+    }
+    async fn update_peers(&self, owner: u128, peers: Vec<Peer>) -> io::Result<()> {
         peer_table(self.addresses.0.ip(), &peers)?;
         let (reply, result) = oneshot::channel();
         self.peers
-            .try_send(PeerRequest { peers, reply })
+            .try_send(PeerRequest {
+                owner,
+                peers,
+                reply,
+            })
             .map_err(|error| {
                 io::Error::new(
                     match error {
