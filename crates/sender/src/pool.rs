@@ -86,6 +86,35 @@ impl SessionPool {
         self.entries.is_empty()
     }
 
+    /// One logical row may cover multiple physical members. Preflight every
+    /// member before publishing a gain revision; unrelated outputs are untouched.
+    /// Success means control accepted, not receiver/acoustic acknowledgement.
+    pub fn set_route_volume(
+        &self,
+        catalog: &crate::outputs::OutputCatalog,
+        uid: &str,
+        volume: Volume,
+    ) -> Result<()> {
+        let members = catalog.receivers(&[uid.into()])?;
+        let mut handles = Vec::new();
+        for member in members {
+            let entry = self
+                .entries
+                .get(&member.uid)
+                .ok_or_else(|| anyhow::anyhow!("output member is inactive"))?;
+            if entry.endpoint != member.address
+                || *entry.handle.state.borrow() != SessionState::Running
+            {
+                bail!("output member is inactive or changed endpoint");
+            }
+            handles.push(entry.handle.clone());
+        }
+        for handle in handles {
+            handle.set_volume(volume)?;
+        }
+        Ok(())
+    }
+
     /// Snapshot a desired selection against live workers, without starting or
     /// stopping anything. Completed workers must be removed before re-adding;
     /// they cannot satisfy a desired selection merely because their UID exists.
@@ -314,6 +343,7 @@ mod tests {
     ) -> SessionHandle {
         let uid = id.to_owned();
         pool.launch(id,([127,0,0,1],port).into(),Volume::db(-30.0).unwrap(),Duration::from_secs(1),move|mut audio,_volume,mut stop,_progress|async move{
+            let _volumes = _volume;
             let mut stats=StreamStats::default();
             loop {
                 if *stop.borrow(){break;}
@@ -324,6 +354,43 @@ mod tests {
             }
             Ok(stats)
         }).unwrap()
+    }
+    #[tokio::test]
+    async fn route_volume_is_independent_and_missing_member_fails_preflight() {
+        use crate::outputs::{OutputCatalog, OutputRoute, ReceiverEndpoint};
+        let (_audio, packets) = broadcast::channel(16);
+        let mut pool = SessionPool::new(packets);
+        let (events, _received) = mpsc::unbounded_channel();
+        let a = add(&mut pool, "a", 7001, events.clone());
+        let b = add(&mut pool, "b", 7002, events);
+        let peer = |uid: &str, port| ReceiverEndpoint {
+            uid: uid.into(),
+            address: ([127, 0, 0, 1], port).into(),
+        };
+        let route = |uid: &str, receivers| OutputRoute {
+            uid: uid.into(),
+            name: uid.into(),
+            model: "".into(),
+            aliases: vec![],
+            receivers,
+        };
+        let catalog = OutputCatalog::new(vec![
+            route("one", vec![peer("a", 7001)]),
+            route("pair", vec![peer("a", 7001), peer("missing", 7003)]),
+        ])
+        .unwrap();
+        let initial = b.requested_volume();
+        let gain = Volume::normalized(0.3).unwrap();
+        pool.set_route_volume(&catalog, "one", gain).unwrap();
+        assert_eq!(a.requested_volume(), gain);
+        assert_eq!(b.requested_volume(), initial);
+        assert!(
+            pool.set_route_volume(&catalog, "pair", Volume::MUTE)
+                .is_err()
+        );
+        assert_eq!(a.requested_volume(), gain);
+        assert_eq!(b.requested_volume(), initial);
+        pool.shutdown().await;
     }
     #[tokio::test]
     async fn apply_selection_preflights_before_removal_and_keeps_surviving_worker() {

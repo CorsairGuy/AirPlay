@@ -137,6 +137,94 @@ fn dispatch_output(
     });
     Ok(true)
 }
+fn dispatch_remote_volume(
+    message: &Node,
+    identity: &Identity,
+    feed: &Feed,
+    control: &Control,
+    tx: &mpsc::Sender<Output>,
+    pending: &mut tokio::task::JoinSet<()>,
+) -> Result<bool> {
+    if message.number(f("ProtocolMessage", "type")) != Some(kind("SET_VOLUME_MESSAGE") as u64) {
+        return Ok(false);
+    }
+    let Some(backend) = &control.outputs else {
+        return Ok(false);
+    };
+    let body = message.nested(schema::extension(kind("SET_VOLUME_MESSAGE")))?;
+    let Some(uid) = body.string(f("SetVolumeMessage", "outputDeviceUID")) else {
+        return Ok(false);
+    };
+    if model::same_uid(uid, &identity.device)
+        || model::same_uid(uid, &identity.group)
+        || model::same_uid(uid, model::active_group(identity, feed))
+    {
+        return Ok(false);
+    }
+    while pending.try_join_next().is_some() {}
+    let id = message
+        .string(f("ProtocolMessage", "identifier"))
+        .map(str::to_owned);
+    let value = body
+        .real(f("SetVolumeMessage", "volume"))
+        .unwrap_or(f64::NAN);
+    let result = if !value.is_finite()
+        || !(0.0..=1.0).contains(&value)
+        || uid.is_empty()
+        || uid.len() > 256
+        || uid.chars().any(char::is_control)
+    {
+        Err(18)
+    } else if pending.len() >= 32 {
+        Err(100)
+    } else {
+        backend
+            .submit_volume(uid.into(), value as f32)
+            .map_err(|_| 100)
+    };
+    let result = match result {
+        Ok(result) => result,
+        Err(code) => {
+            tx.try_send(Output::Messages(vec![reply(id.as_deref(), code)]))
+                .map_err(|_| anyhow::anyhow!("volume response queue full or closed"))?;
+            return Ok(true);
+        }
+    };
+    let uid = uid.to_owned();
+    let tx = tx.clone();
+    let updates = control.feed.clone();
+    pending.spawn(async move {
+        let code = match tokio::time::timeout(tokio::time::Duration::from_secs(10), result).await {
+            Ok(Ok(code)) => code,
+            _ => 100,
+        };
+        if code == 0 {
+            updates.send_if_modified(|feed| {
+                let Some(output) = feed.outputs.iter_mut().find(|o| {
+                    o.descriptor
+                        .string(f("AVOutputDeviceDescriptor", "uniqueIdentifier"))
+                        .is_some_and(|id| model::same_uid(id, &uid))
+                }) else {
+                    return false;
+                };
+                let next = Some(value as f32);
+                if output.volume == next {
+                    false
+                } else {
+                    output.volume = next;
+                    true
+                }
+            });
+        }
+        let _ = tokio::time::timeout(
+            tokio::time::Duration::from_secs(5),
+            tx.send(Output::Messages(vec![reply(id.as_deref(), code)])),
+        )
+        .await;
+    });
+    Ok(true)
+}
+
 async fn handle(
     message: Node,
     identity: &Identity,
@@ -171,11 +259,55 @@ async fn handle(
         return Ok(vec![model::state(identity, feed, Some(&body), id)]);
     }
     if typ == kind("GET_VOLUME_MESSAGE") {
+        if body.get(f("GetVolumeMessage", "outputDeviceUID")).is_some()
+            && !body
+                .string(f("GetVolumeMessage", "outputDeviceUID"))
+                .is_some_and(|id| {
+                    !id.is_empty() && id.len() <= 256 && !id.chars().any(char::is_control)
+                })
+        {
+            return Ok(vec![reply(id, 18)]);
+        }
+        if let Some(uid) = body.string(f("GetVolumeMessage", "outputDeviceUID")) {
+            if !model::same_uid(uid, &identity.device)
+                && !model::same_uid(uid, &identity.group)
+                && !model::same_uid(uid, model::active_group(identity, feed))
+            {
+                let value = feed
+                    .outputs
+                    .iter()
+                    .find(|o| {
+                        o.descriptor
+                            .string(f("AVOutputDeviceDescriptor", "uniqueIdentifier"))
+                            .is_some_and(|id| model::same_uid(id, uid))
+                    })
+                    .and_then(|o| o.volume);
+                let Some(value) = value else {
+                    return Ok(vec![reply(id, 39)]);
+                };
+                let mut result = Node::default();
+                result.float(f("GetVolumeResultMessage", "volume"), value);
+                return Ok(vec![model::envelope(
+                    "GET_VOLUME_RESULT_MESSAGE",
+                    result,
+                    id,
+                )]);
+            }
+        }
         let mut body = Node::default();
         body.float(f("GetVolumeResultMessage", "volume"), feed.volume);
         return Ok(vec![model::envelope("GET_VOLUME_RESULT_MESSAGE", body, id)]);
     }
     if typ == kind("SET_VOLUME_MESSAGE") {
+        if body.get(f("SetVolumeMessage", "outputDeviceUID")).is_some()
+            && !body
+                .string(f("SetVolumeMessage", "outputDeviceUID"))
+                .is_some_and(|id| {
+                    !id.is_empty() && id.len() <= 256 && !id.chars().any(char::is_control)
+                })
+        {
+            return Ok(vec![reply(id, 18)]);
+        }
         if let Some(uid) = body.string(f("SetVolumeMessage", "outputDeviceUID")) {
             if !model::same_uid(uid, &identity.device)
                 && !model::same_uid(uid, &identity.group)
@@ -265,7 +397,7 @@ pub async fn connection(
    let size=u32::from_be_bytes(buffer[..4].try_into()?)as usize;if !(32..=4*1024*1024).contains(&size){bail!("invalid data frame size")};if buffer.len()<size{break}
    let rest=buffer.split_off(size);let frame=std::mem::replace(&mut buffer,rest);let seq=u64::from_be_bytes(frame[20..28].try_into()?);
    if &frame[4..8]==b"sync"{tx.send(Output::Ack(seq)).await?}
-   if size>32{let value=match model::decode_plist(&frame[32..]){Ok(v)=>v,Err(error)=>{crate::station_elog!("MRP frame skipped, bad plist: {error:#}");continue}};if let Some(data)=value.as_dictionary().and_then(|v|v.get("params")).and_then(Value::as_dictionary).and_then(|v|v.get("data")).and_then(Value::as_data){let messages=match wire::decode_packet(data){Ok(m)=>m,Err(error)=>{crate::station_elog!("MRP frame skipped, bad protobuf: {error:#}");continue}};for message in messages{if dispatch_output(&message,&control,&tx,&mut pending)?{continue;}let current=updates.borrow().clone();let typ=message.number(f("ProtocolMessage","type")).unwrap_or(0);let id=message.string(f("ProtocolMessage","identifier")).map(str::to_owned);let out=match handle(message,&identity,&current,&control,&mut subscribed).await{Ok(out)=>out,Err(error)=>{crate::station_elog!("MRP message type={typ} failed: {error:#}");if id.is_some(){vec![reply(id.as_deref(),6)]}else{Vec::new()}}};last=typ;if !out.is_empty(){tx.send(Output::Messages(out)).await?}}}}
+   if size>32{let value=match model::decode_plist(&frame[32..]){Ok(v)=>v,Err(error)=>{crate::station_elog!("MRP frame skipped, bad plist: {error:#}");continue}};if let Some(data)=value.as_dictionary().and_then(|v|v.get("params")).and_then(Value::as_dictionary).and_then(|v|v.get("data")).and_then(Value::as_data){let messages=match wire::decode_packet(data){Ok(m)=>m,Err(error)=>{crate::station_elog!("MRP frame skipped, bad protobuf: {error:#}");continue}};for message in messages{if dispatch_output(&message,&control,&tx,&mut pending)?{continue;}let current=updates.borrow().clone();if dispatch_remote_volume(&message,&identity,&current,&control,&tx,&mut pending)?{continue;}let typ=message.number(f("ProtocolMessage","type")).unwrap_or(0);let id=message.string(f("ProtocolMessage","identifier")).map(str::to_owned);let out=match handle(message,&identity,&current,&control,&mut subscribed).await{Ok(out)=>out,Err(error)=>{crate::station_elog!("MRP message type={typ} failed: {error:#}");if id.is_some(){vec![reply(id.as_deref(),6)]}else{Vec::new()}}};last=typ;if !out.is_empty(){tx.send(Output::Messages(out)).await?}}}}
   }},
   changed=updates.changed()=>{if changed.is_err(){break}let current=updates.borrow_and_update().clone();if subscribed{
    let mut output=Vec::new();if current.source!=previous.source{output.extend(model::announcement(&identity,&current));}else{output.extend(model::state_change(&identity,&previous,&current));}
@@ -312,6 +444,106 @@ mod tests {
     fn headers_are_fixed_size() {
         assert_eq!(framed(b"rply", 17, &[]).len(), 32);
         assert_eq!(&framed(b"sync", 17, b"123")[20..28], &17u64.to_be_bytes());
+    }
+    #[tokio::test]
+    async fn remote_volume_routes_without_changing_local_or_other_output() {
+        use crate::station_mrp::model::RemoteOutput;
+        let identity = Identity {
+            device: "local".into(),
+            group: "local-group".into(),
+        };
+        let remote = |uid: &str| RemoteOutput {
+            descriptor: Node::default()
+                .text(f("AVOutputDeviceDescriptor", "uniqueIdentifier"), uid)
+                .clone(),
+            volume: Some(0.2),
+        };
+        let before = Feed {
+            outputs: vec![remote("a"), remote("b")],
+            ..Default::default()
+        };
+        let (feed, _) = watch::channel(before.clone());
+        let (backend, mut requests) = crate::output_control::OutputControl::channel(4);
+        let control =
+            Control::new(feed.clone(), crate::remote::Remote::new()).with_outputs(backend);
+        let (tx, mut replies) = mpsc::channel(4);
+        let mut pending = tokio::task::JoinSet::new();
+        let mut body = Node::default();
+        body.text(f("SetVolumeMessage", "outputDeviceUID"), "a")
+            .float(f("SetVolumeMessage", "volume"), 0.3);
+        let message = model::envelope("SET_VOLUME_MESSAGE", body, Some("volume-id"));
+        assert!(
+            dispatch_remote_volume(&message, &identity, &before, &control, &tx, &mut pending)
+                .unwrap()
+        );
+        let request = requests.recv().await.unwrap();
+        assert_eq!(request.volume, Some(("a".into(), 0.3)));
+        request.reply.send(0).unwrap();
+        pending.join_next().await.unwrap().unwrap();
+        let current = feed.borrow().clone();
+        assert_eq!(current.volume, before.volume);
+        assert_eq!(current.outputs[0].volume, Some(0.3));
+        assert_eq!(current.outputs[1].volume, Some(0.2));
+        let changes = model::topology_updates(&identity, &before, &current);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(
+            changes[0].number(1),
+            Some(kind("VOLUME_DID_CHANGE_MESSAGE") as u64)
+        );
+        let Output::Messages(messages) = replies.recv().await.unwrap() else {
+            panic!("wrong output")
+        };
+        assert_eq!(
+            messages[0].string(f("ProtocolMessage", "identifier")),
+            Some("volume-id")
+        );
+        let body = Node::default()
+            .text(f("GetVolumeMessage", "outputDeviceUID"), "a")
+            .clone();
+        let replies = handle(
+            model::envelope("GET_VOLUME_MESSAGE", body, Some("get")),
+            &identity,
+            &current,
+            &control,
+            &mut false,
+        )
+        .await
+        .unwrap();
+        assert!(
+            (replies[0]
+                .nested(schema::extension(kind("GET_VOLUME_RESULT_MESSAGE")))
+                .unwrap()
+                .real(f("GetVolumeResultMessage", "volume"))
+                .unwrap()
+                - 0.3)
+                .abs()
+                < 1e-6
+        );
+        for name in ["GET_VOLUME_MESSAGE", "SET_VOLUME_MESSAGE"] {
+            let field = if name == "GET_VOLUME_MESSAGE" {
+                f("GetVolumeMessage", "outputDeviceUID")
+            } else {
+                f("SetVolumeMessage", "outputDeviceUID")
+            };
+            let mut body = Node(vec![(field, wire::Value::Bytes(vec![255]))]);
+            if name == "SET_VOLUME_MESSAGE" {
+                body.float(f("SetVolumeMessage", "volume"), 0.8);
+            }
+            let result = handle(
+                model::envelope(name, body, Some("bad")),
+                &identity,
+                &current,
+                &control,
+                &mut false,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                result[0].number(f("ProtocolMessage", "errorCode")),
+                Some(18)
+            );
+            assert_eq!(*feed.borrow(), current);
+        }
     }
 
     #[tokio::test]

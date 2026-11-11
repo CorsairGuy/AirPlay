@@ -121,6 +121,16 @@ pub async fn run_discovered(
         if request.reply.is_closed() {
             continue;
         }
+        if let Some((uid, value)) = request.volume.take() {
+            let code = match sender::Volume::normalized(value)
+                .and_then(|gain| pool.set_route_volume(&catalog, &uid, gain))
+            {
+                Ok(()) => 0,
+                Err(_) => 39,
+            };
+            let _ = request.reply.send(code);
+            continue;
+        }
         let current = confirmed(&pool, &catalog, &desired);
         let selection = relay_selection::selection(&request.body, &catalog, &local_ids, &current);
         let next = match selection {
