@@ -1,0 +1,11 @@
+syntax = "proto2";
+import "pyatv/protocols/mrp/protobuf/ProtocolMessage.proto";
+import "pyatv/protocols/mrp/protobuf/AVOutputDeviceDescriptor.proto";
+// Layout ported from Station authorization.rs/schema.rs, Claude 03d0277.
+extend ProtocolMessage {
+  optional PromptForRouteAuthorizationMessage promptForRouteAuthorizationMessage = 63;
+}
+message PromptForRouteAuthorizationMessage {
+  optional AVOutputDeviceDescriptor route = 1;
+  optional uint32 inputType = 2;
+}

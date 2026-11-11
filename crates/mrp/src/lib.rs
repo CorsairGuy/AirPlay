@@ -7,6 +7,7 @@
 //! [`messages`] — сообщения приёмника. Обработку запросов и рассылку
 //! изменений делает служба `mediaremote`.
 
+pub mod authorization;
 pub mod frame;
 pub mod messages;
 pub mod schema;

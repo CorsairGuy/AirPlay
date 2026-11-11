@@ -510,6 +510,17 @@ pub mod field {
         pub const playbackSessionRevision: u32 = 2;
         pub const playbackSessionPriority: u32 = 3;
     }
+    pub mod PresentRouteAuthorizationStatusMessage {
+        pub const route: u32 = 1;
+        pub const status: u32 = 2;
+    }
+    pub mod PromptForRouteAuthorizationMessage {
+        pub const route: u32 = 1;
+        pub const inputType: u32 = 2;
+    }
+    pub mod PromptForRouteAuthorizationResponseMessage {
+        pub const response: u32 = 1;
+    }
     pub mod ProtocolMessage {
         pub const audioFadeMessage: u32 = 88;
         pub const audioFadeResponseMessage: u32 = 89;
@@ -528,6 +539,9 @@ pub mod field {
         pub const originClientPropertiesMessage: u32 = 87;
         pub const playbackQueueRequestMessage: u32 = 37;
         pub const playerClientPropertiesMessage: u32 = 86;
+        pub const presentRouteAuthorizationStatusMessage: u32 = 65;
+        pub const promptForRouteAuthorizationMessage: u32 = 63;
+        pub const promptForRouteAuthorizationResponseMessage: u32 = 64;
         pub const r#type: u32 = 1;
         pub const identifier: u32 = 2;
         pub const authenticationToken: u32 = 3;
@@ -922,6 +936,9 @@ pub fn extension(kind: u32) -> Option<u32> {
         56 => Some(60),
         57 => Some(61),
         58 => Some(62),
+        59 => Some(63),
+        60 => Some(64),
+        61 => Some(65),
         64 => Some(68),
         65 => Some(69),
         66 => Some(70),
@@ -1787,6 +1804,11 @@ pub fn wire_type(message: &str, field: u32) -> Option<(u8, &'static str)> {
         ("PreloadedPlaybackSessionInfo", 1) => Some((2, "")),
         ("PreloadedPlaybackSessionInfo", 2) => Some((2, "")),
         ("PreloadedPlaybackSessionInfo", 3) => Some((0, "")),
+        ("PresentRouteAuthorizationStatusMessage", 1) => Some((2, "AVOutputDeviceDescriptor")),
+        ("PresentRouteAuthorizationStatusMessage", 2) => Some((0, "")),
+        ("PromptForRouteAuthorizationMessage", 1) => Some((2, "AVOutputDeviceDescriptor")),
+        ("PromptForRouteAuthorizationMessage", 2) => Some((0, "")),
+        ("PromptForRouteAuthorizationResponseMessage", 1) => Some((2, "")),
         ("ProtocolMessage", 88) => Some((2, "AudioFadeMessage")),
         ("ProtocolMessage", 89) => Some((2, "AudioFadeResponseMessage")),
         ("ProtocolMessage", 21) => Some((2, "ClientUpdatesConfigMessage")),
@@ -1804,6 +1826,9 @@ pub fn wire_type(message: &str, field: u32) -> Option<(u8, &'static str)> {
         ("ProtocolMessage", 87) => Some((2, "OriginClientPropertiesMessage")),
         ("ProtocolMessage", 37) => Some((2, "PlaybackQueueRequestMessage")),
         ("ProtocolMessage", 86) => Some((2, "PlayerClientPropertiesMessage")),
+        ("ProtocolMessage", 65) => Some((2, "PresentRouteAuthorizationStatusMessage")),
+        ("ProtocolMessage", 63) => Some((2, "PromptForRouteAuthorizationMessage")),
+        ("ProtocolMessage", 64) => Some((2, "PromptForRouteAuthorizationResponseMessage")),
         ("ProtocolMessage", 1) => Some((0, "")),
         ("ProtocolMessage", 2) => Some((2, "")),
         ("ProtocolMessage", 3) => Some((2, "")),

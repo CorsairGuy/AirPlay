@@ -1,0 +1,10 @@
+syntax = "proto2";
+import "pyatv/protocols/mrp/protobuf/ProtocolMessage.proto";
+import "pyatv/protocols/mrp/protobuf/AVOutputDeviceDescriptor.proto";
+extend ProtocolMessage {
+  optional PresentRouteAuthorizationStatusMessage presentRouteAuthorizationStatusMessage = 65;
+}
+message PresentRouteAuthorizationStatusMessage {
+  optional AVOutputDeviceDescriptor route = 1;
+  optional uint32 status = 2;
+}
