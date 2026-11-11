@@ -86,6 +86,33 @@ impl SessionPool {
         self.entries.is_empty()
     }
 
+    /// Apply distinct requested gains to physical session UIDs. Reject an
+    /// invalid/inactive/duplicate batch before changing any watch. As with
+    /// individual gain, later receiver failure can race an accepted revision.
+    pub fn set_member_volumes(&self, levels: &[(String, Volume)]) -> Result<()> {
+        if levels.is_empty() || levels.len() > 64 {
+            bail!("invalid volume batch size");
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        let mut changes = Vec::new();
+        for (uid, gain) in levels {
+            if !seen.insert(uid) {
+                bail!("duplicate member volume");
+            }
+            let handle = self
+                .handle(uid)
+                .ok_or_else(|| anyhow::anyhow!("inactive volume member"))?;
+            if *handle.state.borrow() != SessionState::Running {
+                bail!("inactive volume member");
+            }
+            changes.push((handle, *gain));
+        }
+        for (handle, gain) in changes {
+            handle.set_volume(gain)?;
+        }
+        Ok(())
+    }
+
     /// One logical row may cover multiple physical members. Preflight every
     /// member before publishing a gain revision; unrelated outputs are untouched.
     /// Success means control accepted, not receiver/acoustic acknowledgement.
@@ -354,6 +381,39 @@ mod tests {
             }
             Ok(stats)
         }).unwrap()
+    }
+    #[tokio::test]
+    async fn group_volume_batch_keeps_balance_and_rejects_missing_members() {
+        let (_source, packets) = broadcast::channel(16);
+        let mut pool = SessionPool::new(packets);
+        let (events, _received) = mpsc::unbounded_channel();
+        let a = add(&mut pool, "a", 7001, events.clone());
+        let b = add(&mut pool, "b", 7002, events);
+        let mut policy = crate::group_volume::GroupVolume::default();
+        let levels = policy
+            .plan(&[("a".into(), 0.1), ("b".into(), 0.3)], 0.2)
+            .unwrap();
+        let gains: Vec<_> = levels
+            .iter()
+            .map(|(id, v)| (id.clone(), Volume::normalized(*v).unwrap()))
+            .collect();
+        pool.set_member_volumes(&gains).unwrap();
+        assert_eq!(a.requested_volume(), gains[0].1);
+        assert_eq!(b.requested_volume(), gains[1].1);
+        assert_ne!(a.requested_volume(), b.requested_volume());
+        assert!(
+            pool.set_member_volumes(&[
+                ("a".into(), Volume::MUTE),
+                ("missing".into(), Volume::MUTE)
+            ])
+            .is_err()
+        );
+        assert_eq!(a.requested_volume(), gains[0].1);
+        assert!(
+            pool.set_member_volumes(&[("a".into(), Volume::MUTE), ("a".into(), Volume::MUTE)])
+                .is_err()
+        );
+        pool.shutdown().await;
     }
     #[tokio::test]
     async fn route_volume_is_independent_and_missing_member_fails_preflight() {
