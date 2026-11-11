@@ -12,6 +12,11 @@ use tokio::sync::{mpsc, watch};
 /// Application supplies authentication/configuration. Dropping this future
 /// must release pending pairing resources; do not detach network work here.
 pub trait SessionPreparer: Send {
+    /// Validated complete physical selection, before preparing any additions.
+    /// Pure configuration/preflight only: no I/O or mutation of live sessions.
+    fn selection(&mut self, _receivers: &[ReceiverEndpoint]) -> Result<()> {
+        Ok(())
+    }
     fn prepare(
         &mut self,
         receiver: ReceiverEndpoint,
@@ -166,6 +171,14 @@ pub async fn run_discovered(
                 continue;
             }
         };
+        let selection_ready = catalog
+            .receivers(&next)
+            .and_then(|receivers| preparer.selection(&receivers));
+        if selection_ready.is_err() {
+            let _ = request.reply.send(100);
+            last_error = Some(100);
+            continue;
+        }
         let prepare = async {
             let mut prepared = Vec::new();
             for receiver in plan.adding {
@@ -243,6 +256,41 @@ pub async fn run_discovered(
 mod tests {
     use super::*;
     use sender::outputs::OutputRoute;
+    struct RejectSelection(Arc<std::sync::atomic::AtomicBool>);
+    impl SessionPreparer for RejectSelection {
+        fn selection(&mut self, receivers: &[ReceiverEndpoint]) -> Result<()> {
+            assert_eq!(receivers.len(), 1);
+            anyhow::bail!("invalid offline selection")
+        }
+        async fn prepare(&mut self, _: ReceiverEndpoint) -> Result<Session> {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+            anyhow::bail!("authentication must not run")
+        }
+    }
+    #[tokio::test]
+    async fn selection_configuration_is_rejected_before_authentication() {
+        let (_source, audio) = tokio::sync::broadcast::channel(4);
+        let (control, requests) = crate::output_control::OutputControl::channel(4);
+        let (updates, _) = watch::channel(Snapshot::default());
+        let (stop, stopped) = watch::channel(false);
+        let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let task = tokio::spawn(run(
+            SessionPool::new(audio),
+            requests,
+            catalog(),
+            vec![],
+            RejectSelection(entered.clone()),
+            updates,
+            stopped,
+        ));
+        let reply = control
+            .submit(mrp::wire::Node::default().text(2, "row").clone())
+            .unwrap();
+        assert_eq!(reply.await.unwrap(), 100);
+        assert!(!entered.load(std::sync::atomic::Ordering::SeqCst));
+        stop.send_replace(true);
+        task.await.unwrap();
+    }
     struct RecordFailure(Arc<std::sync::Mutex<Vec<std::net::SocketAddr>>>);
     impl SessionPreparer for RecordFailure {
         async fn prepare(&mut self, receiver: ReceiverEndpoint) -> Result<Session> {

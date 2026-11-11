@@ -156,6 +156,10 @@ struct QualifiedPreparer<P> {
     group: u128,
 }
 impl<P: SessionPreparer> SessionPreparer for QualifiedPreparer<P> {
+    fn selection(&mut self, receivers: &[ReceiverEndpoint]) -> Result<()> {
+        self.timeline.reading_at(std::time::Instant::now())?;
+        self.inner.selection(receivers)
+    }
     async fn prepare(&mut self, receiver: ReceiverEndpoint) -> Result<Session> {
         self.timeline.reading_at(std::time::Instant::now())?;
         let session = self.inner.prepare(receiver).await?;

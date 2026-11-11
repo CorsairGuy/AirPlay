@@ -104,6 +104,18 @@ impl PtpPacketizer {
     }
 }
 impl PtpPlan {
+    /// Derive a new connection plan for the selected physical receivers while
+    /// retaining the group's clock/epoch, identity and local addresses. Existing
+    /// sessions still need their live SETPEERS update; this does not mutate them.
+    pub fn with_receivers(&self, receivers: Vec<IpAddr>) -> Result<Self> {
+        Self::new(
+            self.context.clone(),
+            self.domain,
+            self.peer_id,
+            self.local_addresses.clone(),
+            receivers,
+        )
+    }
     pub fn peer_update(&self, receivers: &[IpAddr]) -> Result<PeerUpdate> {
         group::peers(receivers)?;
         let mut addresses = Vec::new();
@@ -225,6 +237,22 @@ mod tests {
             vec!["192.0.2.2".parse().unwrap(), "192.0.2.2".parse().unwrap()],
         )
         .unwrap()
+    }
+    #[test]
+    fn new_selection_changes_connection_peers_without_changing_clock_or_old_plan() {
+        let old = plan();
+        let ip = "192.0.2.3".parse().unwrap();
+        let next = old.with_receivers(vec![ip]).unwrap();
+        assert!(next.has_receiver(ip));
+        assert!(!old.has_receiver(ip));
+        assert_eq!(next.domain(), old.domain());
+        assert_eq!(next.group().uuid(), old.group().uuid());
+        assert_eq!(
+            next.setup(&Identity::new("test", "test"), 7).unwrap(),
+            old.setup(&Identity::new("test", "test"), 7).unwrap()
+        );
+        assert_ne!(next.setpeers().unwrap(), old.setpeers().unwrap());
+        assert!(old.with_receivers(vec![]).is_err());
     }
     #[test]
     fn peer_updates_are_sets_but_clock_epoch_and_group_remain_significant() {

@@ -45,6 +45,17 @@ impl StoredSessionPreparer {
     }
 }
 impl SessionPreparer for StoredSessionPreparer {
+    fn selection(&mut self, receivers: &[ReceiverEndpoint]) -> Result<()> {
+        if let Some(plan) = &self.template.ptp {
+            // Empty selection creates no sessions. Retain only the immutable
+            // clock/group template; the next nonempty selection replaces peers.
+            if !receivers.is_empty() {
+                self.template.ptp =
+                    Some(plan.with_receivers(receivers.iter().map(|r| r.address.ip()).collect())?);
+            }
+        }
+        Ok(())
+    }
     async fn prepare(&mut self, receiver: ReceiverEndpoint) -> Result<Session> {
         // Session::connect handles a single selected authentication path.
         // Dropping this future releases its connection; do not spawn/retry it.
@@ -98,6 +109,53 @@ mod tests {
                 .to_string()
                 .contains("persistent authorization")
         );
+    }
+    #[test]
+    fn selected_receivers_replace_initial_ptp_peers_and_invalid_change_is_atomic() {
+        let dir = Temp::new();
+        let store = Arc::new(SenderStore::open(&dir.0).unwrap());
+        let mut config = template();
+        let local = "127.0.0.1".parse().unwrap();
+        config.ptp = Some(
+            sender::timing::PtpPlan::new(
+                sender::group::GroupContext::new(42, sender::group::ClockDomain::Ptp(7), true)
+                    .unwrap(),
+                clock::domain::Domain::new(7, 1).unwrap(),
+                99,
+                vec![local],
+                vec!["127.0.0.2".parse().unwrap()],
+            )
+            .unwrap(),
+        );
+        let mut preparer = StoredSessionPreparer::new(
+            config,
+            store,
+            AuthenticationPolicy::AllowTransientForUnpaired,
+        );
+        let mut target = receiver("new");
+        target.address.set_ip("127.0.0.3".parse().unwrap());
+        preparer.selection(&[target.clone()]).unwrap();
+        let selected = preparer.config(&target).unwrap().ptp.unwrap();
+        assert_eq!(
+            selected.setpeers().unwrap(),
+            sender::group::peers(&[target.address.ip(), local]).unwrap()
+        );
+        assert_eq!(selected.domain(), clock::domain::Domain::new(7, 1).unwrap());
+        let before = selected.setpeers().unwrap();
+        let mut invalid = target.clone();
+        invalid.address.set_ip("224.0.0.1".parse().unwrap());
+        assert!(preparer.selection(&[invalid]).is_err());
+        assert_eq!(
+            preparer
+                .config(&target)
+                .unwrap()
+                .ptp
+                .unwrap()
+                .setpeers()
+                .unwrap(),
+            before
+        );
+        preparer.selection(&[]).unwrap();
     }
     #[test]
     fn credentials_follow_uid_and_never_inherit_template_pairing() {
