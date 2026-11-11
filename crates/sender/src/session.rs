@@ -80,6 +80,9 @@ pub struct SessionConfig {
     /// Receiver latency in 44.1kHz frames (250ms..2s for this stream format).
     pub latency_frames: u32,
     pub volume: Volume,
+    /// Leave the receiver's gain untouched until the caller publishes a volume
+    /// revision. The initial watch value is a placeholder in this mode.
+    pub preserve_receiver_volume: bool,
     pub request_timeout: Duration,
 }
 
@@ -90,6 +93,7 @@ impl SessionConfig {
             identity,
             latency_frames: 22_050,
             volume: Volume(-30.0),
+            preserve_receiver_volume: false,
             request_timeout: Duration::from_secs(8),
         }
     }
@@ -356,7 +360,9 @@ impl Session {
                 ],
             )
             .await?;
-            apply_volume(&mut rtsp, config.volume).await?;
+            if !config.preserve_receiver_volume {
+                apply_volume(&mut rtsp, config.volume).await?;
+            }
             let audio = UdpSocket::bind((local_ip, 0)).await?;
             audio
                 .connect(SocketAddr::new(config.endpoint.ip(), data_port))
@@ -433,7 +439,11 @@ impl Session {
             rtsp,
             volume,
             stopping,
-            self.config.volume,
+            if self.config.preserve_receiver_volume {
+                None
+            } else {
+                Some(self.config.volume)
+            },
         )));
         let result = tokio::select! {
             result = self.stream(&mut audio, &mut stop, progress.as_ref()) => result,
@@ -548,9 +558,11 @@ async fn control_owner(
     mut rtsp: Rtsp,
     mut volume: watch::Receiver<Volume>,
     mut stop: watch::Receiver<bool>,
-    mut current: Volume,
+    mut current: Option<Volume>,
 ) -> Result<u64> {
     let mut updates = 0;
+    let mut requested = false;
+    let mut volume_open = true;
     let mut feedback = tokio::time::interval_at(
         tokio::time::Instant::now() + Duration::from_secs(2),
         Duration::from_secs(2),
@@ -564,11 +576,24 @@ async fn control_owner(
         }
         tokio::select! {
             _ = volume_tick.tick() => {
+                // Preserve mode needs a published revision, including an explicit
+                // request equal to the placeholder. Never consume a queued user
+                // update merely to establish a baseline at run() entry.
+                if current.is_none() && !requested {
+                    continue;
+                }
                 let desired = *volume.borrow_and_update();
-                if desired != current {
+                requested = false;
+                if Some(desired) != current {
                     apply_volume(&mut rtsp, desired).await?;
-                    current = desired;
+                    current = Some(desired);
                     updates += 1;
+                }
+            }
+            changed = volume.changed(), if volume_open => {
+                match changed {
+                    Ok(()) => requested = true,
+                    Err(_) => volume_open = false,
                 }
             }
             _ = feedback.tick() => {
@@ -673,6 +698,66 @@ async fn timing_server(socket: Arc<UdpSocket>, peer: std::net::IpAddr) {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn preserve_volume_ignores_placeholder_but_applies_explicit_same_value() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        let (events, mut received) = tokio::sync::mpsc::channel(4);
+        let peer = tokio::spawn(async move {
+            let mut connection = Connection::new(server);
+            loop {
+                let request = connection.event_request().await.unwrap();
+                let teardown = request.method == "TEARDOWN";
+                events.send(request.method.clone()).await.unwrap();
+                let mut bytes = Vec::new();
+                rtsp::Response::to(&request, 200).encode(&mut bytes);
+                connection.send(&bytes).await.unwrap();
+                if teardown {
+                    break;
+                }
+            }
+        });
+        let rtsp = Rtsp::new(
+            Connection::new(client),
+            "rtsp://test/1".into(),
+            "test".into(),
+            1,
+            Duration::from_secs(1),
+        );
+        let placeholder = Volume::db(-30.0).unwrap();
+        let (volume, changes) = watch::channel(placeholder);
+        let (stop, stopped) = watch::channel(false);
+        let owner = tokio::spawn(control_owner(rtsp, changes, stopped, None));
+        assert!(
+            timeout(Duration::from_millis(230), received.recv())
+                .await
+                .is_err()
+        );
+        volume.send_replace(placeholder);
+        // The last published request must survive the writer closing too.
+        drop(volume);
+        assert_eq!(
+            timeout(Duration::from_secs(1), received.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            "SET_PARAMETER"
+        );
+        stop.send_replace(true);
+        assert_eq!(
+            timeout(Duration::from_secs(1), owner)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            1
+        );
+        assert_eq!(received.recv().await.unwrap(), "TEARDOWN");
+        peer.await.unwrap();
+    }
     #[test]
     fn negotiated_render_min_is_validated_and_absence_uses_request() {
         assert_eq!(super::receiver_render_frames(None).unwrap(), 11_025);

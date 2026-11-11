@@ -8,6 +8,8 @@ Station cf1894c corrected double-counting250ms and user confirmed acoustic align
 
 ## Remaining port inventory
 
+Second port: SessionConfig.preserve_receiver_volume defaults false for compatibility. When enabled, SETUP sends no initial volume; the run control worker waits for an explicit watch revision, including one equal to the initial placeholder. A queued final request is retained even when its writer closes. Coalescing and RTSP/media isolation remain. Offline RTP/sender tests:43 passed. This is a library policy only; CLI/group adapter wiring remains to be migrated.
+
 | Area | Station source | Core status / next dependency |
 |---|---|---|
 | Persistent pairing, native PIN UI | station-onepath29dcc54..13cf9f2; remote equivalents | Core pair primitives exist; sender persistence and MRP59/60/61 orchestration need audit/port |
