@@ -76,6 +76,42 @@ impl SessionPool {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    /// Snapshot a desired selection against live workers, without starting or
+    /// stopping anything. Completed workers must be removed before re-adding;
+    /// they cannot satisfy a desired selection merely because their UID exists.
+    /// This snapshot is not a transaction or a reservation against later failure.
+    pub fn plan_selection(
+        &self,
+        catalog: &crate::outputs::OutputCatalog,
+        selected: &[String],
+    ) -> Result<crate::outputs::SelectionPlan> {
+        use crate::outputs::ReceiverEndpoint;
+        let current: Vec<_> = self
+            .entries
+            .iter()
+            .map(|(uid, entry)| ReceiverEndpoint {
+                uid: uid.clone(),
+                address: entry.endpoint,
+            })
+            .collect();
+        let mut plan = catalog.plan(&current, selected)?;
+        let mut retained = Vec::new();
+        for receiver in plan.retained {
+            if self
+                .entries
+                .get(&receiver.uid)
+                .is_some_and(|e| *e.handle.state.borrow() == SessionState::Running)
+            {
+                retained.push(receiver);
+            } else {
+                plan.removing.push(receiver.clone());
+                plan.adding.push(receiver);
+            }
+        }
+        plan.retained = retained;
+        Ok(plan)
+    }
     /// Accept a prepared session without resetting existing targets or media clock.
     pub fn add(&mut self, uid: &str, session: Session) -> Result<SessionHandle> {
         let endpoint = session.endpoint();
@@ -228,6 +264,62 @@ mod tests {
             }
             Ok(stats)
         }).unwrap()
+    }
+    #[tokio::test]
+    async fn selection_plan_retains_live_worker_but_replaces_completed_worker() {
+        use crate::outputs::{OutputCatalog, OutputRoute, ReceiverEndpoint};
+        let (_audio, packets) = broadcast::channel(16);
+        let mut pool = SessionPool::new(packets);
+        let (events, _received) = mpsc::unbounded_channel();
+        let live = add(&mut pool, "a", 7001, events);
+        let mut ended = pool
+            .launch(
+                "b",
+                ([127, 0, 0, 1], 7002).into(),
+                Volume::MUTE,
+                Duration::from_secs(1),
+                |_, _, _, _| async { Ok(StreamStats::default()) },
+            )
+            .unwrap();
+        while *ended.state.borrow_and_update() == SessionState::Running {
+            ended.state.changed().await.unwrap();
+        }
+        let catalog = OutputCatalog::new(vec![OutputRoute {
+            uid: "pair".into(),
+            name: "pair".into(),
+            model: "".into(),
+            aliases: vec![],
+            receivers: vec![
+                ReceiverEndpoint {
+                    uid: "a".into(),
+                    address: ([127, 0, 0, 1], 7001).into(),
+                },
+                ReceiverEndpoint {
+                    uid: "b".into(),
+                    address: ([127, 0, 0, 1], 7002).into(),
+                },
+            ],
+        }])
+        .unwrap();
+        let plan = pool.plan_selection(&catalog, &["pair".into()]).unwrap();
+        assert_eq!(
+            plan.retained
+                .iter()
+                .map(|r| r.uid.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a"]
+        );
+        assert_eq!(
+            plan.adding
+                .iter()
+                .map(|r| r.uid.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b"]
+        );
+        assert_eq!(plan.removing, plan.adding);
+        assert_eq!(pool.len(), 2);
+        assert_eq!(*live.state.borrow(), SessionState::Running);
+        pool.shutdown().await;
     }
     #[tokio::test]
     async fn add_remove_and_failure_do_not_restart_surviving_receivers() {

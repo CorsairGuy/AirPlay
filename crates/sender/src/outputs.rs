@@ -27,6 +27,16 @@ pub struct OutputCatalog {
     routes: Vec<OutputRoute>,
 }
 
+/// A side-effect-free replacement plan. Authenticate additions before applying
+/// it; only commit the UI selection after the runtime confirms the changes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SelectionPlan {
+    pub selected: Vec<String>,
+    pub adding: Vec<ReceiverEndpoint>,
+    pub removing: Vec<ReceiverEndpoint>,
+    pub retained: Vec<ReceiverEndpoint>,
+}
+
 fn key(uid: &str) -> String {
     // UUIDs are case-insensitive; arbitrary opaque IDs are not.
     let bytes = uid.as_bytes();
@@ -49,6 +59,55 @@ fn valid_uid(uid: &str) -> bool {
 }
 
 impl OutputCatalog {
+    /// Compare actual runtime endpoints with a complete desired logical selection.
+    /// Removing one overlapping row keeps receivers required by another row.
+    /// A changed address for the same UID requires an explicit session replacement.
+    pub fn plan(&self, current: &[ReceiverEndpoint], selected: &[String]) -> Result<SelectionPlan> {
+        let desired = self.receivers(selected)?;
+        let mut selected_ids = BTreeSet::new();
+        let mut canonical = Vec::new();
+        for id in selected {
+            let route = self.resolve(id)?;
+            if selected_ids.insert(key(&route.uid)) {
+                canonical.push(route.uid.clone());
+            }
+        }
+        let mut old = BTreeMap::new();
+        let mut addresses = BTreeSet::new();
+        if current.len() > 64 {
+            bail!("too many current receivers");
+        }
+        for receiver in current {
+            if !valid_uid(&receiver.uid)
+                || old.insert(key(&receiver.uid), receiver).is_some()
+                || !addresses.insert(receiver.address)
+            {
+                bail!("ambiguous current receiver identity");
+            }
+        }
+        let same = |a: &ReceiverEndpoint, b: &ReceiverEndpoint| {
+            key(&a.uid) == key(&b.uid) && a.address == b.address
+        };
+        Ok(SelectionPlan {
+            selected: canonical,
+            adding: desired
+                .iter()
+                .filter(|r| !current.iter().any(|c| same(r, c)))
+                .cloned()
+                .collect(),
+            removing: current
+                .iter()
+                .filter(|r| !desired.iter().any(|d| same(r, d)))
+                .cloned()
+                .collect(),
+            // Preserve runtime UID spelling for existing handles.
+            retained: current
+                .iter()
+                .filter(|r| desired.iter().any(|d| same(r, d)))
+                .cloned()
+                .collect(),
+        })
+    }
     pub fn new(routes: Vec<OutputRoute>) -> Result<Self> {
         if routes.len() > 64 {
             bail!("too many logical outputs");
@@ -168,6 +227,42 @@ mod tests {
             aliases: vec![],
             receivers: peers,
         }
+    }
+    #[test]
+    fn selection_delta_retains_shared_members_and_canonicalizes_aliases() {
+        let a = peer("a", 7001);
+        let b = peer("b", 7002);
+        let mut theater = route("theater", vec![a.clone(), b.clone()]);
+        theater.aliases.push("alias".into());
+        let catalog = OutputCatalog::new(vec![theater, route("single", vec![a.clone()])]).unwrap();
+        let plan = catalog
+            .plan(&[a.clone(), b.clone()], &["single".into()])
+            .unwrap();
+        assert_eq!(plan.retained, vec![a.clone()]);
+        assert_eq!(plan.removing, vec![b]);
+        assert!(plan.adding.is_empty());
+        let plan = catalog
+            .plan(&[a], &["alias".into(), "theater".into()])
+            .unwrap();
+        assert_eq!(plan.selected, vec!["theater"]);
+        assert_eq!(plan.adding.len(), 1);
+        assert!(plan.removing.is_empty());
+    }
+    #[test]
+    fn changed_address_requires_replacement_and_empty_selection_removes_all() {
+        let old = peer("a", 7001);
+        let new = peer("a", 7002);
+        let catalog = OutputCatalog::new(vec![route("single", vec![new.clone()])]).unwrap();
+        let plan = catalog.plan(&[old.clone()], &["single".into()]).unwrap();
+        assert_eq!(plan.adding, vec![new]);
+        assert_eq!(plan.removing, vec![old.clone()]);
+        assert!(plan.retained.is_empty());
+        assert_eq!(
+            catalog.plan(&[old.clone()], &[]).unwrap().removing,
+            vec![old.clone()]
+        );
+        assert!(catalog.plan(&[old.clone(), old], &[]).is_err());
+        assert!(catalog.plan(&[], &["missing".into()]).is_err());
     }
     #[test]
     fn theater_selection_expands_members_and_deduplicates_overlapping_rows() {
