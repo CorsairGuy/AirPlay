@@ -12,6 +12,7 @@ pub mod local_process;
 pub mod media;
 #[cfg(test)]
 mod mrp_path_tests;
+pub mod relay_selection;
 pub mod remote;
 pub mod route_pairing;
 pub mod send;
