@@ -204,6 +204,27 @@ pub async fn run_controlled<R: AsyncRead + Unpin>(
     run_inner(options, input, stop, None, Some(control)).await
 }
 
+/// Resolve UI logical rows before the existing controlled sender opens any
+/// connection. Discovery/catalog ownership stays with the embedding application.
+pub async fn run_selected<R: AsyncRead + Unpin>(
+    mut options: Options,
+    catalog: &sender::outputs::OutputCatalog,
+    selected: &[String],
+    input: R,
+    stop: watch::Receiver<bool>,
+    control: crate::send_control::RelayControl,
+) -> Result<()> {
+    if !options.targets.is_empty() {
+        bail!("logical routes and explicit targets cannot be combined");
+    }
+    options.targets = catalog
+        .receivers(selected)?
+        .into_iter()
+        .map(|receiver| receiver.address.to_string())
+        .collect();
+    run_controlled(options, input, stop, control).await
+}
+
 /// Optional platform renderer, fed from the same clock and immutable packet queue.
 /// The adapter owns its output latency, gain, startup gate and resource cleanup.
 /// No route is changed by this API; platform handoff requires separate validation.
@@ -451,15 +472,20 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn sender_to_receiver_delivers_big_endian_stereo_samples() {
-        loopback(false).await;
+        loopback(false, false).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn local_and_remote_outputs_share_pcm_and_presentation_deadlines() {
-        loopback(true).await;
+        loopback(true, false).await;
     }
 
-    async fn loopback(with_local: bool) {
+    #[tokio::test]
+    async fn selected_logical_route_reaches_receiver_once_despite_overlapping_alias() {
+        loopback(false, true).await;
+    }
+
+    async fn loopback(with_local: bool, with_routes: bool) {
         use crate::{media::Player, session::Context as ReceiverContext};
         use audio::Sink;
         use device::{DeviceInfo, Features};
@@ -543,7 +569,7 @@ mod tests {
             pcm.extend_from_slice(&0x1234_i16.to_be_bytes());
             pcm.extend_from_slice(&(-0x2345_i16).to_be_bytes());
         }
-        let options = Options {
+        let mut options = Options {
             targets: vec![address.to_string()],
             volume_db: 0.0,
             latency_ms: 250,
@@ -595,6 +621,28 @@ mod tests {
                     std::io::Cursor::new(pcm),
                     stopped,
                     LocalCapture(local_seen.clone()),
+                    control.clone(),
+                )
+                .await
+            } else if with_routes {
+                use sender::outputs::{OutputCatalog, OutputRoute, ReceiverEndpoint};
+                let catalog = OutputCatalog::new(vec![OutputRoute {
+                    uid: "logical-output".into(),
+                    name: "Output".into(),
+                    model: "AirPlay".into(),
+                    aliases: vec!["group-alias".into()],
+                    receivers: vec![ReceiverEndpoint {
+                        uid: "receiver".into(),
+                        address,
+                    }],
+                }])?;
+                options.targets.clear();
+                run_selected(
+                    options,
+                    &catalog,
+                    &["logical-output".into(), "group-alias".into()],
+                    std::io::Cursor::new(pcm),
+                    stopped,
                     control.clone(),
                 )
                 .await

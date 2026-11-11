@@ -67,6 +67,36 @@ impl RelayControl {
         target.volume.send_replace(volume);
         Ok(())
     }
+    /// One logical output row, e.g. a stereo pair. This sets its absolute level;
+    /// overall multiroom master-volume balance is a separate adapter policy.
+    pub fn set_route_volume(
+        &self,
+        catalog: &sender::outputs::OutputCatalog,
+        uid: &str,
+        volume: Volume,
+    ) -> Result<()> {
+        let receivers = catalog.receivers(&[uid.to_owned()])?;
+        let state = self.0.lock().unwrap();
+        if !state.active
+            || receivers
+                .iter()
+                .any(|receiver| !state.targets.contains_key(&receiver.address))
+        {
+            bail!("logical output has inactive members");
+        }
+        for receiver in receivers {
+            state.targets[&receiver.address].volume.send_replace(volume);
+        }
+        Ok(())
+    }
+    pub fn set_member_volume(
+        &self,
+        catalog: &sender::outputs::OutputCatalog,
+        uid: &str,
+        volume: Volume,
+    ) -> Result<()> {
+        self.set_volume(catalog.receiver(uid)?.address, volume)
+    }
     pub fn progress(&self, endpoint: SocketAddr) -> Option<watch::Receiver<Option<MediaProgress>>> {
         self.0
             .lock()
@@ -116,6 +146,53 @@ impl Drop for RunGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn logical_row_volume_is_atomic_and_member_volume_remains_independent() {
+        use sender::outputs::{OutputCatalog, OutputRoute, ReceiverEndpoint};
+        let a = "127.0.0.1:7001".parse().unwrap();
+        let b = "127.0.0.1:7002".parse().unwrap();
+        let catalog = OutputCatalog::new(vec![OutputRoute {
+            uid: "theater".into(),
+            name: "Home Theater".into(),
+            model: "Group".into(),
+            aliases: vec!["group-alias".into()],
+            receivers: vec![
+                ReceiverEndpoint {
+                    uid: "a".into(),
+                    address: a,
+                },
+                ReceiverEndpoint {
+                    uid: "b".into(),
+                    address: b,
+                },
+            ],
+        }])
+        .unwrap();
+        let control = RelayControl::default();
+        let _guard = control.claim(2).unwrap();
+        let (va, ra) = watch::channel(Volume::db(-30.0).unwrap());
+        let (_, ma) = watch::channel(None);
+        control.register(a, va, ma);
+        assert!(
+            control
+                .set_route_volume(&catalog, "theater", Volume::db(-20.0).unwrap())
+                .is_err()
+        );
+        assert_eq!(ra.borrow().as_db(), -30.0);
+        let (vb, rb) = watch::channel(Volume::db(-30.0).unwrap());
+        let (_, mb) = watch::channel(None);
+        control.register(b, vb, mb);
+        control
+            .set_member_volume(&catalog, "a", Volume::db(-25.0).unwrap())
+            .unwrap();
+        assert_eq!(ra.borrow().as_db(), -25.0);
+        assert_eq!(rb.borrow().as_db(), -30.0);
+        control
+            .set_route_volume(&catalog, "group-alias", Volume::db(-20.0).unwrap())
+            .unwrap();
+        assert_eq!(ra.borrow().as_db(), -20.0);
+        assert_eq!(rb.borrow().as_db(), -20.0);
+    }
     #[test]
     fn targets_have_independent_coalesced_volumes_and_stale_handles_are_cleared() {
         let handle = RelayControl::default();

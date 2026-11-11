@@ -82,6 +82,24 @@ impl OutputCatalog {
     pub fn routes(&self) -> &[OutputRoute] {
         &self.routes
     }
+    pub fn receiver(&self, uid: &str) -> Result<&ReceiverEndpoint> {
+        if !valid_uid(uid) {
+            bail!("invalid receiver identifier");
+        }
+        let uid = key(uid);
+        let mut matches = self
+            .routes
+            .iter()
+            .flat_map(|route| &route.receivers)
+            .filter(|receiver| key(&receiver.uid) == uid);
+        let receiver = matches
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("unknown receiver identifier"))?;
+        if matches.any(|other| other.address != receiver.address) {
+            bail!("conflicting receiver addresses");
+        }
+        Ok(receiver)
+    }
     pub fn resolve(&self, uid: &str) -> Result<&OutputRoute> {
         if !valid_uid(uid) {
             bail!("invalid output identifier");
@@ -185,6 +203,7 @@ mod tests {
         ])
         .unwrap();
         assert!(catalog.receivers(&["a".into(), "b".into()]).is_err());
+        assert!(catalog.receiver("one").is_err());
         let mut a = route("a", vec![peer("one", 7001)]);
         a.receivers.push(peer("two", 7001));
         assert!(
