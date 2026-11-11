@@ -54,9 +54,8 @@ fn publish(updates: &watch::Sender<Snapshot>, value: Snapshot) {
     });
 }
 
-/// Own one pool/queue pair. `catalog` is an immutable discovery snapshot: callers
-/// must refresh the owner explicitly when discovery changes, not mutate aliases
-/// during authentication. The producer remains owned by the application.
+/// Own one pool/queue pair with a static catalog. For live discovery use
+/// run_discovered; the PCM producer remains owned by the application.
 ///
 /// Preparation is cancellable on controller loss/stop; applying a validated
 /// change finishes bounded teardown even if the controller leaves. Shutdown
@@ -65,14 +64,36 @@ fn publish(updates: &watch::Sender<Snapshot>, value: Snapshot) {
 /// which this shared preparer interface does not yet carry. Never share one
 /// controller's PIN channels across requests from different controllers.
 pub async fn run(
+    pool: SessionPool,
+    requests: mpsc::Receiver<OutputRequest>,
+    catalog: Arc<OutputCatalog>,
+    local_ids: Vec<String>,
+    preparer: impl SessionPreparer,
+    updates: watch::Sender<Snapshot>,
+    stop: watch::Receiver<bool>,
+) {
+    let (_catalog_owner, discovery) = watch::channel(catalog);
+    run_discovered(
+        pool, requests, discovery, local_ids, preparer, updates, stop,
+    )
+    .await;
+}
+
+/// Observe catalog updates without restarting active sessions. Selected rows
+/// stay pinned; inactive rows use fresh discovery. Revalidate pending additions
+/// against the newest catalog before any pool mutation. No automatic reconnect.
+pub async fn run_discovered(
     mut pool: SessionPool,
     mut requests: mpsc::Receiver<OutputRequest>,
-    catalog: Arc<OutputCatalog>,
+    mut discovery: watch::Receiver<Arc<OutputCatalog>>,
     local_ids: Vec<String>,
     mut preparer: impl SessionPreparer,
     updates: watch::Sender<Snapshot>,
     mut stop: watch::Receiver<bool>,
 ) {
+    let mut discovered = discovery.borrow_and_update().clone();
+    let mut catalog = discovered.clone();
+    let mut discovery_open = true;
     let mut desired = Vec::new();
     let mut last_error = None;
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(250));
@@ -82,6 +103,15 @@ pub async fn run(
         let mut request = tokio::select! {
             biased;
             _ = stopped(&mut stop) => break,
+            changed = discovery.changed(), if discovery_open => {
+                if changed.is_err() { discovery_open=false; continue; }
+                discovered = discovery.borrow_and_update().clone();
+                match discovered.preserving_selected(&catalog,&desired) {
+                    Ok(next) => catalog=Arc::new(next),
+                    Err(_) => last_error=Some(39),
+                }
+                continue;
+            }
             request = requests.recv() => match request { Some(request) => request, None => break },
             _ = tick.tick() => {
                 publish(&updates,Snapshot {selected: confirmed(&pool,&catalog,&desired),last_error});
@@ -123,11 +153,36 @@ pub async fn run(
             _ = request.reply.closed() => continue,
             result = prepare => result,
         };
+        // Authentication may have taken seconds. Do not start a receiver at a
+        // stale/reassigned address or apply an alias that now means another row.
+        if discovery.has_changed().unwrap_or(true) {
+            // A closed watch can still contain a final, unseen snapshot.
+            discovered = discovery.borrow_and_update().clone();
+            let refreshed = discovered.preserving_selected(&catalog, &desired);
+            let still_matches = refreshed.as_ref().is_ok_and(|fresh| {
+                relay_selection::selection(&request.body, fresh, &local_ids, &current)
+                    .is_ok_and(|value| value == next)
+                    && fresh.receivers(&next).ok() == catalog.receivers(&next).ok()
+            });
+            if let Ok(fresh) = refreshed {
+                catalog = Arc::new(fresh);
+            }
+            if !still_matches {
+                let _ = request.reply.send(100);
+                last_error = Some(100);
+                continue;
+            }
+        }
         let code = match prepared {
             Err(_) => 100,
             Ok(prepared) => match pool.apply_selection(&catalog, &next, prepared).await {
                 Ok(result) => {
                     desired = next;
+                    // Release deselected pins immediately, even if discovery
+                    // sends no further update before the next selection.
+                    if let Ok(fresh) = discovered.preserving_selected(&catalog, &desired) {
+                        catalog = Arc::new(fresh);
+                    }
                     if result.start_errors.is_empty() {
                         0
                     } else {
@@ -161,6 +216,54 @@ pub async fn run(
 mod tests {
     use super::*;
     use sender::outputs::OutputRoute;
+    struct RecordFailure(Arc<std::sync::Mutex<Vec<std::net::SocketAddr>>>);
+    impl SessionPreparer for RecordFailure {
+        async fn prepare(&mut self, receiver: ReceiverEndpoint) -> Result<Session> {
+            self.0.lock().unwrap().push(receiver.address);
+            anyhow::bail!("offline test: no network connection permitted")
+        }
+    }
+    #[tokio::test]
+    async fn live_discovery_changes_are_used_without_restarting_worker() {
+        let (_source, audio) = tokio::sync::broadcast::channel(4);
+        let (control, requests) = crate::output_control::OutputControl::channel(4);
+        let (updates, _) = watch::channel(Snapshot::default());
+        let (stop, stopped) = watch::channel(false);
+        let (discovery, catalogs) = watch::channel(Arc::new(OutputCatalog::new(vec![]).unwrap()));
+        let recorded = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let task = tokio::spawn(run_discovered(
+            SessionPool::new(audio),
+            requests,
+            catalogs,
+            vec![],
+            RecordFailure(recorded.clone()),
+            updates,
+            stopped,
+        ));
+        let select = || mrp::wire::Node::default().text(2, "row").clone();
+        assert_eq!(control.submit(select()).unwrap().await.unwrap(), 39);
+        discovery.send_replace(catalog());
+        assert_eq!(control.submit(select()).unwrap().await.unwrap(), 100);
+        assert_eq!(recorded.lock().unwrap().len(), 1);
+        // A changed inactive endpoint must be used by the same worker.
+        let next = OutputCatalog::new(vec![OutputRoute {
+            uid: "row".into(),
+            name: "speaker".into(),
+            model: "".into(),
+            aliases: vec![],
+            receivers: vec![ReceiverEndpoint {
+                uid: "peer".into(),
+                address: ([127, 0, 0, 1], 7001).into(),
+            }],
+        }])
+        .unwrap();
+        discovery.send_replace(Arc::new(next));
+        drop(discovery);
+        assert_eq!(control.submit(select()).unwrap().await.unwrap(), 100);
+        assert_eq!(recorded.lock().unwrap().last().unwrap().port(), 7001);
+        stop.send_replace(true);
+        task.await.unwrap();
+    }
     struct Blocked(Arc<std::sync::atomic::AtomicUsize>);
     struct Guard(Arc<std::sync::atomic::AtomicUsize>);
     impl Drop for Guard {

@@ -59,6 +59,27 @@ fn valid_uid(uid: &str) -> bool {
 }
 
 impl OutputCatalog {
+    /// Refresh discovery while keeping selected rows pinned to the endpoints
+    /// already in use. A transient advertisement loss/address change must not
+    /// silently move or tear down an active receiver. Deselection releases pins.
+    pub fn preserving_selected(&self, previous: &Self, selected: &[String]) -> Result<Self> {
+        let mut pinned = Vec::new();
+        let mut seen = BTreeSet::new();
+        for id in selected {
+            let route = previous.resolve(id)?;
+            if seen.insert(key(&route.uid)) {
+                pinned.push(route.clone());
+            }
+        }
+        let mut routes: Vec<_> = self
+            .routes
+            .iter()
+            .filter(|r| !seen.contains(&key(&r.uid)))
+            .cloned()
+            .collect();
+        routes.extend(pinned);
+        Self::new(routes)
+    }
     /// Compare actual runtime endpoints with a complete desired logical selection.
     /// Removing one overlapping row keeps receivers required by another row.
     /// A changed address for the same UID requires an explicit session replacement.
@@ -227,6 +248,35 @@ mod tests {
             aliases: vec![],
             receivers: peers,
         }
+    }
+    #[test]
+    fn discovery_refresh_pins_selected_endpoints_and_releases_on_deselection() {
+        let old = OutputCatalog::new(vec![route("active", vec![peer("a", 7001)])]).unwrap();
+        let fresh = OutputCatalog::new(vec![
+            route("active", vec![peer("a", 7002)]),
+            route("new", vec![peer("b", 7003)]),
+        ])
+        .unwrap();
+        let merged = fresh.preserving_selected(&old, &["active".into()]).unwrap();
+        assert_eq!(
+            merged.resolve("active").unwrap().receivers[0]
+                .address
+                .port(),
+            7001
+        );
+        assert!(merged.resolve("new").is_ok());
+        let missing = OutputCatalog::new(vec![])
+            .unwrap()
+            .preserving_selected(&old, &["active".into()])
+            .unwrap();
+        assert!(missing.resolve("active").is_ok());
+        let released = fresh.preserving_selected(&merged, &[]).unwrap();
+        assert_eq!(
+            released.resolve("active").unwrap().receivers[0]
+                .address
+                .port(),
+            7002
+        );
     }
     #[test]
     fn selection_delta_retains_shared_members_and_canonicalizes_aliases() {
