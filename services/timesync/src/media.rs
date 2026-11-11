@@ -68,6 +68,59 @@ pub struct MasterTimeline {
     domain: Domain,
     max_ahead: Duration,
 }
+
+/// One-way group cancellation lease. Pass `subscribe()` to the session pool,
+/// local renderer and producer. This does not start a clock or any sessions.
+/// Once invalidated, an epoch must acquire a new lease; it never auto-rearms.
+pub struct MasterLease {
+    stop: watch::Sender<bool>,
+    task: tokio::task::JoinHandle<()>,
+}
+impl MasterLease {
+    pub fn spawn(timeline: Arc<MasterTimeline>, mut upstream: watch::Receiver<bool>) -> Self {
+        let (stop, _) = watch::channel(false);
+        let signal = stop.clone();
+        let mut status = timeline.status.clone();
+        // Freshness can expire without a status notification.
+        let task = tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_millis(25));
+            loop {
+                if *upstream.borrow()
+                    || upstream.has_changed().is_err()
+                    || timeline.reading_at(Instant::now()).is_err()
+                {
+                    signal.send_replace(true);
+                    break;
+                }
+                tokio::select! {
+                    _ = tick.tick() => {},
+                    result = status.changed() => {
+                        if result.is_err() {
+                            signal.send_replace(true);
+                            break;
+                        }
+                    },
+                    result = upstream.changed() => {
+                        if result.is_err() {
+                            signal.send_replace(true);
+                            break;
+                        }
+                    },
+                }
+            }
+        });
+        Self { stop, task }
+    }
+    pub fn subscribe(&self) -> watch::Receiver<bool> {
+        self.stop.subscribe()
+    }
+}
+impl Drop for MasterLease {
+    fn drop(&mut self) {
+        self.stop.send_replace(true);
+        self.task.abort();
+    }
+}
 impl MasterTimeline {
     pub fn new(
         source: Arc<InstantSource>,
@@ -161,6 +214,88 @@ impl MasterTimeline {
 mod tests {
     use super::*;
     use clock::{domain::ClockMap, role::Selection};
+    async fn stopped(stop: &mut watch::Receiver<bool>) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !*stop.borrow_and_update() {
+                stop.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+    }
+    #[tokio::test]
+    async fn lease_latches_role_loss_and_epoch_change() {
+        for epoch_change in [false, true] {
+            let (_, updates, timeline) = fixture();
+            let (_user, upstream) = watch::channel(false);
+            let lease = MasterLease::spawn(Arc::new(timeline), upstream);
+            let mut stop = lease.subscribe();
+            let initial = *updates.borrow();
+            let mut invalid = initial;
+            if epoch_change {
+                invalid.selection.domain = Some(Domain::new(7, 3).unwrap());
+            } else {
+                invalid.selection.role = Role::Listening;
+            }
+            updates.send_replace(invalid);
+            stopped(&mut stop).await;
+            updates.send_replace(initial);
+            tokio::task::yield_now().await;
+            assert!(
+                *stop.borrow(),
+                "restored clock must not restart old sessions"
+            );
+        }
+    }
+    #[tokio::test]
+    async fn lease_stops_on_silent_expiry_closed_service_and_user_stop() {
+        for mode in 0..4 {
+            let (origin, updates, mut timeline) = fixture();
+            if mode == 0 {
+                let mut snapshot = *updates.borrow();
+                snapshot.mapping = Some(
+                    ClockMap::new(
+                        timeline.source.local_at(origin).unwrap(),
+                        timeline.domain.reading(1_000_000_000),
+                        0,
+                        50_000_000,
+                    )
+                    .unwrap(),
+                );
+                updates.send_replace(snapshot);
+            }
+            // Mark the current snapshot seen; closure must still be detected.
+            timeline.status.borrow_and_update();
+            let (user, upstream) = watch::channel(false);
+            let lease = MasterLease::spawn(Arc::new(timeline), upstream);
+            let mut stop = lease.subscribe();
+            match mode {
+                0 => {}
+                1 => {
+                    drop(updates);
+                }
+                2 => {
+                    user.send_replace(true);
+                }
+                _ => {
+                    drop(user);
+                }
+            }
+            stopped(&mut stop).await;
+        }
+    }
+    #[tokio::test]
+    async fn dropping_lease_cancels_all_subscribers_immediately() {
+        let (_, _updates, timeline) = fixture();
+        let (_user, upstream) = watch::channel(false);
+        let lease = MasterLease::spawn(Arc::new(timeline), upstream);
+        let first = lease.subscribe();
+        let second = lease.subscribe();
+        assert!(!*first.borrow());
+        drop(lease);
+        assert!(*first.borrow());
+        assert!(*second.borrow());
+    }
     #[tokio::test]
     async fn unified_service_and_producer_share_source_and_shutdown_invalidates_media() {
         use crate::{
