@@ -9,17 +9,18 @@
 use std::sync::Arc;
 
 use mrp::messages::Device;
+pub use crate::mrp_service::model::Profile as CardProfile;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::watch;
 
 use crate::events::{Events, Metadata, Progress};
-use crate::remote::Remote;
-use crate::station_mrp::{
+use crate::mrp_service::{
     control::Control,
-    model::{Cover, Feed, Identity, NAME_CELL, Route},
+    model::{Cover, Feed, Identity, Profile, Route},
     server,
 };
+use crate::remote::Remote;
 
 /// Источник в терминах станции: у неё «airplay» — входящий AirPlay.
 const SOURCE: &str = "airplay";
@@ -31,7 +32,7 @@ pub struct Card {
     /// Программа, которая встраивает приёмник, получает события как обычно.
     inner: Arc<dyn Events>,
     outputs: Option<crate::output_control::OutputControl>,
-    groups: Arc<crate::station_mrp::control::GroupControlState>,
+    groups: Arc<crate::mrp_service::control::GroupControlState>,
 }
 
 /// SHA-256 в hex, как `hash()` в sources.rs станции.
@@ -45,7 +46,7 @@ impl Card {
     /// manufacture membership from a requested selection. Advertise only volume
     /// capabilities the owner actually routes (remote volume routing is separate).
     pub fn set_outputs(&self, descriptors: Vec<mrp::wire::Node>) -> anyhow::Result<()> {
-        use crate::station_mrp::{model::RemoteOutput, wire::Node};
+        use crate::mrp_service::{model::RemoteOutput, wire::Node};
         use mrp::schema::field::AVOutputDeviceDescriptor as fields;
         anyhow::ensure!(descriptors.len() <= 64, "too many output descriptors");
         let mut outputs = std::collections::BTreeMap::new();
@@ -60,7 +61,7 @@ impl Card {
                 "invalid output UID"
             );
             anyhow::ensure!(
-                !crate::station_mrp::model::same_uid(&uid, &self.identity.device),
+                !crate::mrp_service::model::same_uid(&uid, &self.identity.device),
                 "remote descriptor duplicates local output"
             );
             let volume = if descriptor.get(fields::volume).is_some() {
@@ -90,7 +91,7 @@ impl Card {
         Ok(())
     }
     pub fn new(device: Device, remote: Remote, inner: Arc<dyn Events>) -> Arc<Self> {
-        Self::create(device, remote, inner, None)
+        Self::create(device, remote, inner, None, None)
     }
 
     pub fn new_with_outputs(
@@ -99,7 +100,20 @@ impl Card {
         inner: Arc<dyn Events>,
         outputs: crate::output_control::OutputControl,
     ) -> Arc<Self> {
-        Self::create(device, remote, inner, Some(outputs))
+        Self::create(device, remote, inner, Some(outputs), None)
+    }
+
+    /// Explicit presentation/namespace profile; device adapters can preserve
+    /// previously deployed identifiers without device-specific core defaults.
+    pub fn new_with_profile(
+        device: Device,
+        remote: Remote,
+        inner: Arc<dyn Events>,
+        outputs: Option<crate::output_control::OutputControl>,
+        profile: Profile,
+    ) -> anyhow::Result<Arc<Self>> {
+        profile.validate()?;
+        Ok(Self::create(device, remote, inner, outputs, Some(profile)))
     }
 
     fn create(
@@ -107,13 +121,23 @@ impl Card {
         remote: Remote,
         inner: Arc<dyn Events>,
         outputs: Option<crate::output_control::OutputControl>,
+        profile: Option<Profile>,
     ) -> Arc<Self> {
         // ВРЕМЕННЫЙ ОПЫТ: подмена данных карточки переменными окружения,
         // чтобы найти, чем она отличается от станции. Убрать после опыта.
-        let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
-        let _ = NAME_CELL.set(env("X_MRP_NAME").unwrap_or(device.name.clone()));
+        let debug = profile.is_none();
+        let env = |k: &str| {
+            if debug {
+                std::env::var(k).ok().filter(|v| !v.is_empty())
+            } else {
+                None
+            }
+        };
+        let mut profile = profile.unwrap_or_else(|| Profile::from_device(&device));
+        profile.name = env("X_MRP_NAME").unwrap_or(profile.name);
         // Станция: пульт доступен, пока работает её управление, то есть всегда.
         let (feed, _) = watch::channel(Feed {
+            profile,
             source: env("X_MRP_SOURCE").unwrap_or(SOURCE.into()),
             volume: env("X_MRP_VOLUME")
                 .and_then(|v| v.parse().ok())
@@ -314,6 +338,87 @@ fn image_info(data: &[u8]) -> Option<(&'static str, u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn profiles_are_per_card_and_legacy_player_ids_can_be_explicitly_preserved() {
+        let device = |name: &str| Device {
+            name: name.into(),
+            model: "GenericAudio".into(),
+            localized_model: "Audio receiver".into(),
+            uid: name.into(),
+            group: format!("{name}-group"),
+            system_app: "example.player".into(),
+        };
+        let a = Card::new(
+            device("one"),
+            Remote::new(),
+            Arc::new(crate::events::NoEvents),
+        );
+        let b = Card::new(
+            device("two"),
+            Remote::new(),
+            Arc::new(crate::events::NoEvents),
+        );
+        let info = |card: &Card| {
+            crate::mrp_service::model::device_info(&card.identity, &card.feed.borrow(), None)
+                .nested(crate::mrp_service::schema::extension(
+                    crate::mrp_service::model::kind("DEVICE_INFO_MESSAGE"),
+                ))
+                .unwrap()
+        };
+        assert_eq!(
+            info(&a).string(crate::mrp_service::model::f("DeviceInfoMessage", "name")),
+            Some("one")
+        );
+        assert_eq!(
+            info(&b).string(crate::mrp_service::model::f("DeviceInfoMessage", "name")),
+            Some("two")
+        );
+        assert_eq!(
+            info(&a).string(crate::mrp_service::model::f("DeviceInfoMessage", "modelID")),
+            Some("GenericAudio")
+        );
+        let mut profile = Profile::from_device(&device("compat"));
+        profile.client_prefix = "mini2".into();
+        profile.player_namespace = "mini2-mrp".into();
+        profile.system_app = "mini2.native".into();
+        let compat = Card::new_with_profile(
+            device("compat"),
+            Remote::new(),
+            Arc::new(crate::events::NoEvents),
+            None,
+            profile,
+        )
+        .unwrap();
+        let feed = compat.feed.borrow();
+        let path = crate::mrp_service::model::path(&compat.identity, &feed, false);
+        let player = path
+            .nested(crate::mrp_service::model::f("PlayerPath", "player"))
+            .unwrap();
+        let expected = uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_URL,
+            b"mini2-mrp:compat:mini2.airplay",
+        )
+        .to_string();
+        assert_eq!(
+            player.string(crate::mrp_service::model::f(
+                "NowPlayingPlayer",
+                "identifier"
+            )),
+            Some(expected.as_str())
+        );
+        let mut invalid = Profile::default();
+        invalid.name.clear();
+        assert!(
+            Card::new_with_profile(
+                device("bad"),
+                Remote::new(),
+                Arc::new(crate::events::NoEvents),
+                None,
+                invalid
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn output_descriptors_update_atomically_and_volume_does_not_rebuild_topology() {
@@ -342,11 +447,11 @@ mod tests {
         card.set_outputs(vec![remote(0.3)]).unwrap();
         let current = card.feed.borrow().clone();
         let changes =
-            crate::station_mrp::model::topology_updates(&card.identity, &previous, &current);
+            crate::mrp_service::model::topology_updates(&card.identity, &previous, &current);
         assert_eq!(changes.len(), 1);
         assert_eq!(
             changes[0].number(1),
-            Some(crate::station_mrp::model::kind("VOLUME_DID_CHANGE_MESSAGE") as u64)
+            Some(crate::mrp_service::model::kind("VOLUME_DID_CHANGE_MESSAGE") as u64)
         );
         assert_eq!(
             current.outputs[0].descriptor.string(3),
@@ -359,7 +464,7 @@ mod tests {
         assert!(card.set_outputs(vec![invalid]).is_err());
         assert_eq!(*card.feed.borrow(), current);
         card.set_outputs(vec![]).unwrap();
-        let removed = crate::station_mrp::model::topology_updates(
+        let removed = crate::mrp_service::model::topology_updates(
             &card.identity,
             &current,
             &card.feed.borrow(),

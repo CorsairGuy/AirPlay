@@ -1,4 +1,4 @@
-use crate::station_mrp::{schema, wire::Node};
+use crate::mrp_service::{schema, wire::Node};
 use plist::{Dictionary, Uid, Value};
 use std::{
     io::Cursor,
@@ -6,10 +6,56 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 use uuid::Uuid;
-/// Имя устройства. На станции это константа «Станция Мини»; здесь — имя приёмника.
-pub static NAME_CELL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-fn device_name() -> &'static str {
-    NAME_CELL.get().map(String::as_str).unwrap_or("AirPlay")
+/// Per-card presentation/identifier profile. Device adapters may explicitly
+/// retain their existing client/player namespaces for cache compatibility.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Profile {
+    pub name: String,
+    pub model: String,
+    pub localized_model: String,
+    pub system_app: String,
+    pub client_prefix: String,
+    pub player_namespace: String,
+}
+impl Default for Profile {
+    fn default() -> Self {
+        Self {
+            name: "AirPlay".into(),
+            model: "AirPlay".into(),
+            localized_model: "AirPlay".into(),
+            system_app: "com.github.corsairguy.airplay".into(),
+            client_prefix: "com.github.corsairguy.airplay".into(),
+            player_namespace: "airplay-mrp".into(),
+        }
+    }
+}
+impl Profile {
+    pub fn from_device(device: &mrp::messages::Device) -> Self {
+        Self {
+            name: device.name.clone(),
+            model: device.model.clone(),
+            localized_model: device.localized_model.clone(),
+            system_app: device.system_app.clone(),
+            client_prefix: device.system_app.clone(),
+            ..Default::default()
+        }
+    }
+    pub fn validate(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            [
+                &self.name,
+                &self.model,
+                &self.localized_model,
+                &self.system_app,
+                &self.client_prefix,
+                &self.player_namespace
+            ]
+            .iter()
+            .all(|s| !s.is_empty() && s.len() <= 256 && !s.chars().any(char::is_control)),
+            "invalid MRP profile"
+        );
+        Ok(())
+    }
 }
 pub fn f(message: &str, name: &str) -> u32 {
     schema::field(message, name)
@@ -36,6 +82,7 @@ pub struct Cover {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct Feed {
+    pub profile: Profile,
     pub outputs: Vec<RemoteOutput>,
     pub source: String,
     pub title: String,
@@ -54,6 +101,7 @@ pub struct Feed {
 impl Default for Feed {
     fn default() -> Self {
         Self {
+            profile: Profile::default(),
             outputs: Vec::new(),
             source: "native".into(),
             title: String::new(),
@@ -289,16 +337,19 @@ pub fn client(feed: &Feed) -> Node {
         .int(f("NowPlayingClient", "processUserIdentifier"), 0)
         .text(
             f("NowPlayingClient", "bundleIdentifier"),
-            format!("mini2.{}", feed.source),
+            format!("{}.{}", feed.profile.client_prefix, feed.source),
         )
-        .text(f("NowPlayingClient", "displayName"), device_name());
+        .text(
+            f("NowPlayingClient", "displayName"),
+            feed.profile.name.as_str(),
+        );
     n
 }
 pub fn path(identity: &Identity, feed: &Feed, local: bool) -> Node {
     let mut origin = Node::default();
     origin
         .int(f("Origin", "identifier"), 1280262988)
-        .text(f("Origin", "displayName"), device_name());
+        .text(f("Origin", "displayName"), feed.profile.name.as_str());
     if local {
         origin.boolean(f("Origin", "isLocallyHosted"), true);
     }
@@ -308,11 +359,21 @@ pub fn path(identity: &Identity, feed: &Feed, local: bool) -> Node {
             f("NowPlayingPlayer", "identifier"),
             Uuid::new_v5(
                 &Uuid::NAMESPACE_URL,
-                format!("mini2-mrp:{}:mini2.{}", identity.device, feed.source).as_bytes(),
+                format!(
+                    "{}:{}:{}.{}",
+                    feed.profile.player_namespace,
+                    identity.device,
+                    feed.profile.client_prefix,
+                    feed.source
+                )
+                .as_bytes(),
             )
             .to_string(),
         )
-        .text(f("NowPlayingPlayer", "displayName"), device_name())
+        .text(
+            f("NowPlayingPlayer", "displayName"),
+            feed.profile.name.as_str(),
+        )
         .int(f("NowPlayingPlayer", "audioSessionID"), 0);
     let mut n = Node::default();
     n.node(f("PlayerPath", "origin"), &origin)
@@ -326,15 +387,15 @@ pub fn device_info(identity: &Identity, feed: &Feed, reply: Option<&str>) -> Nod
     for (key, value) in [
         ("deviceUID", identity.device.as_str()),
         ("uniqueIdentifier", identity.device.as_str()),
-        ("name", device_name()),
-        ("modelID", "AudioAccessory5,1"),
-        ("localizedModelName", "HomePod mini"),
+        ("name", feed.profile.name.as_str()),
+        ("modelID", feed.profile.model.as_str()),
+        ("localizedModelName", feed.profile.localized_model.as_str()),
         ("applicationBundleIdentifier", "com.apple.mediaremoted"),
         ("groupUID", active_group(identity, feed)),
         ("airPlayGroupID", identity.group.as_str()),
-        ("groupName", device_name()),
-        ("systemMediaApplication", "mini2.native"),
-        ("computerName", device_name()),
+        ("groupName", feed.profile.name.as_str()),
+        ("systemMediaApplication", feed.profile.system_app.as_str()),
+        ("computerName", feed.profile.name.as_str()),
     ] {
         n.text(f(m, key), value);
     }
@@ -379,18 +440,21 @@ pub fn state(
         &Node::default(),
     );
     if request.is_none() {
-        n.text(f("SetStateMessage", "displayName"), device_name())
-            .int(
-                f("SetStateMessage", "playbackState"),
-                if feed.playing {
-                    1
-                } else if feed.title.is_empty() {
-                    0
-                } else {
-                    2
-                },
-            )
-            .double(f("SetStateMessage", "playbackStateTimestamp"), cocoa());
+        n.text(
+            f("SetStateMessage", "displayName"),
+            feed.profile.name.as_str(),
+        )
+        .int(
+            f("SetStateMessage", "playbackState"),
+            if feed.playing {
+                1
+            } else if feed.title.is_empty() {
+                0
+            } else {
+                2
+            },
+        )
+        .double(f("SetStateMessage", "playbackStateTimestamp"), cocoa());
     }
     if request.is_none() {
         let mut supported = Node::default();
@@ -497,7 +561,7 @@ pub fn device_info_update(identity: &Identity, feed: &Feed) -> Node {
         .iter_mut()
         .find(|(field, _)| *field == tag)
         .expect("device info type");
-    *value = crate::station_mrp::wire::Value::Int(kind("DEVICE_INFO_UPDATE_MESSAGE") as u64);
+    *value = crate::mrp_service::wire::Value::Int(kind("DEVICE_INFO_UPDATE_MESSAGE") as u64);
     message
 }
 
@@ -522,12 +586,12 @@ pub fn topology(identity: &Identity, feed: &Feed) -> Vec<Node> {
     let m = "AVOutputDeviceDescriptor";
     let mut device = Node::default();
     for (key, value) in [
-        ("name", device_name()),
+        ("name", feed.profile.name.as_str()),
         ("uniqueIdentifier", identity.device.as_str()),
         ("primaryUID", identity.device.as_str()),
         ("groupID", active_group(identity, feed)),
         ("airPlayGroupID", identity.group.as_str()),
-        ("modelID", "AudioAccessory5,1"),
+        ("modelID", feed.profile.model.as_str()),
     ] {
         device.text(f(m, key), value);
     }
@@ -827,7 +891,7 @@ mod device_update_order_tests {
             packet.extend(topology(&id, &feed));
             std::fs::write(
                 folder.join("group_update_packet.bin"),
-                crate::station_mrp::wire::encode_packet(&packet),
+                crate::mrp_service::wire::encode_packet(&packet),
             )
             .unwrap();
         }

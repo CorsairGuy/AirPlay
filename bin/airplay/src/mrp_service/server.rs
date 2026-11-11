@@ -1,4 +1,4 @@
-use crate::station_mrp::{
+use crate::mrp_service::{
     control::Control,
     model::{self, Feed, Identity, f, kind},
     schema,
@@ -301,7 +301,7 @@ async fn handle(
     let typ = message.number(f("ProtocolMessage", "type")).unwrap_or(0) as u32;
     let id = message.string(f("ProtocolMessage", "identifier"));
     let body = message.nested(schema::extension(typ))?;
-    if std::env::var_os("MINI2_MRP_TRACE").is_some() {
+    if std::env::var_os("AIRPLAY_MRP_TRACE").is_some() {
         println!(
             "MRP_TRACE type={typ} request={} source={} control={}",
             id.is_some(),
@@ -466,13 +466,13 @@ pub async fn connection(
     let opened = std::time::Instant::now();
     let mut last = 0u64;
     let mut pending = tokio::task::JoinSet::new();
-    println!("{} MRP connection opened", crate::station_mrp::stamp::now());
+    println!("{} MRP connection opened", crate::mrp_service::stamp::now());
     let result:Result<()>=async{loop{tokio::select!{
   count=read.read(&mut chunk)=>{let count=count?;if count==0{break}buffer.extend_from_slice(&chunk[..count]);while buffer.len()>=32{
    let size=u32::from_be_bytes(buffer[..4].try_into()?)as usize;if !(32..=4*1024*1024).contains(&size){bail!("invalid data frame size")};if buffer.len()<size{break}
    let rest=buffer.split_off(size);let frame=std::mem::replace(&mut buffer,rest);let seq=u64::from_be_bytes(frame[20..28].try_into()?);
    if &frame[4..8]==b"sync"{tx.send(Output::Ack(seq)).await?}
-   if size>32{let value=match model::decode_plist(&frame[32..]){Ok(v)=>v,Err(error)=>{crate::station_elog!("MRP frame skipped, bad plist: {error:#}");continue}};if let Some(data)=value.as_dictionary().and_then(|v|v.get("params")).and_then(Value::as_dictionary).and_then(|v|v.get("data")).and_then(Value::as_data){let messages=match wire::decode_packet(data){Ok(m)=>m,Err(error)=>{crate::station_elog!("MRP frame skipped, bad protobuf: {error:#}");continue}};for message in messages{if dispatch_output(&message,&control,&tx,&mut pending)?{continue;}let current=updates.borrow().clone();if dispatch_group_volume(&message,&identity,&current,&control,&tx,&mut pending)?{continue;}if dispatch_remote_volume(&message,&identity,&current,&control,&tx,&mut pending)?{continue;}let typ=message.number(f("ProtocolMessage","type")).unwrap_or(0);let id=message.string(f("ProtocolMessage","identifier")).map(str::to_owned);let out=match handle(message,&identity,&current,&control,&mut subscribed).await{Ok(out)=>out,Err(error)=>{crate::station_elog!("MRP message type={typ} failed: {error:#}");if id.is_some(){vec![reply(id.as_deref(),6)]}else{Vec::new()}}};last=typ;if !out.is_empty(){tx.send(Output::Messages(out)).await?}}}}
+   if size>32{let value=match model::decode_plist(&frame[32..]){Ok(v)=>v,Err(error)=>{crate::mrp_log!("MRP frame skipped, bad plist: {error:#}");continue}};if let Some(data)=value.as_dictionary().and_then(|v|v.get("params")).and_then(Value::as_dictionary).and_then(|v|v.get("data")).and_then(Value::as_data){let messages=match wire::decode_packet(data){Ok(m)=>m,Err(error)=>{crate::mrp_log!("MRP frame skipped, bad protobuf: {error:#}");continue}};for message in messages{if dispatch_output(&message,&control,&tx,&mut pending)?{continue;}let current=updates.borrow().clone();if dispatch_group_volume(&message,&identity,&current,&control,&tx,&mut pending)?{continue;}if dispatch_remote_volume(&message,&identity,&current,&control,&tx,&mut pending)?{continue;}let typ=message.number(f("ProtocolMessage","type")).unwrap_or(0);let id=message.string(f("ProtocolMessage","identifier")).map(str::to_owned);let out=match handle(message,&identity,&current,&control,&mut subscribed).await{Ok(out)=>out,Err(error)=>{crate::mrp_log!("MRP message type={typ} failed: {error:#}");if id.is_some(){vec![reply(id.as_deref(),6)]}else{Vec::new()}}};last=typ;if !out.is_empty(){tx.send(Output::Messages(out)).await?}}}}
   }},
   changed=updates.changed()=>{if changed.is_err(){break}let current=updates.borrow_and_update().clone();if subscribed{
    let mut output=Vec::new();if current.source!=previous.source{output.extend(model::announcement(&identity,&current));}else{output.extend(model::state_change(&identity,&previous,&current));}
@@ -489,7 +489,7 @@ pub async fn connection(
     };
     eprintln!(
         "{} MRP connection closed after {}s (last message type={last}): {reason}",
-        crate::station_mrp::stamp::now(),
+        crate::mrp_service::stamp::now(),
         opened.elapsed().as_secs()
     );
     result
@@ -522,7 +522,7 @@ mod tests {
     }
     #[tokio::test]
     async fn group_slider_scales_local_and_remote_and_recovers_after_zero() {
-        use crate::station_mrp::model::RemoteOutput;
+        use crate::mrp_service::model::RemoteOutput;
         let identity = Identity {
             device: "local".into(),
             group: "group".into(),
@@ -592,7 +592,7 @@ mod tests {
     }
     #[tokio::test]
     async fn remote_volume_routes_without_changing_local_or_other_output() {
-        use crate::station_mrp::model::RemoteOutput;
+        use crate::mrp_service::model::RemoteOutput;
         let identity = Identity {
             device: "local".into(),
             group: "local-group".into(),

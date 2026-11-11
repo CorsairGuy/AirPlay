@@ -29,7 +29,12 @@ pub mod session;
 pub mod session_preparer;
 pub mod state;
 #[macro_use]
-pub mod station_mrp;
+pub mod mrp_service;
+/// Compatibility import for older adapters; new code uses mrp_service.
+pub use mrp_service as station_mrp;
+/// Compatibility macro for older adapters.
+#[macro_export]
+macro_rules! station_elog {($($arg:tt)*)=>{{$crate::mrp_log!($($arg)*);}}}
 
 pub use audio;
 pub use audio_stream;

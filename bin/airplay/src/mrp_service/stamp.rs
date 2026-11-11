@@ -33,13 +33,13 @@ pub fn format_utc(secs: u64) -> String {
 /// `println!` с меткой времени.
 #[macro_export]
 macro_rules! station_log {
-    ($($t:tt)*) => { println!("{} {}", $crate::station_mrp::stamp::now(), format_args!($($t)*)) };
+    ($($t:tt)*) => { println!("{} {}", $crate::mrp_service::stamp::now(), format_args!($($t)*)) };
 }
 
 /// `eprintln!` с меткой времени.
 #[macro_export]
-macro_rules! station_elog {
-    ($($t:tt)*) => { eprintln!("{} {}", $crate::station_mrp::stamp::now(), format_args!($($t)*)) };
+macro_rules! mrp_log {
+    ($($t:tt)*) => { eprintln!("{} {}", $crate::mrp_service::stamp::now(), format_args!($($t)*)) };
 }
 
 #[cfg(test)]

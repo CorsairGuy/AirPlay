@@ -1,8 +1,8 @@
 //! `Control` станции с тем же API, что видит `server.rs`. На станции команды
 //! уходят в `airplay_control` по сокету; здесь — отправителю AirPlay через
 //! [`Remote`]. Номера команд и проверки — как в `control.rs` станции.
+use crate::mrp_service::model::Feed;
 use crate::remote::{Command, Remote};
-use crate::station_mrp::model::Feed;
 use anyhow::{Result, bail};
 use tokio::sync::watch;
 
@@ -69,7 +69,7 @@ impl Control {
                                 for output in &feed.outputs {
                                     let uid = output
                                         .descriptor
-                                        .string(crate::station_mrp::model::f(
+                                        .string(crate::mrp_service::model::f(
                                             "AVOutputDeviceDescriptor",
                                             "uniqueIdentifier",
                                         ))
@@ -103,14 +103,14 @@ impl Control {
                                     current.volume = planned[0].1;
                                     for output in &mut current.outputs {
                                         if let Some(uid) =
-                                            output.descriptor.string(crate::station_mrp::model::f(
+                                            output.descriptor.string(crate::mrp_service::model::f(
                                                 "AVOutputDeviceDescriptor",
                                                 "uniqueIdentifier",
                                             ))
                                         {
                                             if let Some((_, value)) =
                                                 planned.iter().skip(1).find(|(id, _)| {
-                                                    crate::station_mrp::model::same_uid(id, uid)
+                                                    crate::mrp_service::model::same_uid(id, uid)
                                                 })
                                             {
                                                 output.volume = Some(*value);
@@ -190,8 +190,8 @@ mod tests {
     #[tokio::test]
     async fn group_individual_group_preserves_reader_order_and_fresh_levels() {
         use crate::{
+            mrp_service::{model::RemoteOutput, wire::Node},
             output_control::{OutputControl, testing},
-            station_mrp::{model::RemoteOutput, wire::Node},
         };
         let remote = Remote::new();
         let mut commands = remote.attach(1);

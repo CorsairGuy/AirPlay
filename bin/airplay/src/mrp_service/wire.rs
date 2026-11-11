@@ -35,7 +35,7 @@ fn put_var(mut n: u64, out: &mut Vec<u8>) {
 impl Node {
     pub fn validate(&self, message: &str) -> Result<()> {
         for (id, value) in &self.0 {
-            let (expected, nested) = crate::station_mrp::schema::wire_type(message, *id)
+            let (expected, nested) = crate::mrp_service::schema::wire_type(message, *id)
                 .ok_or_else(|| anyhow::anyhow!("unknown field {message}.{id}"))?;
             let actual = match value {
                 Value::Int(_) => 0,
