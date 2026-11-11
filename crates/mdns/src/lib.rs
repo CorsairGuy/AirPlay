@@ -1,6 +1,7 @@
 //! Bonjour (mDNS/DNS-SD): объявление служб приёмника.
 
 use mdns_sd::{ServiceDaemon, ServiceInfo};
+pub mod discovery;
 
 pub const AIRPLAY: &str = "_airplay._tcp.local.";
 pub const RAOP: &str = "_raop._tcp.local.";
