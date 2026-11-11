@@ -121,6 +121,11 @@ pub async fn run_discovered(
         if request.reply.is_closed() {
             continue;
         }
+        if let Some(operation) = request.operation.take() {
+            let code = operation(&pool, &catalog);
+            request.finish(code);
+            continue;
+        }
         if let Some(levels) = request.batch.take() {
             let gains: Result<Vec<_>> = levels
                 .into_iter()
@@ -140,7 +145,7 @@ pub async fn run_discovered(
                 Ok(()) => 0,
                 Err(_) => 39,
             };
-            let _ = request.reply.send(code);
+            request.finish(code);
             continue;
         }
         let current = confirmed(&pool, &catalog, &desired);

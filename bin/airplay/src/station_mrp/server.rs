@@ -238,7 +238,34 @@ fn dispatch_remote_volume(
         Err(100)
     } else {
         backend
-            .submit_volume(uid.into(), value as f32)
+            .submit_volume_after(
+                uid.into(),
+                value as f32,
+                Box::new({
+                    let uid = uid.to_owned();
+                    let updates = control.feed.clone();
+                    move |code| {
+                        if code == 0 {
+                            updates.send_if_modified(|feed| {
+                                let Some(output) = feed.outputs.iter_mut().find(|o| {
+                                    o.descriptor
+                                        .string(f("AVOutputDeviceDescriptor", "uniqueIdentifier"))
+                                        .is_some_and(|id| model::same_uid(id, &uid))
+                                }) else {
+                                    return false;
+                                };
+                                let next = Some(value as f32);
+                                if output.volume == next {
+                                    false
+                                } else {
+                                    output.volume = next;
+                                    true
+                                }
+                            });
+                        }
+                    }
+                }),
+            )
             .map_err(|_| 100)
     };
     let result = match result {
@@ -249,32 +276,12 @@ fn dispatch_remote_volume(
             return Ok(true);
         }
     };
-    let uid = uid.to_owned();
     let tx = tx.clone();
-    let updates = control.feed.clone();
     pending.spawn(async move {
         let code = match tokio::time::timeout(tokio::time::Duration::from_secs(10), result).await {
             Ok(Ok(code)) => code,
             _ => 100,
         };
-        if code == 0 {
-            updates.send_if_modified(|feed| {
-                let Some(output) = feed.outputs.iter_mut().find(|o| {
-                    o.descriptor
-                        .string(f("AVOutputDeviceDescriptor", "uniqueIdentifier"))
-                        .is_some_and(|id| model::same_uid(id, &uid))
-                }) else {
-                    return false;
-                };
-                let next = Some(value as f32);
-                if output.volume == next {
-                    false
-                } else {
-                    output.volume = next;
-                    true
-                }
-            });
-        }
         let _ = tokio::time::timeout(
             tokio::time::Duration::from_secs(5),
             tx.send(Output::Messages(vec![reply(id.as_deref(), code)])),
@@ -548,11 +555,17 @@ mod tests {
                     .unwrap()
             );
             let request = requests.recv().await.unwrap();
-            let levels = request.batch.as_ref().unwrap();
-            assert_eq!(levels.len(), 1);
-            assert_eq!(levels[0].0, "pod");
-            assert!((levels[0].1 - target).abs() < 1e-6);
-            request.reply.send(0).unwrap();
+            let backend = crate::output_control::testing::Backend::default();
+            crate::output_control::testing::execute(request, &backend);
+            let recorded = backend.0.lock().unwrap();
+            assert_eq!(recorded[0].len(), 1);
+            assert_eq!(recorded[0][0].0, "pod");
+            assert!(
+                (recorded[0][0].1.as_db() - sender::Volume::normalized(target).unwrap().as_db())
+                    .abs()
+                    < 1e-6
+            );
+            drop(recorded);
             pending.join_next().await.unwrap().unwrap();
             let crate::remote::Command::Volume(local) = commands.recv().await.unwrap() else {
                 panic!("wrong local command")
@@ -610,7 +623,7 @@ mod tests {
         );
         let request = requests.recv().await.unwrap();
         assert_eq!(request.volume, Some(("a".into(), 0.3)));
-        request.reply.send(0).unwrap();
+        request.finish(0);
         pending.join_next().await.unwrap().unwrap();
         let current = feed.borrow().clone();
         assert_eq!(current.volume, before.volume);

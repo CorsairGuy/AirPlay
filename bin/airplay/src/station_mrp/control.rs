@@ -16,8 +16,7 @@ pub struct Control {
 
 #[derive(Default)]
 pub(crate) struct GroupControlState {
-    policy: tokio::sync::Mutex<sender::group_volume::GroupVolume>,
-    revision: std::sync::atomic::AtomicU64,
+    policy: std::sync::Mutex<sender::group_volume::GroupVolume>,
 }
 
 impl Control {
@@ -42,78 +41,96 @@ impl Control {
             .fold(feed.volume, f32::max)
     }
 
-    /// Allocate the revision before spawning, preserving MRP read order. Older
-    /// queued slider targets may be superseded, as with a latest-value watch.
+    /// Enqueue synchronously in MRP reader order. Compute against levels left
+    /// by preceding operations, then commit gain/cache before acknowledging.
     pub fn group_volume(
         &self,
         local_uid: String,
         value: f32,
     ) -> impl std::future::Future<Output = Result<()>> + Send + 'static {
-        use std::sync::atomic::Ordering;
-        let revision = self.groups.revision.fetch_add(1, Ordering::SeqCst) + 1;
         let control = self.clone();
+        let queued =
+            self.outputs
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("output control unavailable"))
+                .and_then(|queue| {
+                    queue
+                        .submit_operation(Box::new(move |backend, catalog| {
+                            let operation = (|| -> Result<()> {
+                                if !control.remote.connected() {
+                                    bail!("local source control unavailable");
+                                }
+                                let mut policy =
+                                    control.groups.policy.lock().map_err(|_| {
+                                        anyhow::anyhow!("group balance lock failed")
+                                    })?;
+                                let feed = control.feed.borrow().clone();
+                                let mut levels = vec![(local_uid, feed.volume)];
+                                for output in &feed.outputs {
+                                    let uid = output
+                                        .descriptor
+                                        .string(crate::station_mrp::model::f(
+                                            "AVOutputDeviceDescriptor",
+                                            "uniqueIdentifier",
+                                        ))
+                                        .ok_or_else(|| anyhow::anyhow!("output UID missing"))?;
+                                    levels.push((
+                                        uid.into(),
+                                        output.volume.ok_or_else(|| {
+                                            anyhow::anyhow!("observed output level unavailable")
+                                        })?,
+                                    ));
+                                }
+                                let mut candidate = policy.clone();
+                                let planned = candidate.plan(&levels, value)?;
+                                let gains: Result<Vec<_>> = planned
+                                    .iter()
+                                    .skip(1)
+                                    .map(|(uid, value)| {
+                                        sender::Volume::normalized(*value)
+                                            .map(|gain| (uid.clone(), gain))
+                                    })
+                                    .collect();
+                                let gains = gains?;
+                                if !gains.is_empty() {
+                                    backend.set_routes(catalog, &gains)?;
+                                }
+                                if !control.remote.send(Command::Volume(planned[0].1)) {
+                                    bail!("local source disconnected during group change");
+                                }
+                                control.feed.send_if_modified(|current| {
+                                    let before = current.clone();
+                                    current.volume = planned[0].1;
+                                    for output in &mut current.outputs {
+                                        if let Some(uid) =
+                                            output.descriptor.string(crate::station_mrp::model::f(
+                                                "AVOutputDeviceDescriptor",
+                                                "uniqueIdentifier",
+                                            ))
+                                        {
+                                            if let Some((_, value)) =
+                                                planned.iter().skip(1).find(|(id, _)| {
+                                                    crate::station_mrp::model::same_uid(id, uid)
+                                                })
+                                            {
+                                                output.volume = Some(*value);
+                                            }
+                                        }
+                                    }
+                                    *current != before
+                                });
+                                *policy = candidate;
+                                Ok(())
+                            })();
+                            if operation.is_ok() { 0 } else { 2 }
+                        }))
+                        .map_err(|_| anyhow::anyhow!("group volume queue full"))
+                });
         async move {
-            let mut policy = control.groups.policy.lock().await;
-            if revision != control.groups.revision.load(Ordering::SeqCst) {
-                return Ok(());
+            let code = tokio::time::timeout(std::time::Duration::from_secs(10), queued?).await??;
+            if code != 0 {
+                bail!("group volume rejected");
             }
-            if !control.remote.connected() {
-                bail!("local source control is unavailable");
-            }
-            let feed = control.feed.borrow().clone();
-            let mut levels = vec![(local_uid, feed.volume)];
-            for output in &feed.outputs {
-                let uid = output
-                    .descriptor
-                    .string(crate::station_mrp::model::f(
-                        "AVOutputDeviceDescriptor",
-                        "uniqueIdentifier",
-                    ))
-                    .ok_or_else(|| anyhow::anyhow!("output UID missing"))?;
-                let level = output
-                    .volume
-                    .ok_or_else(|| anyhow::anyhow!("observed output level unavailable"))?;
-                levels.push((uid.into(), level));
-            }
-            let mut candidate = policy.clone();
-            let planned = candidate.plan(&levels, value)?;
-            if planned.len() > 1 {
-                let backend = control
-                    .outputs
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("output control unavailable"))?;
-                let reply = backend
-                    .submit_batch(planned.iter().skip(1).cloned().collect())
-                    .map_err(|_| anyhow::anyhow!("group volume queue full"))?;
-                let code =
-                    tokio::time::timeout(std::time::Duration::from_secs(10), reply).await??;
-                if code != 0 {
-                    bail!("group volume rejected");
-                }
-            }
-            if !control.remote.send(Command::Volume(planned[0].1)) {
-                bail!("local source disconnected during group change");
-            }
-            control.feed.send_if_modified(|current| {
-                let before = current.clone();
-                current.volume = planned[0].1;
-                for output in &mut current.outputs {
-                    if let Some(uid) = output.descriptor.string(crate::station_mrp::model::f(
-                        "AVOutputDeviceDescriptor",
-                        "uniqueIdentifier",
-                    )) {
-                        if let Some((_, value)) = planned
-                            .iter()
-                            .skip(1)
-                            .find(|(id, _)| crate::station_mrp::model::same_uid(id, uid))
-                        {
-                            output.volume = Some(*value);
-                        }
-                    }
-                }
-                *current != before
-            });
-            *policy = candidate;
             Ok(())
         }
     }
@@ -171,21 +188,58 @@ mod tests {
     use super::*;
     use std::time::{Duration, Instant};
     #[tokio::test]
-    async fn superseded_group_target_is_skipped_before_any_control_write() {
+    async fn group_individual_group_preserves_reader_order_and_fresh_levels() {
+        use crate::{
+            output_control::{OutputControl, testing},
+            station_mrp::{model::RemoteOutput, wire::Node},
+        };
         let remote = Remote::new();
         let mut commands = remote.attach(1);
         let (feed, _) = watch::channel(Feed {
             volume: 0.1,
+            outputs: vec![RemoteOutput {
+                descriptor: Node::default().text(2, "pod").clone(),
+                volume: Some(0.3),
+            }],
             ..Default::default()
         });
-        let control = Control::new(feed.clone(), remote);
-        let first = control.group_volume("local".into(), 0.8);
-        let last = control.group_volume("local".into(), 0.2);
+        let (queue, mut requests) = OutputControl::channel(4);
+        let control = Control::new(feed.clone(), remote).with_outputs(queue.clone());
+        let first = control.group_volume("local".into(), 0.2);
+        let individual = queue
+            .submit_volume_after(
+                "pod".into(),
+                0.5,
+                Box::new({
+                    let feed = feed.clone();
+                    move |code| {
+                        if code == 0 {
+                            feed.send_modify(|s| s.outputs[0].volume = Some(0.5));
+                        }
+                    }
+                }),
+            )
+            .unwrap();
+        let last = control.group_volume("local".into(), 0.3);
+        let backend = testing::Backend::default();
+        testing::execute(requests.recv().await.unwrap(), &backend);
+        let request = requests.recv().await.unwrap();
+        assert_eq!(request.volume, Some(("pod".into(), 0.5)));
+        request.finish(0);
+        testing::execute(requests.recv().await.unwrap(), &backend);
         first.await.unwrap();
-        assert!(commands.try_recv().is_err());
-        assert_eq!(feed.borrow().volume, 0.1);
+        assert_eq!(individual.await.unwrap(), 0);
         last.await.unwrap();
-        assert_eq!(commands.recv().await, Some(Command::Volume(0.2)));
+        let Command::Volume(first) = commands.recv().await.unwrap() else {
+            panic!("wrong local command")
+        };
+        let Command::Volume(last) = commands.recv().await.unwrap() else {
+            panic!("wrong local command")
+        };
+        assert!((first - 0.2 / 3.0).abs() < 1e-6);
+        assert!((last - 0.04).abs() < 1e-6);
+        assert!((feed.borrow().volume - 0.04).abs() < 1e-6);
+        assert_eq!(feed.borrow().outputs[0].volume, Some(0.3));
     }
     #[tokio::test]
     async fn accepted_pause_freezes_clock_immediately_and_play_resumes() {
