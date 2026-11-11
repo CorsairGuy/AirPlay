@@ -10,6 +10,7 @@
 pub mod authorization;
 pub mod frame;
 pub mod messages;
+pub mod output_context;
 pub mod schema;
 pub mod wire;
 

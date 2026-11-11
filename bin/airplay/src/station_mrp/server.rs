@@ -1,14 +1,14 @@
 use crate::station_mrp::{
     control::Control,
-    model::{self, f, kind, Feed, Identity},
+    model::{self, Feed, Identity, f, kind},
     schema,
     wire::{self, Node},
 };
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use plist::Value;
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
     io::{AsyncRead, AsyncWrite},
+    io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
     sync::{mpsc, watch},
 };
@@ -32,10 +32,7 @@ fn framed(kind: &[u8; 4], seq: u64, payload: &[u8]) -> Vec<u8> {
     out.extend(payload);
     out
 }
-async fn writer(
-    mut write: impl AsyncWrite + Unpin,
-    mut rx: mpsc::Receiver<Output>,
-) -> Result<()> {
+async fn writer(mut write: impl AsyncWrite + Unpin, mut rx: mpsc::Receiver<Output>) -> Result<()> {
     let mut seq = u64::from_be_bytes(Uuid::new_v4().as_bytes()[..8].try_into()?);
     while let Some(output) = rx.recv().await {
         let bytes = match output {
@@ -161,17 +158,19 @@ async fn handle(
         )]);
     }
     if typ == kind("MODIFY_OUTPUT_CONTEXT_REQUEST_MESSAGE") {
-        let own = body
-            .0
-            .iter()
-            .filter_map(|(_, value)| {
-                if let wire::Value::Bytes(bytes) = value {
-                    std::str::from_utf8(bytes).ok()
-                } else {
-                    None
-                }
-            })
-            .all(|uid| uid == identity.device || uid == identity.group);
+        let body = mrp::wire::Node::parse(&body.encode())?;
+        let request = match mrp::output_context::Request::parse(&body) {
+            Ok(request) => request,
+            Err(_) => return Ok(vec![reply(id, 18)]),
+        };
+        // Until a remote output backend is attached, acknowledge only local
+        // identifiers. Unknown fields are not identifiers; malformed IDs must
+        // never be silently dropped into a successful empty request.
+        let own = request.identifiers().all(|uid| {
+            model::same_uid(uid, &identity.device)
+                || model::same_uid(uid, &identity.group)
+                || model::same_uid(uid, model::active_group(identity, feed))
+        });
         return Ok(vec![reply(id, if own { 0 } else { 33 })]);
     }
     if matches!(typ, 37 | 38) {
@@ -251,5 +250,42 @@ mod tests {
     fn headers_are_fixed_size() {
         assert_eq!(framed(b"rply", 17, &[]).len(), 32);
         assert_eq!(&framed(b"sync", 17, b"123")[20..28], &17u64.to_be_bytes());
+    }
+
+    #[tokio::test]
+    async fn output_requests_validate_ids_before_local_only_acknowledgement() {
+        let identity = Identity {
+            device: "ABCDEF01-2345-6789-ABCD-EF0123456789".into(),
+            group: "group".into(),
+        };
+        let feed = Feed::default();
+        let (updates, _) = watch::channel(feed.clone());
+        let control = Control::new(updates, crate::remote::Remote::new());
+        for (body, expected) in [
+            (
+                Node::default()
+                    .text(2, &identity.device.to_ascii_lowercase())
+                    .clone(),
+                0,
+            ),
+            (Node::default().text(5, "foreign-cluster").clone(), 33),
+            (Node(vec![(2, wire::Value::Bytes(vec![255]))]), 18),
+            (Node::default().int(2, 7).clone(), 18),
+            // A protobuf extension unknown to this implementation is not a UID.
+            (Node::default().text(100, "future-extension").clone(), 0),
+        ] {
+            let message = model::envelope(
+                "MODIFY_OUTPUT_CONTEXT_REQUEST_MESSAGE",
+                body,
+                Some("request"),
+            );
+            let replies = handle(message, &identity, &feed, &control, &mut false)
+                .await
+                .unwrap();
+            assert_eq!(
+                replies[0].number(f("ProtocolMessage", "errorCode")),
+                Some(expected)
+            );
+        }
     }
 }
