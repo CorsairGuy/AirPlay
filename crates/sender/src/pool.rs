@@ -116,6 +116,34 @@ impl SessionPool {
     /// One logical row may cover multiple physical members. Preflight every
     /// member before publishing a gain revision; unrelated outputs are untouched.
     /// Success means control accepted, not receiver/acoustic acknowledgement.
+    pub fn set_route_volumes(
+        &self,
+        catalog: &crate::outputs::OutputCatalog,
+        levels: &[(String, Volume)],
+    ) -> Result<()> {
+        let ids: Vec<_> = levels.iter().map(|(id, _)| id.clone()).collect();
+        catalog.receivers(&ids)?;
+        let mut physical = std::collections::BTreeMap::new();
+        for (uid, gain) in levels {
+            for member in catalog.receivers(&[uid.clone()])? {
+                let entry = self
+                    .entries
+                    .get(&member.uid)
+                    .ok_or_else(|| anyhow::anyhow!("inactive group volume member"))?;
+                if entry.endpoint != member.address {
+                    bail!("group member endpoint changed");
+                }
+                if physical
+                    .insert(member.uid, *gain)
+                    .is_some_and(|old| old != *gain)
+                {
+                    bail!("overlapping outputs request different gains");
+                }
+            }
+        }
+        self.set_member_volumes(&physical.into_iter().collect::<Vec<_>>())
+    }
+
     pub fn set_route_volume(
         &self,
         catalog: &crate::outputs::OutputCatalog,
@@ -381,6 +409,46 @@ mod tests {
             }
             Ok(stats)
         }).unwrap()
+    }
+    #[tokio::test]
+    async fn logical_group_batch_expands_rows_and_rejects_conflicting_overlap() {
+        use crate::outputs::{OutputCatalog, OutputRoute, ReceiverEndpoint};
+        let (_source, packets) = broadcast::channel(16);
+        let mut pool = SessionPool::new(packets);
+        let (events, _received) = mpsc::unbounded_channel();
+        let a = add(&mut pool, "a", 7001, events.clone());
+        let b = add(&mut pool, "b", 7002, events);
+        let peer = |id: &str, port| ReceiverEndpoint {
+            uid: id.into(),
+            address: ([127, 0, 0, 1], port).into(),
+        };
+        let route = |id: &str, receivers| OutputRoute {
+            uid: id.into(),
+            name: id.into(),
+            model: "".into(),
+            aliases: vec![],
+            receivers,
+        };
+        let catalog = OutputCatalog::new(vec![
+            route("pair", vec![peer("a", 7001), peer("b", 7002)]),
+            route("one", vec![peer("a", 7001)]),
+        ])
+        .unwrap();
+        let gain = Volume::normalized(0.2).unwrap();
+        pool.set_route_volumes(&catalog, &[("pair".into(), gain)])
+            .unwrap();
+        assert_eq!(a.requested_volume(), gain);
+        assert_eq!(b.requested_volume(), gain);
+        assert!(
+            pool.set_route_volumes(
+                &catalog,
+                &[("pair".into(), Volume::MUTE), ("one".into(), gain)]
+            )
+            .is_err()
+        );
+        assert_eq!(a.requested_volume(), gain);
+        assert_eq!(b.requested_volume(), gain);
+        pool.shutdown().await;
     }
     #[tokio::test]
     async fn group_volume_batch_keeps_balance_and_rejects_missing_members() {

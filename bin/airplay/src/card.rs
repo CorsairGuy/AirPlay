@@ -31,6 +31,7 @@ pub struct Card {
     /// Программа, которая встраивает приёмник, получает события как обычно.
     inner: Arc<dyn Events>,
     outputs: Option<crate::output_control::OutputControl>,
+    groups: Arc<crate::station_mrp::control::GroupControlState>,
 }
 
 /// SHA-256 в hex, как `hash()` в sources.rs станции.
@@ -129,6 +130,7 @@ impl Card {
             remote,
             inner,
             outputs,
+            groups: Default::default(),
         })
     }
 
@@ -156,6 +158,7 @@ impl Card {
         S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
     {
         let mut control = Control::new(self.feed.clone(), self.remote.clone());
+        control.groups = self.groups.clone();
         if let Some(outputs) = &self.outputs {
             control = control.with_outputs(outputs.clone());
         }

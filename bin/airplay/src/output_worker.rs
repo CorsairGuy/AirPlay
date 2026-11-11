@@ -121,6 +121,18 @@ pub async fn run_discovered(
         if request.reply.is_closed() {
             continue;
         }
+        if let Some(levels) = request.batch.take() {
+            let gains: Result<Vec<_>> = levels
+                .into_iter()
+                .map(|(uid, value)| sender::Volume::normalized(value).map(|gain| (uid, gain)))
+                .collect();
+            let code = match gains.and_then(|gains| pool.set_route_volumes(&catalog, &gains)) {
+                Ok(()) => 0,
+                Err(_) => 39,
+            };
+            let _ = request.reply.send(code);
+            continue;
+        }
         if let Some((uid, value)) = request.volume.take() {
             let code = match sender::Volume::normalized(value)
                 .and_then(|gain| pool.set_route_volume(&catalog, &uid, gain))

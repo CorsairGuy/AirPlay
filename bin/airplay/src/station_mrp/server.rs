@@ -137,6 +137,65 @@ fn dispatch_output(
     });
     Ok(true)
 }
+fn dispatch_group_volume(
+    message: &Node,
+    identity: &Identity,
+    feed: &Feed,
+    control: &Control,
+    tx: &mpsc::Sender<Output>,
+    pending: &mut tokio::task::JoinSet<()>,
+) -> Result<bool> {
+    if message.number(f("ProtocolMessage", "type")) != Some(kind("SET_VOLUME_MESSAGE") as u64)
+        || control.outputs.is_none()
+        || feed.outputs.is_empty()
+    {
+        return Ok(false);
+    }
+    let body = message.nested(schema::extension(kind("SET_VOLUME_MESSAGE")))?;
+    let uid = body.string(f("SetVolumeMessage", "outputDeviceUID"));
+    if body.get(f("SetVolumeMessage", "outputDeviceUID")).is_some() && uid.is_none() {
+        return Ok(false);
+    }
+    if let Some(uid) = uid {
+        if model::same_uid(uid, &identity.device)
+            || (!model::same_uid(uid, &identity.group)
+                && !model::same_uid(uid, model::active_group(identity, feed)))
+        {
+            return Ok(false);
+        }
+    }
+    let value = body
+        .real(f("SetVolumeMessage", "volume"))
+        .unwrap_or(f64::NAN);
+    let id = message
+        .string(f("ProtocolMessage", "identifier"))
+        .map(str::to_owned);
+    while pending.try_join_next().is_some() {}
+    let error = if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+        Some(18)
+    } else if pending.len() >= 32 {
+        Some(100)
+    } else {
+        None
+    };
+    if let Some(error) = error {
+        tx.try_send(Output::Messages(vec![reply(id.as_deref(), error)]))
+            .map_err(|_| anyhow::anyhow!("group volume response queue full"))?;
+        return Ok(true);
+    }
+    let change = control.group_volume(identity.device.clone(), value as f32);
+    let tx = tx.clone();
+    pending.spawn(async move {
+        let code = if change.await.is_ok() { 0 } else { 2 };
+        let _ = tokio::time::timeout(
+            tokio::time::Duration::from_secs(5),
+            tx.send(Output::Messages(vec![reply(id.as_deref(), code)])),
+        )
+        .await;
+    });
+    Ok(true)
+}
+
 fn dispatch_remote_volume(
     message: &Node,
     identity: &Identity,
@@ -295,7 +354,16 @@ async fn handle(
             }
         }
         let mut body = Node::default();
-        body.float(f("GetVolumeResultMessage", "volume"), feed.volume);
+        let individual = message
+            .nested(schema::extension(typ))?
+            .string(f("GetVolumeMessage", "outputDeviceUID"))
+            .is_some_and(|uid| model::same_uid(uid, &identity.device));
+        let level = if control.outputs.is_some() && !feed.outputs.is_empty() && !individual {
+            control.group_level(feed)
+        } else {
+            feed.volume
+        };
+        body.float(f("GetVolumeResultMessage", "volume"), level);
         return Ok(vec![model::envelope("GET_VOLUME_RESULT_MESSAGE", body, id)]);
     }
     if typ == kind("SET_VOLUME_MESSAGE") {
@@ -397,7 +465,7 @@ pub async fn connection(
    let size=u32::from_be_bytes(buffer[..4].try_into()?)as usize;if !(32..=4*1024*1024).contains(&size){bail!("invalid data frame size")};if buffer.len()<size{break}
    let rest=buffer.split_off(size);let frame=std::mem::replace(&mut buffer,rest);let seq=u64::from_be_bytes(frame[20..28].try_into()?);
    if &frame[4..8]==b"sync"{tx.send(Output::Ack(seq)).await?}
-   if size>32{let value=match model::decode_plist(&frame[32..]){Ok(v)=>v,Err(error)=>{crate::station_elog!("MRP frame skipped, bad plist: {error:#}");continue}};if let Some(data)=value.as_dictionary().and_then(|v|v.get("params")).and_then(Value::as_dictionary).and_then(|v|v.get("data")).and_then(Value::as_data){let messages=match wire::decode_packet(data){Ok(m)=>m,Err(error)=>{crate::station_elog!("MRP frame skipped, bad protobuf: {error:#}");continue}};for message in messages{if dispatch_output(&message,&control,&tx,&mut pending)?{continue;}let current=updates.borrow().clone();if dispatch_remote_volume(&message,&identity,&current,&control,&tx,&mut pending)?{continue;}let typ=message.number(f("ProtocolMessage","type")).unwrap_or(0);let id=message.string(f("ProtocolMessage","identifier")).map(str::to_owned);let out=match handle(message,&identity,&current,&control,&mut subscribed).await{Ok(out)=>out,Err(error)=>{crate::station_elog!("MRP message type={typ} failed: {error:#}");if id.is_some(){vec![reply(id.as_deref(),6)]}else{Vec::new()}}};last=typ;if !out.is_empty(){tx.send(Output::Messages(out)).await?}}}}
+   if size>32{let value=match model::decode_plist(&frame[32..]){Ok(v)=>v,Err(error)=>{crate::station_elog!("MRP frame skipped, bad plist: {error:#}");continue}};if let Some(data)=value.as_dictionary().and_then(|v|v.get("params")).and_then(Value::as_dictionary).and_then(|v|v.get("data")).and_then(Value::as_data){let messages=match wire::decode_packet(data){Ok(m)=>m,Err(error)=>{crate::station_elog!("MRP frame skipped, bad protobuf: {error:#}");continue}};for message in messages{if dispatch_output(&message,&control,&tx,&mut pending)?{continue;}let current=updates.borrow().clone();if dispatch_group_volume(&message,&identity,&current,&control,&tx,&mut pending)?{continue;}if dispatch_remote_volume(&message,&identity,&current,&control,&tx,&mut pending)?{continue;}let typ=message.number(f("ProtocolMessage","type")).unwrap_or(0);let id=message.string(f("ProtocolMessage","identifier")).map(str::to_owned);let out=match handle(message,&identity,&current,&control,&mut subscribed).await{Ok(out)=>out,Err(error)=>{crate::station_elog!("MRP message type={typ} failed: {error:#}");if id.is_some(){vec![reply(id.as_deref(),6)]}else{Vec::new()}}};last=typ;if !out.is_empty(){tx.send(Output::Messages(out)).await?}}}}
   }},
   changed=updates.changed()=>{if changed.is_err(){break}let current=updates.borrow_and_update().clone();if subscribed{
    let mut output=Vec::new();if current.source!=previous.source{output.extend(model::announcement(&identity,&current));}else{output.extend(model::state_change(&identity,&previous,&current));}
@@ -444,6 +512,70 @@ mod tests {
     fn headers_are_fixed_size() {
         assert_eq!(framed(b"rply", 17, &[]).len(), 32);
         assert_eq!(&framed(b"sync", 17, b"123")[20..28], &17u64.to_be_bytes());
+    }
+    #[tokio::test]
+    async fn group_slider_scales_local_and_remote_and_recovers_after_zero() {
+        use crate::station_mrp::model::RemoteOutput;
+        let identity = Identity {
+            device: "local".into(),
+            group: "group".into(),
+        };
+        let remote = crate::remote::Remote::new();
+        let mut commands = remote.attach(1);
+        let initial = Feed {
+            volume: 0.1,
+            outputs: vec![RemoteOutput {
+                descriptor: Node::default()
+                    .text(f("AVOutputDeviceDescriptor", "uniqueIdentifier"), "pod")
+                    .clone(),
+                volume: Some(0.3),
+            }],
+            ..Default::default()
+        };
+        let (feed, _) = watch::channel(initial);
+        let (backend, mut requests) = crate::output_control::OutputControl::channel(4);
+        let control = Control::new(feed.clone(), remote).with_outputs(backend);
+        let (tx, mut replies) = mpsc::channel(4);
+        let mut pending = tokio::task::JoinSet::new();
+        for target in [0.2_f32, 0.0, 0.2] {
+            let body = Node::default()
+                .float(f("SetVolumeMessage", "volume"), target)
+                .clone();
+            let message = model::envelope("SET_VOLUME_MESSAGE", body, Some("group-slider"));
+            let before = feed.borrow().clone();
+            assert!(
+                dispatch_group_volume(&message, &identity, &before, &control, &tx, &mut pending)
+                    .unwrap()
+            );
+            let request = requests.recv().await.unwrap();
+            let levels = request.batch.as_ref().unwrap();
+            assert_eq!(levels.len(), 1);
+            assert_eq!(levels[0].0, "pod");
+            assert!((levels[0].1 - target).abs() < 1e-6);
+            request.reply.send(0).unwrap();
+            pending.join_next().await.unwrap().unwrap();
+            let crate::remote::Command::Volume(local) = commands.recv().await.unwrap() else {
+                panic!("wrong local command")
+            };
+            assert!((local - target / 3.0).abs() < 1e-6);
+            let after = feed.borrow().clone();
+            assert!((after.volume - target / 3.0).abs() < 1e-6);
+            assert_eq!(after.outputs[0].volume, Some(target));
+            assert!(
+                model::topology_updates(&identity, &before, &after)
+                    .iter()
+                    .all(|n| n.number(1) != Some(65))
+            );
+            let Output::Messages(messages) = replies.recv().await.unwrap() else {
+                panic!("wrong output")
+            };
+            assert_eq!(
+                messages[0].number(f("ProtocolMessage", "errorCode")),
+                Some(0)
+            );
+        }
+        let current = feed.borrow().clone();
+        assert!((control.group_level(&current) - 0.2).abs() < 1e-6);
     }
     #[tokio::test]
     async fn remote_volume_routes_without_changing_local_or_other_output() {
