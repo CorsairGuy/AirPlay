@@ -12,6 +12,7 @@
 pub mod group;
 mod local;
 mod local_pipe;
+pub mod outputs;
 mod packet;
 mod session;
 mod transport;
