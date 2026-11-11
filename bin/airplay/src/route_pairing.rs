@@ -18,11 +18,49 @@ pub struct Request {
     pub answer_window: Duration,
 }
 
+/// Use the application store's controller identity, reusing existing credentials
+/// or saving successful PIN pairing off the async reader thread. The UID must be
+/// the physical receiver's stable UID, not a UI group alias or network address.
+pub async fn authorize_and_save(
+    mut request: Request,
+    receiver_uid: String,
+    store: std::sync::Arc<crate::sender_store::SenderStore>,
+    outgoing: mpsc::Sender<Node>,
+    incoming: mpsc::Receiver<Node>,
+    stop: watch::Receiver<bool>,
+) -> Result<Option<PairingCredentials>> {
+    if *stop.borrow() {
+        return Ok(None);
+    }
+    if let Some(credentials) = store.get(&receiver_uid)? {
+        return Ok(Some(credentials));
+    }
+    request.controller = store.controller();
+    authorize_inner(
+        request,
+        outgoing,
+        incoming,
+        stop,
+        Some((receiver_uid, store)),
+    )
+    .await
+}
+
 pub async fn authorize(
+    request: Request,
+    outgoing: mpsc::Sender<Node>,
+    incoming: mpsc::Receiver<Node>,
+    stop: watch::Receiver<bool>,
+) -> Result<Option<PairingCredentials>> {
+    authorize_inner(request, outgoing, incoming, stop, None).await
+}
+
+async fn authorize_inner(
     request: Request,
     outgoing: mpsc::Sender<Node>,
     mut incoming: mpsc::Receiver<Node>,
     mut stop: watch::Receiver<bool>,
+    persistence: Option<(String, std::sync::Arc<crate::sender_store::SenderStore>)>,
 ) -> Result<Option<PairingCredentials>> {
     if *stop.borrow() {
         return Ok(None);
@@ -55,7 +93,8 @@ pub async fn authorize(
             return pending.finish(&pin).await.map(Some);
         }
     };
-    let result = tokio::select! {
+    let started = tokio::time::Instant::now();
+    let mut result = tokio::select! {
         result = tokio::time::timeout(request.answer_window, exchange) =>
             result.context("route authorization deadline exceeded").and_then(|r| r),
         _ = async {
@@ -64,6 +103,21 @@ pub async fn authorize(
             }
         } => Ok(None),
     };
+    if let (Ok(Some(credentials)), Some((uid, store))) = (&result, persistence) {
+        let saved = credentials.clone();
+        let remaining = request.answer_window.saturating_sub(started.elapsed());
+        let write = tokio::task::spawn_blocking(move || store.save(&uid, &saved));
+        if let Err(error) = async {
+            tokio::time::timeout(remaining, write)
+                .await
+                .context("pairing persistence deadline exceeded")?
+                .context("pairing persistence task failed")?
+        }
+        .await
+        {
+            result = Err(error);
+        }
+    }
     let status = match &result {
         Ok(Some(_)) => Status::Ok,
         Err(error) if error.downcast_ref::<pair::Error>().is_some() => Status::AuthenticationFailed,
@@ -148,6 +202,10 @@ mod tests {
             });
             let mut route = Node::default();
             route.text(f::AVOutputDeviceDescriptor::name, "Receiver");
+            let directory =
+                std::env::temp_dir().join(format!("airplay-route-store-{}", uuid::Uuid::new_v4()));
+            let store =
+                std::sync::Arc::new(crate::sender_store::SenderStore::open(&directory).unwrap());
             let request = Request {
                 endpoint,
                 controller: pair::Identity::from_seed("controller", &[4; 32]),
@@ -157,7 +215,14 @@ mod tests {
             let (out, mut messages) = mpsc::channel(4);
             let (answers, input) = mpsc::channel(4);
             let (stop, stopped) = watch::channel(false);
-            let task = tokio::spawn(authorize(request, out, input, stopped));
+            let task = tokio::spawn(authorize_and_save(
+                request,
+                "physical-receiver".into(),
+                store.clone(),
+                out,
+                input,
+                stopped,
+            ));
             let prompt = messages.recv().await.unwrap();
             assert_eq!(prompt.number(1), Some(59));
             let mut body = Node::default();
@@ -195,6 +260,20 @@ mod tests {
             let status = messages.recv().await.unwrap();
             assert_eq!(status.number(1), Some(61));
             assert_eq!(receiver.await.unwrap(), usize::from(!cancelled));
+            assert_eq!(
+                store.get("physical-receiver").unwrap().is_some(),
+                !cancelled
+            );
+            drop(store);
+            assert_eq!(
+                crate::sender_store::SenderStore::open(&directory)
+                    .unwrap()
+                    .get("physical-receiver")
+                    .unwrap()
+                    .is_some(),
+                !cancelled
+            );
+            std::fs::remove_dir_all(directory).unwrap();
         }
     }
 }

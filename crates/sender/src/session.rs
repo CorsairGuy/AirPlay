@@ -138,6 +138,12 @@ pub struct PairingCredentials {
 }
 
 impl PairingCredentials {
+    pub fn controller_id(&self) -> &str {
+        &self.controller.pairing_id
+    }
+    pub fn controller_public_key(&self) -> [u8; 32] {
+        self.controller.public_key()
+    }
     pub fn accessory_id(&self) -> &[u8] {
         &self.accessory_id
     }

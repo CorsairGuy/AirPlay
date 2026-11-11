@@ -18,6 +18,7 @@ pub mod send;
 pub mod send_control;
 #[cfg(unix)]
 pub mod send_ipc;
+pub mod sender_store;
 pub mod serve;
 pub mod session;
 pub mod state;
