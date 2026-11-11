@@ -112,6 +112,7 @@ impl PtpPlan {
                 addresses.push(*ip);
             }
         }
+        addresses.sort_unstable();
         group::peers(&addresses)?;
         Ok(PeerUpdate {
             domain: self.domain,
@@ -120,10 +121,12 @@ impl PtpPlan {
         })
     }
     pub(crate) fn initial_peer_update(&self) -> PeerUpdate {
+        let mut addresses = self.peers.clone();
+        addresses.sort_unstable();
         PeerUpdate {
             domain: self.domain,
             group: self.context.uuid(),
-            addresses: self.peers.clone(),
+            addresses,
         }
     }
     /// The role owner supplies one qualified domain/epoch for the whole group.
@@ -222,6 +225,33 @@ mod tests {
             vec!["192.0.2.2".parse().unwrap(), "192.0.2.2".parse().unwrap()],
         )
         .unwrap()
+    }
+    #[test]
+    fn peer_updates_are_sets_but_clock_epoch_and_group_remain_significant() {
+        let plan = plan();
+        let a = "192.0.2.2".parse().unwrap();
+        let b = "192.0.2.3".parse().unwrap();
+        let first = plan.peer_update(&[a, b]).unwrap();
+        let reordered = plan.peer_update(&[b, a, a]).unwrap();
+        assert_eq!(first, reordered);
+        let changed_epoch = PtpPlan::new(
+            GroupContext::new(123, ClockDomain::Ptp(CLOCK), true).unwrap(),
+            Domain::new(CLOCK, 2).unwrap(),
+            456,
+            vec!["192.0.2.1".parse().unwrap()],
+            vec![a, b],
+        )
+        .unwrap();
+        assert_ne!(first, changed_epoch.peer_update(&[a, b]).unwrap());
+        let changed_group = PtpPlan::new(
+            GroupContext::new(124, ClockDomain::Ptp(CLOCK), true).unwrap(),
+            plan.domain(),
+            456,
+            vec!["192.0.2.1".parse().unwrap()],
+            vec![a, b],
+        )
+        .unwrap();
+        assert_ne!(first, changed_group.peer_update(&[a, b]).unwrap());
     }
     #[test]
     fn ptp_targets_share_one_frame_reading_and_render_latency_is_counted_once() {

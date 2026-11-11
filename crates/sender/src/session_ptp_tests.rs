@@ -235,6 +235,16 @@ async fn ptp_negotiates_setpeers_sends_d7_and_rejects_ntp_downgrade() {
                 .unwrap()
                 .unwrap();
             assert_eq!(applied.borrow().addresses().len(), 2);
+            applied.borrow_and_update();
+            peers
+                .set_peers(&[
+                    "192.0.2.2".parse().unwrap(),
+                    "127.0.0.1".parse().unwrap(),
+                    "192.0.2.2".parse().unwrap(),
+                ])
+                .unwrap();
+            // The mock rejects any extra SETPEERS: reordered/duplicate discovery
+            // addresses must not trigger another RTSP operation or RTP reset.
             drop(audio);
             let stats = timeout(Duration::from_secs(3), running)
                 .await
