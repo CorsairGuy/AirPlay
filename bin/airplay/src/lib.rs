@@ -13,6 +13,7 @@ pub mod media;
 #[cfg(test)]
 mod mrp_path_tests;
 pub mod output_control;
+pub mod output_worker;
 pub mod relay_selection;
 pub mod remote;
 pub mod route_pairing;
