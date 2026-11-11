@@ -270,7 +270,7 @@ pub async fn connection(
   changed=updates.changed()=>{if changed.is_err(){break}let current=updates.borrow_and_update().clone();if subscribed{
    let mut output=Vec::new();if current.source!=previous.source{output.extend(model::announcement(&identity,&current));}else{output.extend(model::state_change(&identity,&previous,&current));}
    if current.route!=previous.route{output.push(model::device_info_update(&identity,&current));}
-   if current.control_available!=previous.control_available||current.route!=previous.route{output.extend(model::topology(&identity,&current));}else if(current.volume-previous.volume).abs()>0.004{output.push(model::volume(&identity,&current));}
+   output.extend(model::topology_updates(&identity,&previous,&current));
    if !output.is_empty(){tx.send(Output::Messages(output)).await?;previous=current;}
   }}
  }}Ok(())}.await;

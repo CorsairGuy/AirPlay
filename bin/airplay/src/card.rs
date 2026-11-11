@@ -39,6 +39,55 @@ fn hash(bytes: &[u8]) -> String {
 }
 
 impl Card {
+    /// Publish output-owner verified descriptors. Running audio alone does not
+    /// prove receiver group adoption. Preserve reported group/cluster IDs; never
+    /// manufacture membership from a requested selection. Advertise only volume
+    /// capabilities the owner actually routes (remote volume routing is separate).
+    pub fn set_outputs(&self, descriptors: Vec<mrp::wire::Node>) -> anyhow::Result<()> {
+        use crate::station_mrp::{model::RemoteOutput, wire::Node};
+        use mrp::schema::field::AVOutputDeviceDescriptor as fields;
+        anyhow::ensure!(descriptors.len() <= 64, "too many output descriptors");
+        let mut outputs = std::collections::BTreeMap::new();
+        for mut descriptor in descriptors {
+            descriptor.validate("AVOutputDeviceDescriptor")?;
+            let uid = descriptor
+                .string(fields::uniqueIdentifier)
+                .ok_or_else(|| anyhow::anyhow!("missing output UID"))?
+                .to_owned();
+            anyhow::ensure!(
+                !uid.is_empty() && uid.len() <= 256 && !uid.chars().any(char::is_control),
+                "invalid output UID"
+            );
+            anyhow::ensure!(
+                !crate::station_mrp::model::same_uid(&uid, &self.identity.device),
+                "remote descriptor duplicates local output"
+            );
+            let volume = if descriptor.get(fields::volume).is_some() {
+                let value = descriptor.real(fields::volume).unwrap_or(f64::NAN);
+                anyhow::ensure!(
+                    value.is_finite() && (0.0..=1.0).contains(&value),
+                    "invalid output volume"
+                );
+                Some(value as f32)
+            } else {
+                None
+            };
+            descriptor.remove(fields::volume);
+            let key = uuid::Uuid::parse_str(&uid)
+                .map(|v| v.to_string())
+                .unwrap_or(uid);
+            let remote = RemoteOutput {
+                descriptor: Node::parse(&descriptor.encode())?,
+                volume,
+            };
+            anyhow::ensure!(
+                outputs.insert(key, remote).is_none(),
+                "duplicate output UID"
+            );
+        }
+        self.update(|feed| feed.outputs = outputs.into_values().collect());
+        Ok(())
+    }
     pub fn new(device: Device, remote: Remote, inner: Arc<dyn Events>) -> Arc<Self> {
         Self::create(device, remote, inner, None)
     }
@@ -262,6 +311,65 @@ fn image_info(data: &[u8]) -> Option<(&'static str, u32, u32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_descriptors_update_atomically_and_volume_does_not_rebuild_topology() {
+        let card = Card::new(
+            Device {
+                name: "test".into(),
+                model: "AirPlay".into(),
+                localized_model: "AirPlay".into(),
+                uid: "local".into(),
+                group: "group".into(),
+                system_app: "test".into(),
+            },
+            Remote::new(),
+            Arc::new(crate::events::NoEvents),
+        );
+        let remote = |volume: f32| {
+            let mut n = mrp::wire::Node::default();
+            n.text(1, "Remote")
+                .text(2, "remote")
+                .text(3, "reported-group")
+                .float(24, volume);
+            n
+        };
+        card.set_outputs(vec![remote(0.2)]).unwrap();
+        let previous = card.feed.borrow().clone();
+        card.set_outputs(vec![remote(0.3)]).unwrap();
+        let current = card.feed.borrow().clone();
+        let changes =
+            crate::station_mrp::model::topology_updates(&card.identity, &previous, &current);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(
+            changes[0].number(1),
+            Some(crate::station_mrp::model::kind("VOLUME_DID_CHANGE_MESSAGE") as u64)
+        );
+        assert_eq!(
+            current.outputs[0].descriptor.string(3),
+            Some("reported-group")
+        );
+        assert!(card.set_outputs(vec![remote(0.4), remote(0.5)]).is_err());
+        assert_eq!(*card.feed.borrow(), current);
+        let mut invalid = remote(0.4);
+        invalid.text(2, "local");
+        assert!(card.set_outputs(vec![invalid]).is_err());
+        assert_eq!(*card.feed.borrow(), current);
+        card.set_outputs(vec![]).unwrap();
+        let removed = crate::station_mrp::model::topology_updates(
+            &card.identity,
+            &current,
+            &card.feed.borrow(),
+        );
+        assert_eq!(removed[0].number(1), Some(66));
+        assert_eq!(removed[0].nested(70).unwrap().string(1), Some("remote"));
+        for message in removed {
+            mrp::wire::Node::parse(&message.encode())
+                .unwrap()
+                .validate("ProtocolMessage")
+                .unwrap();
+        }
+    }
 
     #[test]
     fn image_sizes() {

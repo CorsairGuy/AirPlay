@@ -36,6 +36,7 @@ pub struct Cover {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct Feed {
+    pub outputs: Vec<RemoteOutput>,
     pub source: String,
     pub title: String,
     pub artist: String,
@@ -53,6 +54,7 @@ pub struct Feed {
 impl Default for Feed {
     fn default() -> Self {
         Self {
+            outputs: Vec::new(),
             source: "native".into(),
             title: String::new(),
             artist: String::new(),
@@ -68,6 +70,75 @@ impl Default for Feed {
             route: None,
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RemoteOutput {
+    /// Verified descriptor supplied by the output owner, excluding volume.
+    pub descriptor: Node,
+    pub volume: Option<f32>,
+}
+
+fn output_volume(identity: &Identity, feed: &Feed, output: &RemoteOutput) -> Option<Node> {
+    let value = output.volume?;
+    let uid = output
+        .descriptor
+        .string(f("AVOutputDeviceDescriptor", "uniqueIdentifier"))?;
+    let mut body = Node::default();
+    body.float(f("VolumeDidChangeMessage", "volume"), value)
+        .text(
+            f("VolumeDidChangeMessage", "endpointUID"),
+            active_group(identity, feed),
+        )
+        .text(f("VolumeDidChangeMessage", "outputDeviceUID"), uid);
+    Some(envelope("VOLUME_DID_CHANGE_MESSAGE", body, None))
+}
+
+pub fn topology_updates(identity: &Identity, previous: &Feed, current: &Feed) -> Vec<Node> {
+    let changed = previous
+        .outputs
+        .iter()
+        .map(|o| &o.descriptor)
+        .ne(current.outputs.iter().map(|o| &o.descriptor));
+    if changed
+        || previous.route != current.route
+        || previous.control_available != current.control_available
+    {
+        let mut messages = Vec::new();
+        let mut removed = Node::default();
+        for output in &previous.outputs {
+            let Some(uid) = output
+                .descriptor
+                .string(f("AVOutputDeviceDescriptor", "uniqueIdentifier"))
+            else {
+                continue;
+            };
+            if !current.outputs.iter().any(|o| {
+                o.descriptor
+                    .string(f("AVOutputDeviceDescriptor", "uniqueIdentifier"))
+                    .is_some_and(|id| same_uid(id, uid))
+            }) {
+                removed.text(1, uid); // RemoveOutputDevicesMessage.outputDeviceUIDs
+            }
+        }
+        if !removed.0.is_empty() {
+            messages.push(envelope("REMOVE_OUTPUT_DEVICES_MESSAGE", removed, None));
+        }
+        messages.extend(topology(identity, current));
+        return messages;
+    }
+    let mut messages = Vec::new();
+    if (previous.volume - current.volume).abs() > 0.004 {
+        messages.push(volume(identity, current));
+    }
+    for (old, new) in previous.outputs.iter().zip(&current.outputs) {
+        if old.volume != new.volume {
+            if let Some(message) = output_volume(identity, current, new) {
+                messages.push(message);
+            }
+        }
+    }
+    messages
 }
 impl Feed {
     pub fn position_at(&self, now: Instant) -> f64 {
@@ -492,6 +563,12 @@ pub fn topology(identity: &Identity, feed: &Feed) -> Vec<Node> {
         f("UpdateOutputDeviceMessage", "clusterAwareOutputDevices"),
         &device,
     );
+    for remote in &feed.outputs {
+        output.node(
+            f("UpdateOutputDeviceMessage", "clusterAwareOutputDevices"),
+            &remote.descriptor,
+        );
+    }
     let mut capability = Node::default();
     capability
         .boolean(
@@ -518,12 +595,18 @@ pub fn topology(identity: &Identity, feed: &Feed) -> Vec<Node> {
         f("VolumeControlCapabilitiesDidChangeMessage", "capabilities"),
         &capability,
     );
-    vec![
+    let mut messages = vec![
         envelope("UPDATE_OUTPUT_DEVICE_MESSAGE", output, None),
         envelope("VOLUME_CONTROL_AVAILABILITY_MESSAGE", capability, None),
         envelope("VOLUME_CONTROL_CAPABILITIES_DID_CHANGE_MESSAGE", caps, None),
         volume(identity, feed),
-    ]
+    ];
+    messages.extend(
+        feed.outputs
+            .iter()
+            .filter_map(|output| output_volume(identity, feed, output)),
+    );
+    messages
 }
 pub fn decode_plist(bytes: &[u8]) -> anyhow::Result<Value> {
     Ok(Value::from_reader(Cursor::new(bytes))?)
