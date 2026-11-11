@@ -9,7 +9,7 @@ use sender::{
     outputs::{OutputCatalog, ReceiverEndpoint},
     pool::SessionPool,
 };
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use timesync::media::{MasterLease, MasterTimeline};
 use tokio::sync::{mpsc, watch};
 
@@ -20,6 +20,36 @@ pub struct PtpGroup {
     timeline: Arc<MasterTimeline>,
     group: u128,
     lease: MasterLease,
+    clock_peers: Option<ClockPeers>,
+}
+#[derive(Clone)]
+struct ClockPeers {
+    service: Weak<timesync::service::Service>,
+    owner: u128,
+    ports: timesync::sender::Ports,
+}
+impl ClockPeers {
+    async fn apply(&self, ips: &[std::net::IpAddr]) -> Result<()> {
+        let Some(service) = self.service.upgrade() else {
+            if ips.is_empty() {
+                return Ok(());
+            }
+            bail!("shared clock service ended");
+        };
+        let peers = ips
+            .iter()
+            .map(|&ip| timesync::sender::Peer {
+                ip,
+                ports: self.ports,
+            })
+            .collect();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            service.set_group_peers(self.owner, peers),
+        )
+        .await??;
+        Ok(())
+    }
 }
 impl PtpGroup {
     pub fn new(
@@ -36,7 +66,30 @@ impl PtpGroup {
             timeline,
             group,
             lease,
+            clock_peers: None,
         })
+    }
+    /// Bind to the EXISTING shared service; never start/stop a service here.
+    /// Caller supplies a fresh ownership token and negotiated timing ports.
+    pub fn with_clock_service(
+        mut self,
+        service: &Arc<timesync::service::Service>,
+        owner: u128,
+        ports: timesync::sender::Ports,
+    ) -> Result<Self> {
+        if owner == 0
+            || ports.event == 0
+            || ports.general == 0
+            || !self.timeline.follows(&service.subscribe())
+        {
+            bail!("invalid timing ownership/ports or another clock service");
+        }
+        self.clock_peers = Some(ClockPeers {
+            service: Arc::downgrade(service),
+            owner,
+            ports,
+        });
+        Ok(self)
     }
     /// Use this same cancellation receiver for the local renderer. The clock
     /// service is externally owned and is not stopped by removing one group.
@@ -117,6 +170,8 @@ impl PtpGroup {
             inner: preparer,
             timeline: self.timeline.clone(),
             group: self.group,
+            clock_peers: self.clock_peers.clone(),
+            last_members: None,
         };
         output_worker::run_discovered(
             pool,
@@ -154,13 +209,31 @@ struct QualifiedPreparer<P> {
     inner: P,
     timeline: Arc<MasterTimeline>,
     group: u128,
+    clock_peers: Option<ClockPeers>,
+    last_members: Option<Vec<std::net::IpAddr>>,
 }
 impl<P: SessionPreparer> SessionPreparer for QualifiedPreparer<P> {
-    fn active(&mut self, pool: &SessionPool) -> Result<()> {
+    async fn active(&mut self, pool: &SessionPool) -> Result<()> {
         self.timeline.reading_at(std::time::Instant::now())?;
-        self.inner.active(pool)?;
-        pool.sync_ptp_members()?;
+        self.inner.active(pool).await?;
+        let members = pool.sync_ptp_members()?;
+        if self.last_members.as_ref() != Some(&members) {
+            if let Some(clock) = &self.clock_peers {
+                clock.apply(&members).await?;
+            }
+            self.last_members = Some(members);
+        }
         Ok(())
+    }
+    async fn finish(&mut self) -> Result<()> {
+        let inner = self.inner.finish().await;
+        // Queue release even after a timed-out/cancelled update: the shared
+        // service serializes both commands, preserving release-after-update.
+        let release = match &self.clock_peers {
+            Some(clock) => clock.apply(&[]).await,
+            None => Ok(()),
+        };
+        inner.and(release)
     }
     fn selection(&mut self, receivers: &[ReceiverEndpoint]) -> Result<()> {
         self.timeline.reading_at(std::time::Instant::now())?;
@@ -251,6 +324,125 @@ mod tests {
     struct Blocked {
         entered: Arc<AtomicBool>,
         dropped: Arc<AtomicBool>,
+    }
+    #[tokio::test]
+    async fn shared_clock_binding_releases_only_its_owner_after_worker_exit() {
+        use timesync::{
+            sender::{Config as Network, Peer, Ports},
+            service::{Config, Service},
+        };
+        let origin = Instant::now();
+        let domain = Domain::new(7, 1).unwrap();
+        let source = Arc::new(InstantSource::new(
+            origin,
+            LocalClock::new(1).unwrap(),
+            domain,
+            1_000_000_000,
+        ));
+        let service = Arc::new(
+            Service::bind(
+                Config {
+                    network: Network {
+                        domain,
+                        bind_ip: "127.0.0.1".parse().unwrap(),
+                        ports: Ports {
+                            event: 0,
+                            general: 0,
+                        },
+                        peers: vec![],
+                    },
+                    election: clock::role::Config {
+                        policy: clock::role::Policy::Elect,
+                        settle_ns: 1_000_000,
+                        announce_lease_ns: 200_000_000,
+                        min_announces: 2,
+                    },
+                    follow: clock::follower::Config {
+                        pairing_lease_ns: 100_000_000,
+                        mapping_lease_ns: 150_000_000,
+                        warmup_samples: 2,
+                        step_threshold_ns: 50_000_000,
+                    },
+                    probe: None,
+                },
+                source.clone(),
+            )
+            .await
+            .unwrap(),
+        );
+        let addresses = service.addresses();
+        let mut status = service.subscribe();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while status.borrow_and_update().selection.role != Role::Master {
+                status.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        let selected = status.borrow().selection;
+        let timeline =
+            Arc::new(MasterTimeline::new(source, status, Duration::from_millis(100)).unwrap());
+        let (_user, upstream) = watch::channel(false);
+        let event = tokio::net::UdpSocket::bind("127.0.0.2:0").await.unwrap();
+        let general = tokio::net::UdpSocket::bind("127.0.0.2:0").await.unwrap();
+        let ports = Ports {
+            event: event.local_addr().unwrap().port(),
+            general: general.local_addr().unwrap().port(),
+        };
+        let group = PtpGroup::new(timeline, 42, upstream)
+            .unwrap()
+            .with_clock_service(&service, 400, ports)
+            .unwrap();
+        let (_updates, _other_user, unrelated, _) = fixture();
+        assert!(unrelated.with_clock_service(&service, 401, ports).is_err());
+        let peer_ip = event.local_addr().unwrap().ip();
+        let binding = group.clock_peers.as_ref().unwrap();
+        binding.apply(&[peer_ip]).await.unwrap();
+        service
+            .set_group_peers(900, vec![Peer { ip: peer_ip, ports }])
+            .await
+            .unwrap();
+        let (_pcm, audio) = tokio::sync::broadcast::channel(4);
+        let (control, requests) = crate::output_control::OutputControl::channel(4);
+        drop(control);
+        let (_catalog, discovery) = watch::channel(Arc::new(OutputCatalog::new(vec![]).unwrap()));
+        let (state, _) = watch::channel(output_worker::Snapshot::default());
+        group
+            .run(
+                SessionPool::new(audio),
+                requests,
+                discovery,
+                vec![],
+                Blocked {
+                    entered: Arc::new(AtomicBool::new(false)),
+                    dropped: Arc::new(AtomicBool::new(false)),
+                },
+                state,
+            )
+            .await
+            .unwrap();
+        let mut buffer = [0; 1024];
+        while event.try_recv(&mut buffer).is_ok() {}
+        tokio::time::timeout(Duration::from_secs(1), event.recv_from(&mut buffer))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(service.addresses(), addresses);
+        assert_eq!(service.subscribe().borrow().selection, selected);
+        service.set_group_peers(900, vec![]).await.unwrap();
+        while event.try_recv(&mut buffer).is_ok() {}
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), event.recv_from(&mut buffer))
+                .await
+                .is_err(),
+            "worker must release owner400; otherwise traffic survives owner900 release"
+        );
+        Arc::try_unwrap(service)
+            .ok()
+            .unwrap()
+            .shutdown()
+            .await
+            .unwrap();
     }
     #[tokio::test]
     async fn closed_control_queue_stops_producer_and_renderer_without_clock_loss() {

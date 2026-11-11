@@ -12,10 +12,15 @@ use tokio::sync::{mpsc, watch};
 /// Application supplies authentication/configuration. Dropping this future
 /// must release pending pairing resources; do not detach network work here.
 pub trait SessionPreparer: Send {
-    /// Nonblocking reconciliation after pool changes and periodic task-state
+    /// Bounded reconciliation after pool changes and periodic task-state
     /// observation. Failure terminates the owner and awaits pool cleanup.
-    fn active(&mut self, _pool: &SessionPool) -> Result<()> {
-        Ok(())
+    fn active(&mut self, _pool: &SessionPool) -> impl Future<Output = Result<()>> + Send {
+        async { Ok(()) }
+    }
+    /// Release external interests after pool teardown, even if reconciliation
+    /// or preparation failed. Must be bounded and safe after a cancelled call.
+    fn finish(&mut self) -> impl Future<Output = Result<()>> + Send {
+        async { Ok(()) }
     }
     /// Validated complete physical selection, before preparing any additions.
     /// Pure configuration/preflight only: no I/O or mutation of live sessions.
@@ -124,7 +129,12 @@ pub async fn run_discovered(
             }
             request = requests.recv() => match request { Some(request) => request, None => break },
             _ = tick.tick() => {
-                if preparer.active(&pool).is_err() { last_error=Some(100); break; }
+                let result = tokio::select! {
+                    biased;
+                    _ = stopped(&mut stop) => break,
+                    result = preparer.active(&pool) => result,
+                };
+                if result.is_err() { last_error=Some(100); break; }
                 publish(&updates,Snapshot {selected: confirmed(&pool,&catalog,&desired),last_error});
                 continue;
             }
@@ -238,7 +248,12 @@ pub async fn run_discovered(
                 Err(_) => 100,
             },
         };
-        if preparer.active(&pool).is_err() {
+        let reconciled = tokio::select! {
+            biased;
+            _ = stopped(&mut stop) => break,
+            result = preparer.active(&pool) => result,
+        };
+        if reconciled.is_err() {
             let _ = request.reply.send(100);
             last_error = Some(100);
             break;
@@ -254,6 +269,9 @@ pub async fn run_discovered(
         let _ = request.reply.send(code);
     }
     pool.shutdown().await;
+    if preparer.finish().await.is_err() {
+        last_error = Some(100);
+    }
     publish(
         &updates,
         Snapshot {
@@ -269,7 +287,7 @@ mod tests {
     use sender::outputs::OutputRoute;
     struct FailedReconciliation;
     impl SessionPreparer for FailedReconciliation {
-        fn active(&mut self, _: &SessionPool) -> Result<()> {
+        async fn active(&mut self, _: &SessionPool) -> Result<()> {
             anyhow::bail!("offline reconciliation failure")
         }
         async fn prepare(&mut self, _: ReceiverEndpoint) -> Result<Session> {

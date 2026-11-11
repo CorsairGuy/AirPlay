@@ -162,6 +162,10 @@ impl MasterTimeline {
     pub fn domain(&self) -> Domain {
         self.domain
     }
+    /// Check service identity without substituting an equal-looking clock ID.
+    pub fn follows(&self, status: &watch::Receiver<Snapshot>) -> bool {
+        self.status.same_channel(status)
+    }
     /// Call once on the PCM producer before broadcasting a frame. Uses exactly
     /// the same source epoch supplied to Service::bind, never per-target clocks.
     pub fn reading_at(&self, produced: Instant) -> io::Result<Reading> {
@@ -405,6 +409,12 @@ mod tests {
     #[test]
     fn service_and_producer_use_same_physical_source_and_selected_epoch() {
         let (origin, _updates, timeline) = fixture();
+        assert!(timeline.follows(&_updates.subscribe()));
+        let (_other, status) = watch::channel(*_updates.borrow());
+        assert!(
+            !timeline.follows(&status),
+            "equal snapshots are not the same service"
+        );
         let reading = timeline
             .reading_at_now(
                 origin + Duration::from_millis(10),
