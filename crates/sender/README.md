@@ -219,8 +219,13 @@ latency22050 кадров(500мс), volume−30dB, request_timeout8с. Допу�
 `config.pairing = Some(PairingCredentials::new(controller, accessory_id, accessory_key)?)`
 использует сохранённую identity контроллера и закреплённый ключ приёмника для
 pair-verify (HKP3), без нового PIN/pair-setup. При ошибке проверки нет скрытого
-перехода к другому режиму. Сохранение/загрузка credentials и первичное PIN-сопряжение
-принадлежат приложению; библиотека не читает файлы и не выбирает PIN сама.
+перехода к другому режиму. Для первичного сопряжения вызовите
+`PinPairing::begin(endpoint, controller.clone(), timeout).await?`: он запускает
+показ кода и возвращает незавершённый обмен. После ввода пользователем кода
+вызовите `pending.finish(&pin).await?` и сохраните проверенные credentials.
+Приложение сохраняет свою identity и `accessory_id()/accessory_public_key()`;
+библиотека не читает файлы и не выбирает PIN сама. Drop незавершённого обмена
+закрывает соединение. Вывод окна на iPhone через MRP — отдельный слой.
 `None` сохраняет transient3939. Debug credentials скрывает приватное содержимое.
 
 `Session::connect(config).await` выполняет сопряжение и RTSP startup. Это

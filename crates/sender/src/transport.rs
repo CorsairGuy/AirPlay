@@ -142,6 +142,10 @@ impl Rtsp {
         self.pair_request("/pair-verify", body, "3").await
     }
 
+    pub(crate) async fn pin_post(&mut self, path: &str, body: Vec<u8>) -> Result<rtsp::Response> {
+        self.pair_request(path, body, "3").await
+    }
+
     async fn pair_request(
         &mut self,
         path: &str,

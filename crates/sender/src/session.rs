@@ -138,6 +138,12 @@ pub struct PairingCredentials {
 }
 
 impl PairingCredentials {
+    pub fn accessory_id(&self) -> &[u8] {
+        &self.accessory_id
+    }
+    pub fn accessory_public_key(&self) -> [u8; 32] {
+        self.accessory_key
+    }
     pub fn new(
         controller: PairIdentity,
         accessory_id: Vec<u8>,
@@ -161,6 +167,77 @@ impl PairingCredentials {
 impl std::fmt::Debug for PairingCredentials {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("PairingCredentials { private }")
+    }
+}
+
+/// A first-time PIN exchange, paused while the application obtains the displayed
+/// code. No audio SETUP, playback or credential files are created. Dropping it
+/// closes this connection; retry requires an explicit new begin().
+pub struct PinPairing {
+    rtsp: Rtsp,
+    controller: PairIdentity,
+    m2: Vec<u8>,
+    deadline: Duration,
+}
+
+impl PinPairing {
+    pub async fn begin(
+        endpoint: SocketAddr,
+        controller: PairIdentity,
+        deadline: Duration,
+    ) -> Result<Self> {
+        if endpoint.port() == 0
+            || deadline.is_zero()
+            || deadline > Duration::from_secs(30)
+            || controller.pairing_id.is_empty()
+            || controller.pairing_id.len() > 256
+        {
+            bail!("invalid PIN pairing endpoint, identity or deadline");
+        }
+        let stream = timeout(deadline, TcpStream::connect(endpoint))
+            .await
+            .context("PIN connect deadline")??;
+        stream.set_nodelay(true)?;
+        let mut rtsp = Rtsp::new(
+            Connection::new(stream),
+            "rtsp://pairing/0".into(),
+            "pairing".into(),
+            0,
+            deadline,
+        );
+        rtsp.pin_post("/pair-pin-start", Vec::new()).await?;
+        // M1 has no PIN-dependent values; proof generation waits for finish().
+        let setup = ControllerSetup::new(controller.clone(), "", false);
+        let m2 = rtsp.pin_post("/pair-setup", setup.m1()).await?.body;
+        let reply = pair::tlv8::Tlv8::decode(&m2)?;
+        if reply.state()? != 2 || reply.get(pair::tlv8::ERROR).is_some() {
+            bail!("receiver rejected PIN pairing start");
+        }
+        reply.require(pair::tlv8::SALT, "missing PIN setup salt")?;
+        reply.require(pair::tlv8::PUBLIC_KEY, "missing PIN setup key")?;
+        Ok(Self {
+            rtsp,
+            controller,
+            m2,
+            deadline,
+        })
+    }
+
+    pub async fn finish(mut self, pin: &str) -> Result<PairingCredentials> {
+        if pin.is_empty() || pin.len() > 64 {
+            bail!("PIN must contain 1..64 bytes");
+        }
+        let setup = ControllerSetup::new(self.controller.clone(), pin.to_owned(), false);
+        let (setup, m3) = timeout(self.deadline, setup_proof(setup, self.m2))
+            .await
+            .context("PIN proof deadline")??;
+        let m4 = self.rtsp.pin_post("/pair-setup", m3).await?;
+        if setup.check_m4(&m4.body)?.is_some() {
+            bail!("unexpected transient PIN exchange");
+        }
+        let m6 = self.rtsp.pin_post("/pair-setup", setup.m5()?).await?;
+        let accessory = setup.check_m6(&m6.body)?;
+        PairingCredentials::new(self.controller, accessory.id, accessory.public_key)
     }
 }
 
@@ -780,6 +857,90 @@ async fn timing_server(socket: Arc<UdpSocket>, peer: std::net::IpAddr) {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn first_pin_pairing_returns_verified_keys_or_rejects_wrong_pin() {
+        use pair::{
+            PairingStore,
+            hap::{PairSetup, SetupOutcome},
+        };
+        for pin in ["1234", "9999"] {
+            let controller = PairIdentity::from_seed("controller", &[11; 32]);
+            let accessory = PairIdentity::from_seed("receiver", &[12; 32]);
+            let expected_key = accessory.public_key();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = listener.local_addr().unwrap();
+            let peer = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut connection = Connection::new(socket);
+                let mut setup = PairSetup::new(accessory, "1234");
+                let store = pair::MemoryStore::default();
+                for step in 0..4 {
+                    let request = connection.event_request().await.unwrap();
+                    assert_eq!(request.method, "POST");
+                    assert_eq!(request.headers.get("X-Apple-HKP"), Some("3"));
+                    let mut response = rtsp::Response::to(&request, 200);
+                    let mut ended = false;
+                    if step == 0 {
+                        assert_eq!(request.uri, "/pair-pin-start");
+                    } else {
+                        assert_eq!(request.uri, "/pair-setup");
+                        response.body = match setup.handle(&request.body, &store).unwrap() {
+                            SetupOutcome::Continue(reply) => reply,
+                            SetupOutcome::Paired { reply, .. } | SetupOutcome::Rejected(reply) => {
+                                ended = true;
+                                reply
+                            }
+                            _ => panic!("unexpected transient setup"),
+                        };
+                    }
+                    let mut bytes = Vec::new();
+                    response.encode(&mut bytes);
+                    connection.send(&bytes).await.unwrap();
+                    if ended {
+                        break;
+                    }
+                }
+                store.len()
+            });
+            let waiting = PinPairing::begin(endpoint, controller, Duration::from_secs(3))
+                .await
+                .unwrap();
+            let result = waiting.finish(pin).await;
+            let registered = peer.await.unwrap();
+            if pin == "1234" {
+                let credentials = result.unwrap();
+                assert_eq!(credentials.accessory_id(), b"receiver");
+                assert_eq!(credentials.accessory_public_key(), expected_key);
+                assert_eq!(registered, 1);
+            } else {
+                assert!(result.is_err());
+                assert_eq!(registered, 0);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_pin_pairing_parameters_fail_before_connecting() {
+        let controller = PairIdentity::from_seed("controller", &[1; 32]);
+        assert!(
+            PinPairing::begin(
+                "127.0.0.1:0".parse().unwrap(),
+                controller.clone(),
+                Duration::from_secs(1)
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            PinPairing::begin(
+                "127.0.0.1:7000".parse().unwrap(),
+                controller,
+                Duration::ZERO
+            )
+            .await
+            .is_err()
+        );
+    }
     #[tokio::test]
     async fn stored_pairing_verifies_without_pin_or_new_pair_setup() {
         use pair::{
