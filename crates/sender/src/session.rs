@@ -373,12 +373,6 @@ impl TargetPacketizer {
             Self::Ptp(p) => p.initial_timestamp(),
         }
     }
-    fn next_sequence(&self) -> u16 {
-        match self {
-            Self::Ntp(p) => p.next_sequence(),
-            Self::Ptp(p) => p.next_sequence(),
-        }
-    }
     fn retransmit(&self, bytes: &[u8]) -> Vec<Vec<u8>> {
         match self {
             Self::Ntp(p) => p.retransmit(bytes),

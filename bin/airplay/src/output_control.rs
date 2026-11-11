@@ -85,13 +85,6 @@ impl OutputControl {
             .map_err(|_| ())?;
         Ok(result)
     }
-    pub(crate) fn submit_volume(
-        &self,
-        uid: String,
-        value: f32,
-    ) -> Result<oneshot::Receiver<u64>, ()> {
-        self.enqueue_volume(uid, value, None)
-    }
     pub(crate) fn submit_volume_after(
         &self,
         uid: String,
@@ -138,35 +131,6 @@ impl OutputControl {
                 volume: None,
                 batch: None,
                 operation: Some(operation),
-                after: None,
-                reply,
-            })
-            .map_err(|_| ())?;
-        Ok(result)
-    }
-    pub(crate) fn submit_batch(
-        &self,
-        levels: Vec<(String, f32)>,
-    ) -> Result<oneshot::Receiver<u64>, ()> {
-        if levels.is_empty()
-            || levels.len() > 64
-            || levels.iter().any(|(uid, value)| {
-                uid.is_empty()
-                    || uid.len() > 256
-                    || uid.chars().any(char::is_control)
-                    || !value.is_finite()
-                    || !(0.0..=1.0).contains(value)
-            })
-        {
-            return Err(());
-        }
-        let (reply, result) = oneshot::channel();
-        self.0
-            .try_send(OutputRequest {
-                body: Node::default(),
-                volume: None,
-                batch: Some(levels),
-                operation: None,
                 after: None,
                 reply,
             })
