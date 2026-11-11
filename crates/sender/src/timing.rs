@@ -18,6 +18,26 @@ pub struct PtpPlan {
     receivers: Vec<IpAddr>,
     peers: Vec<IpAddr>,
 }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PeerUpdate {
+    domain: Domain,
+    group: u128,
+    addresses: Vec<IpAddr>,
+}
+impl PeerUpdate {
+    pub fn domain(&self) -> Domain {
+        self.domain
+    }
+    pub fn group(&self) -> u128 {
+        self.group
+    }
+    pub fn addresses(&self) -> &[IpAddr] {
+        &self.addresses
+    }
+    pub(crate) fn body(&self) -> Result<plist::Value> {
+        group::peers(&self.addresses)
+    }
+}
 
 /// One newly keyed PTP target. Its private inner prevents in-place timing-mode
 /// changes. Caller must supply a fresh authenticated key for each replacement.
@@ -84,6 +104,28 @@ impl PtpPacketizer {
     }
 }
 impl PtpPlan {
+    pub fn peer_update(&self, receivers: &[IpAddr]) -> Result<PeerUpdate> {
+        group::peers(receivers)?;
+        let mut addresses = Vec::new();
+        for ip in receivers.iter().chain(&self.local_addresses) {
+            if !addresses.contains(ip) {
+                addresses.push(*ip);
+            }
+        }
+        group::peers(&addresses)?;
+        Ok(PeerUpdate {
+            domain: self.domain,
+            group: self.context.uuid(),
+            addresses,
+        })
+    }
+    pub(crate) fn initial_peer_update(&self) -> PeerUpdate {
+        PeerUpdate {
+            domain: self.domain,
+            group: self.context.uuid(),
+            addresses: self.peers.clone(),
+        }
+    }
     /// The role owner supplies one qualified domain/epoch for the whole group.
     /// Local reachable addresses are explicit; the peer list includes the sender,
     /// matching the verified Station SETPEERS path. Never substitute NTP readings.

@@ -132,6 +132,13 @@ async fn ptp_negotiates_setpeers_sends_d7_and_rejects_ntp_downgrade() {
                     }
                     3 => assert_eq!(request.method, "RECORD"),
                     4 => assert_eq!(request.method, "FLUSH"),
+                    5 => {
+                        assert_eq!(request.method, "SETPEERS");
+                        let peers =
+                            plist::Value::from_reader(std::io::Cursor::new(&request.body)).unwrap();
+                        assert_eq!(peers.as_array().unwrap().len(), 2);
+                        tokio::time::sleep(Duration::from_millis(300)).await;
+                    }
                     _ => panic!("unexpected request: {}", request.method),
                 }
                 stage += 1;
@@ -139,7 +146,7 @@ async fn ptp_negotiates_setpeers_sends_d7_and_rejects_ntp_downgrade() {
                 response.encode(&mut bytes);
                 conn.send(&bytes).await.unwrap();
             }
-            assert_eq!(stage, if accept { 5 } else { 1 });
+            assert_eq!(stage, if accept { 6 } else { 1 });
             if accept {
                 let mut bytes = [0; 2048];
                 let (size, _) = control.recv_from(&mut bytes).await.unwrap();
@@ -153,6 +160,17 @@ async fn ptp_negotiates_setpeers_sends_d7_and_rejects_ntp_downgrade() {
                 let (size, _) = data.recv_from(&mut bytes).await.unwrap();
                 assert!(size > PACKET_BYTES);
                 assert_eq!(bytes[1] & 0x7f, 96);
+                let first_seq = u16::from_be_bytes(bytes[2..4].try_into().unwrap());
+                let first_time = u32::from_be_bytes(bytes[4..8].try_into().unwrap());
+                data.recv_from(&mut bytes).await.unwrap();
+                assert_eq!(
+                    u16::from_be_bytes(bytes[2..4].try_into().unwrap()),
+                    first_seq.wrapping_add(1)
+                );
+                assert_eq!(
+                    u32::from_be_bytes(bytes[4..8].try_into().unwrap()),
+                    first_time.wrapping_add(352)
+                );
             }
         });
         let mut config = SessionConfig::new(endpoint, Identity::new("sender", "test"));
@@ -167,18 +185,63 @@ async fn ptp_negotiates_setpeers_sends_d7_and_rejects_ntp_downgrade() {
             let (audio, packets) = broadcast::channel(4);
             let (_gain, gains) = watch::channel(Volume::MUTE);
             let (_stop, stopped) = watch::channel(false);
-            let frame = MediaClock::now()
+            let peers = session.ptp_peer_control().unwrap();
+            let mut applied = peers.applied();
+            let (progress, mut observed) = watch::channel(None);
+            let running =
+                tokio::spawn(session.run_with_progress(packets, gains, stopped, progress));
+            let clock = MediaClock::now();
+            let frame = clock
                 .packet_with_ptp(0, &[0; PACKET_BYTES], domain, |_| {
                     Ok(domain.reading(7_000_000_000))
                 })
                 .unwrap();
             audio.send(Arc::new(frame)).unwrap();
-            drop(audio);
-            let stats = timeout(Duration::from_secs(3), session.run(packets, gains, stopped))
+            timeout(Duration::from_secs(1), observed.changed())
                 .await
                 .unwrap()
                 .unwrap();
-            assert_eq!(stats.packets_sent, 1);
+            observed.borrow_and_update();
+            assert!(peers.set_peers(&["192.0.2.2".parse().unwrap()]).is_err());
+            peers
+                .set_peers(&["127.0.0.1".parse().unwrap(), "192.0.2.2".parse().unwrap()])
+                .unwrap();
+            let frame = clock
+                .packet_with_ptp(352, &[0; PACKET_BYTES], domain, |_| {
+                    Ok(domain.reading(7_007_981_859))
+                })
+                .unwrap();
+            audio.send(Arc::new(frame)).unwrap();
+            timeout(Duration::from_millis(150), async {
+                loop {
+                    if observed
+                        .borrow_and_update()
+                        .as_ref()
+                        .is_some_and(|p| p.packets_sent >= 2)
+                    {
+                        break;
+                    }
+                    observed.changed().await.unwrap();
+                }
+            })
+            .await
+            .unwrap();
+            assert!(
+                !applied.has_changed().unwrap(),
+                "UDP must continue before slow SETPEERS acknowledgement"
+            );
+            timeout(Duration::from_secs(1), applied.changed())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(applied.borrow().addresses().len(), 2);
+            drop(audio);
+            let stats = timeout(Duration::from_secs(3), running)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(stats.packets_sent, 2);
         } else {
             assert!(session.err().unwrap().to_string().contains("PTP timing"));
         }

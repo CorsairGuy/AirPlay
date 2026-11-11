@@ -294,6 +294,56 @@ pub struct Session {
     packetizer: TargetPacketizer,
     _timing_task: Option<Task>,
     _event_task: Option<Task>,
+    peers: Option<PtpPeerControl>,
+    peer_changes: Option<PeerChanges>,
+}
+
+/// Requested peer state and the last RTSP-accepted update, not proof of native
+/// group adoption. Bound to this connection's original group/domain and route.
+#[derive(Clone)]
+pub struct PtpPeerControl {
+    plan: crate::timing::PtpPlan,
+    receiver: std::net::IpAddr,
+    requested: watch::Sender<crate::timing::PeerUpdate>,
+    applied: watch::Receiver<crate::timing::PeerUpdate>,
+}
+struct PeerChanges {
+    requested: watch::Receiver<crate::timing::PeerUpdate>,
+    applied: watch::Sender<crate::timing::PeerUpdate>,
+}
+impl PtpPeerControl {
+    pub fn requested(&self) -> crate::timing::PeerUpdate {
+        self.requested.borrow().clone()
+    }
+    pub fn applied(&self) -> watch::Receiver<crate::timing::PeerUpdate> {
+        self.applied.clone()
+    }
+    pub(crate) fn prepare(
+        &self,
+        receivers: &[std::net::IpAddr],
+    ) -> Result<crate::timing::PeerUpdate> {
+        if !receivers.contains(&self.receiver) {
+            bail!("PTP peer update omits this receiver");
+        }
+        if self.requested.is_closed() {
+            bail!("PTP session ended");
+        }
+        self.plan.peer_update(receivers)
+    }
+    pub(crate) fn publish(&self, update: crate::timing::PeerUpdate) -> Result<()> {
+        if self.requested.is_closed() {
+            bail!("PTP session ended");
+        }
+        if *self.requested.borrow() == update {
+            return Ok(());
+        }
+        self.requested
+            .send(update)
+            .map_err(|_| anyhow!("PTP session ended"))
+    }
+    pub fn set_peers(&self, receivers: &[std::net::IpAddr]) -> Result<()> {
+        self.publish(self.prepare(receivers)?)
+    }
 }
 
 enum TargetPacketizer {
@@ -357,6 +407,9 @@ impl TargetPacketizer {
 }
 
 impl Session {
+    pub fn ptp_peer_control(&self) -> Option<PtpPeerControl> {
+        self.peers.clone()
+    }
     pub fn endpoint(&self) -> SocketAddr {
         self.config.endpoint
     }
@@ -657,6 +710,25 @@ impl Session {
                 return Err(error);
             }
         };
+        let (peers, peer_changes) = if let Some(plan) = &config.ptp {
+            let initial = plan.initial_peer_update();
+            let (requested, changes) = watch::channel(initial.clone());
+            let (applied, accepted) = watch::channel(initial);
+            (
+                Some(PtpPeerControl {
+                    plan: plan.clone(),
+                    receiver: config.endpoint.ip(),
+                    requested,
+                    applied: accepted,
+                }),
+                Some(PeerChanges {
+                    requested: changes,
+                    applied,
+                }),
+            )
+        } else {
+            (None, None)
+        };
         Ok(Self {
             config,
             rtsp: Some(rtsp),
@@ -666,6 +738,8 @@ impl Session {
             packetizer,
             _timing_task: timing_task,
             _event_task: event_task,
+            peers,
+            peer_changes,
         })
     }
 
@@ -719,6 +793,7 @@ impl Session {
             } else {
                 Some(self.config.volume)
             },
+            self.peer_changes.take(),
         )));
         let result = tokio::select! {
             result = self.stream(&mut audio, &mut stop, progress.as_ref()) => result,
@@ -837,10 +912,12 @@ async fn control_owner(
     mut volume: watch::Receiver<Volume>,
     mut stop: watch::Receiver<bool>,
     mut current: Option<Volume>,
+    mut peers: Option<PeerChanges>,
 ) -> Result<u64> {
     let mut updates = 0;
     let mut requested = false;
     let mut volume_open = true;
+    let mut peers_open = peers.is_some();
     let mut feedback = tokio::time::interval_at(
         tokio::time::Instant::now() + Duration::from_secs(2),
         Duration::from_secs(2),
@@ -853,6 +930,20 @@ async fn control_owner(
             break;
         }
         tokio::select! {
+            changed=async {match peers.as_mut() {Some(peers)=>peers.requested.changed().await,None=>std::future::pending().await}}, if peers_open => {
+                match changed {
+                    Ok(())=>{
+                        let peers=peers.as_mut().context("PTP update channel")?;
+                        let requested=peers.requested.borrow_and_update().clone();
+                        let applied=peers.applied.borrow().clone();
+                        if requested!=applied {
+                            rtsp.request("SETPEERS",None,binary_plist(requested.body()?)?,Some("/peer-list-changed"),&[]).await.context("PTP peer update rejected")?;
+                            peers.applied.send_replace(requested);
+                        }
+                    }
+                    Err(_)=>peers_open=false,
+                }
+            }
             _ = volume_tick.tick() => {
                 // Preserve mode needs a published revision, including an explicit
                 // request equal to the placeholder. Never consume a queued user
@@ -1231,7 +1322,7 @@ mod tests {
         let placeholder = Volume::db(-30.0).unwrap();
         let (volume, changes) = watch::channel(placeholder);
         let (stop, stopped) = watch::channel(false);
-        let owner = tokio::spawn(control_owner(rtsp, changes, stopped, None));
+        let owner = tokio::spawn(control_owner(rtsp, changes, stopped, None, None));
         assert!(
             timeout(Duration::from_millis(230), received.recv())
                 .await
@@ -1331,6 +1422,8 @@ mod tests {
             control_destination: control_peer.local_addr().unwrap(),
             _timing_task: Some(Task(tokio::spawn(std::future::pending()))),
             _event_task: None,
+            peers: None,
+            peer_changes: None,
         };
         let (pcm, packets) = broadcast::channel(32);
         let (volume, volumes) = watch::channel(Volume::db(-30.0).unwrap());

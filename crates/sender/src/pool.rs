@@ -18,10 +18,14 @@ pub enum SessionState {
 #[derive(Clone)]
 pub struct SessionHandle {
     volume: watch::Sender<Volume>,
+    peers: Option<crate::PtpPeerControl>,
     pub state: watch::Receiver<SessionState>,
     pub progress: watch::Receiver<Option<MediaProgress>>,
 }
 impl SessionHandle {
+    pub fn ptp_peer_control(&self) -> Option<crate::PtpPeerControl> {
+        self.peers.clone()
+    }
     pub fn requested_volume(&self) -> Volume {
         *self.volume.borrow()
     }
@@ -70,6 +74,37 @@ pub struct SelectionResult {
     pub start_errors: Vec<(String, anyhow::Error)>,
 }
 impl SessionPool {
+    /// Queue one peer list to a single-domain PTP pool after complete local
+    /// preflight. RTSP acceptance is observed on each control's applied watch;
+    /// it does not prove group adoption. No session/packetizer is recreated.
+    pub fn set_ptp_peers(&self, receivers: &[std::net::IpAddr]) -> Result<()> {
+        if self.entries.is_empty() {
+            bail!("no PTP sessions");
+        }
+        let mut context = None;
+        let mut pending = Vec::new();
+        for entry in self.entries.values() {
+            if *entry.handle.state.borrow() != SessionState::Running {
+                bail!("inactive PTP member");
+            }
+            let control = entry
+                .handle
+                .peers
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("non-PTP member in peer update"))?;
+            let update = control.prepare(receivers)?;
+            let identity = (update.domain(), update.group());
+            if context.is_some_and(|current| current != identity) {
+                bail!("PTP pool has different group/domain");
+            }
+            context = Some(identity);
+            pending.push((control, update));
+        }
+        for (control, update) in pending {
+            control.publish(update)?;
+        }
+        Ok(())
+    }
     pub fn new(audio: broadcast::Receiver<Arc<AudioPacket>>) -> Self {
         Self {
             audio,
@@ -261,7 +296,8 @@ impl SessionPool {
         let endpoint = session.endpoint();
         let volume = session.initial_volume();
         let deadline = session.shutdown_deadline();
-        self.launch(
+        let peers = session.ptp_peer_control();
+        let mut handle = self.launch(
             uid,
             endpoint,
             volume,
@@ -269,7 +305,14 @@ impl SessionPool {
             move |audio, volume, stop, progress| {
                 session.run_with_progress(audio, volume, stop, progress)
             },
-        )
+        )?;
+        handle.peers = peers.clone();
+        self.entries
+            .get_mut(uid)
+            .expect("just inserted session")
+            .handle
+            .peers = peers;
+        Ok(handle)
     }
     fn launch<F, Fut>(
         &mut self,
@@ -306,6 +349,7 @@ impl SessionPool {
         let (state, status) = watch::channel(SessionState::Running);
         let handle = SessionHandle {
             volume,
+            peers: None,
             state: status,
             progress: observed,
         };
