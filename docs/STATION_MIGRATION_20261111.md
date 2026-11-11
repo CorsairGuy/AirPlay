@@ -23,6 +23,12 @@ Second port: SessionConfig.preserve_receiver_volume defaults false for compatibi
 
 Fetched existing snapshots from Pi only; no device connections or control. Reduced descriptors saved in workspace outputs/group-button-20261111. Snapshot station-ht-0633 already contains logicalDeviceCount2, groupedDevices and selected Home Theater descriptor while user later still reports single-name button. Therefore adding a name or logical count alone is not a proven fix. hp121-stationsess-0633 still advertises its own theater group, whereas Station advertises its own relay group; these are historical captures predating subsequent PTP work and do not prove the current receiver state. Need date-matched MRP/mDNS group observations or an existing later capture before changing group IDs. Do not equate sound synchronization with topology adoption.
 
+## Deferred live check: Yandex Music buffered-only
+
+At home, use a separate silent diagnostic receiver, not the working Station. Record a baseline Yandex Music SETUP, including stream type and codec. Then advertise/support buffered-only and repeat with the same iPhone/app/track. Record either type103 negotiation and successful decoding or rejection/no media SETUP; do not assume the sender must fall back. Compare with Apple Music to distinguish an AirPlay stream from native HomePod playback. Verify pause/play and timeline on a second iPhone. Do not enable microphone capture, audible output, alter Station advertisements, or claim ALAC from type96 alone. User requested this check be added to the plan on11 November; no live test performed while user is away.
+
 ## Constraints
 
 User is away and cannot hear audio. Read-only diagnosis and offline tests only; no Station install/restart/playback without new approval. No GitHub push without approval. Preserve unrelated pre-existing dirty files events.rs, audio_stream/net.rs and clock tests.
+
+Third port: SRP M3 proof computation now runs in Tokio's blocking pool, with a bounded caller deadline, retaining proof state and receiver proof verification. It does not own the RTSP connection; cancellation drops that connection while finite CPU work can finish separately. Real transient pairing/key agreement test on a current-thread runtime passed; RTP/sender total44 tests passed. Persistent pairing/PIN UI and PTP runtime wiring remain separate ports.

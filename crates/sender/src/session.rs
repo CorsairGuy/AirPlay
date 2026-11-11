@@ -194,14 +194,16 @@ impl Session {
             active_remote,
             config.request_timeout,
         );
-        let mut pair = ControllerSetup::new(
+        let pair = ControllerSetup::new(
             PairIdentity::from_seed(config.identity.device_id.clone(), &identity_seed),
             "3939",
             true,
         );
         rtsp.pair_post("/pair-pin-start", Vec::new()).await?;
         let m2 = rtsp.pair_post("/pair-setup", pair.m1()).await?;
-        let m3 = pair.m3(&m2.body)?;
+        let (pair, m3) = timeout(config.request_timeout, setup_proof(pair, m2.body))
+            .await
+            .context("pairing proof deadline exceeded")??;
         let m4 = rtsp.pair_post("/pair-setup", m3).await?;
         // Unlike the source draft, verify the receiver's SRP proof before using
         // its control/session keys, using the shared core implementation.
@@ -632,6 +634,18 @@ fn binary_plist(value: plist::Value) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+async fn setup_proof(mut pair: ControllerSetup, m2: Vec<u8>) -> Result<(ControllerSetup, Vec<u8>)> {
+    // 3072-bit SRP exponentiation must not stall media/control tasks on the
+    // current-thread runtime. Cancellation closes the socket; the finite CPU
+    // operation may finish in the blocking pool without owning that connection.
+    tokio::task::spawn_blocking(move || {
+        let m3 = pair.m3(&m2)?;
+        Ok((pair, m3))
+    })
+    .await
+    .context("pairing proof task failed")?
+}
+
 // Fallback is the minimum explicitly requested in this session's SETUP, not a
 // measured receiver delay. Same correction as Station cf1894c (audibly verified).
 fn receiver_render_frames(value: Option<&plist::Value>) -> Result<u32> {
@@ -698,6 +712,28 @@ async fn timing_server(socket: Arc<UdpSocket>, peer: std::net::IpAddr) {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test(flavor = "current_thread")]
+    async fn offloaded_setup_keeps_proof_state_for_receiver_verification() {
+        use pair::{
+            MemoryStore,
+            hap::{PairSetup, SetupOutcome},
+        };
+        let mut receiver = PairSetup::new(PairIdentity::from_seed("receiver", &[3; 32]), "0000");
+        let sender =
+            ControllerSetup::new(PairIdentity::from_seed("sender", &[4; 32]), "3939", true);
+        let store = MemoryStore::default();
+        let SetupOutcome::Continue(m2) = receiver.handle(&sender.m1(), &store).unwrap() else {
+            panic!("expected M2")
+        };
+        let (sender, m3) = setup_proof(sender, m2).await.unwrap();
+        let SetupOutcome::Transient { reply, keys, .. } = receiver.handle(&m3, &store).unwrap()
+        else {
+            panic!("expected M4")
+        };
+        let controller = sender.check_m4(&reply).unwrap().unwrap();
+        assert_eq!(controller.write, keys.read);
+        assert_eq!(controller.read, keys.write);
+    }
     #[tokio::test]
     async fn preserve_volume_ignores_placeholder_but_applies_explicit_same_value() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
