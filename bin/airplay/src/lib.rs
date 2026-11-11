@@ -8,6 +8,7 @@
 
 pub mod card;
 pub mod discovery_catalog;
+pub mod discovery_feed;
 pub mod events;
 pub mod local_process;
 pub mod media;

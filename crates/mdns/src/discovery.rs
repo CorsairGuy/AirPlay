@@ -3,7 +3,7 @@
 //! logical group membership or which network interface an application should use.
 use crate::{AIRPLAY, Error, RAOP};
 use mdns_sd::ServiceDaemon;
-pub use mdns_sd::{Receiver, ResolvedService, ServiceEvent};
+pub use mdns_sd::{Receiver, ResolvedService, ServiceEvent, ServiceInfo};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy)]
