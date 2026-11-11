@@ -4,9 +4,10 @@
 //! Порты ниже 1024 требуют root или `CAP_NET_BIND_SERVICE`. Без них служба
 //! работает вхолостую, и плеер играет по своим часам, без мультирума.
 
+pub mod engine;
+pub mod media;
 pub mod ntp;
 pub mod sender;
-pub mod engine;
 pub mod service;
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
