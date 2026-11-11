@@ -24,6 +24,7 @@ pub mod send_ipc;
 pub mod sender_store;
 pub mod serve;
 pub mod session;
+pub mod session_preparer;
 pub mod state;
 #[macro_use]
 pub mod station_mrp;
