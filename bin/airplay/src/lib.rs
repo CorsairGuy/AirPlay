@@ -7,16 +7,17 @@
 //! [`serve::run`].
 
 pub mod card;
+pub mod events;
+pub mod local_process;
+pub mod media;
 #[cfg(test)]
 mod mrp_path_tests;
-pub mod events;
-pub mod media;
 pub mod remote;
+pub mod route_pairing;
 pub mod send;
 pub mod send_control;
 #[cfg(unix)]
 pub mod send_ipc;
-pub mod local_process;
 pub mod serve;
 pub mod session;
 pub mod state;
