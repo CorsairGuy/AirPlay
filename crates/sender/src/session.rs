@@ -280,6 +280,15 @@ pub struct Session {
 }
 
 impl Session {
+    pub fn endpoint(&self) -> SocketAddr {
+        self.config.endpoint
+    }
+    pub fn initial_volume(&self) -> Volume {
+        self.config.volume
+    }
+    pub(crate) fn shutdown_deadline(&self) -> Duration {
+        self.config.request_timeout + Duration::from_secs(3)
+    }
     pub async fn connect(config: SessionConfig) -> Result<Self> {
         config.validate()?;
         let stream = timeout(config.request_timeout, TcpStream::connect(config.endpoint))

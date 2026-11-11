@@ -14,6 +14,7 @@ mod local;
 mod local_pipe;
 pub mod outputs;
 mod packet;
+pub mod pool;
 mod session;
 mod transport;
 
