@@ -12,7 +12,7 @@
 | Общие часы | Одна внешне созданная Service с одним источником времени/парой сокетов; union адресатов разных владельцев | Не отдельный PTP на группу. MasterTimeline сейчас принимает квалифицированный local-master профиль; follower/внешний RAW bridge не объявлены готовыми TX-профилями |
 | Группа TX | SessionPool, add/remove, реальные running members, live SETPEERS, общий producer, PtpGroup/local supervision | SETUP/SETPEERS ACK и Running не доказывают native adoption или акустическую синхронность |
 | Отмена | Потеря роли/эпохи/свежести, stop и local failure завершают передачу; finish освобождает интерес группы | Общая PTP-служба не выключается. Stop + await обязателен для гарантированного graceful cleanup; hard abort не равнозначен |
-| Pairing | Transient, PIN setup, постоянные credentials/pair-verify, store и MRP59/60/61 helper | MRP reader → request context → worker/PTP wrapper → явная InteractivePinForUnpaired policy соединены; полная wire-проверка этого пути и iPhone interop ещё нужны |
+| Pairing | Transient, PIN setup, постоянные credentials/pair-verify, store и MRP59/60/61 helper | MRP reader → request context → worker/PTP wrapper → явная InteractivePinForUnpaired policy соединены; сквозной MRP/PIN/persistent RTSP loopback проверен; iPhone interop ещё нужен |
 | Discovery | DNS-SD browser/feed, logical/physical catalog, aliases/cluster/leader descriptors | Объявление возможностей не заменяет проверку транспорта; весь runtime не включается автоматически |
 | MRP | Карточка, frame boundaries, команды/таймлайн, кеш обложки, outputs backend и отдельная/общая громкости | Общая подпись кнопки и удержание ползунков в реальной группе не подтверждены исправленными |
 | Continuous relay | Source Timeline/pump/broadcast, queue/cache guards, единый PtpGroup runtime и opt-in MRP-card SourceControl с playback observer/grace | Default frontend composition, native/BT adapters, receiver/hardware buffers и полный control автомат остаются; [подробности](CONTINUOUS_RELAY.md) |
@@ -30,7 +30,7 @@
 ## Остаток работ
 
 1. Довести continuous runtime до frontend/адаптеров и комплексной проверки нескольких получателей. Opt-in композиция карточки и pipeline уже проверена:164 теста (application86 + sender78), включая MRP Pause/Play → PCM в памяти; реальное оборудование не проверялось.
-2. Полный connection-scoped PIN путь карточки; комплексные add/remove/failure проверки PTP-группы.
+2. iPhone interop connection-scoped PIN пути (автономный сквозной обмен уже проверен); комплексные add/remove/failure проверки PTP-группы.
 3. Native group topology/подпись кнопки/ползунки: сверять с захватами, не менять gid и capability flags наугад.
 4. Перенести audio-only профиль и полезные локальные Glagol deadline/Retry-After правки в соответствующие слои.
 5. Подключить frontend/адаптер Станции к общему ядру с pin версии и сохранить capture/routes/recovery/BT/LED.

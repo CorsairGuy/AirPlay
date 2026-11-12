@@ -529,6 +529,9 @@ pub async fn run(
     }
 }
 #[cfg(test)]
+#[path = "authorization_tests.rs"]
+mod authorization_tests;
+#[cfg(test)]
 mod tests {
     use super::*;
     #[test]
