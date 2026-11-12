@@ -30,7 +30,7 @@
 ## Остаток работ
 
 1. Довести continuous runtime до frontend/адаптеров и комплексной проверки нескольких получателей. Opt-in композиция карточки и pipeline уже проверена:164 теста (application86 + sender78), включая MRP Pause/Play → PCM в памяти; реальное оборудование не проверялось.
-2. iPhone interop connection-scoped PIN пути (автономный сквозной обмен уже проверен); комплексные add/remove/failure проверки PTP-группы.
+2. iPhone interop connection-scoped PIN пути (автономный сквозной обмен уже проверен); комплексные add/remove/failure проверки PTP-группы. Отказ одного из двух настоящих NTP/RTSP loopback-получателей уже проверен без остановки второго; это не PTP native-group interop.
 3. Native group topology/подпись кнопки/ползунки: сверять с захватами, не менять gid и capability flags наугад.
 4. Перенести audio-only профиль и полезные локальные Glagol deadline/Retry-After правки в соответствующие слои.
 5. Подключить frontend/адаптер Станции к общему ядру с pin версии и сохранить capture/routes/recovery/BT/LED.

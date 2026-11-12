@@ -46,41 +46,7 @@ async fn controller_disconnect_during_pin_never_selects_or_saves_receiver() {
     selection_pin(true).await;
 }
 async fn selection_pin(disconnect: bool) {
-    let identity = pair::Identity::from_seed("pin-wire-receiver", &[37; 32]);
-    let receiver = Arc::new(crate::session::Context {
-        device: device::DeviceInfo {
-            name: "PIN loopback".into(),
-            device_id: "02:00:00:00:00:37".into(),
-            model: "AirPlay".into(),
-            features: device::Features::AUDIO_RECEIVER,
-            status_flags: 4,
-            pairing_id: identity.pairing_id.clone(),
-            public_key: identity.public_key(),
-            source_version: "366.0".into(),
-            display: None,
-            audio_only_ui: false,
-            group: None,
-            pgid: "00000000-0000-4000-8000-000000000000".into(),
-            enclosure_color: None,
-        },
-        identity,
-        store: Box::new(pair::MemoryStore::default()),
-        pin: "4821".into(),
-        require_pin: true,
-        mdns: Mutex::new(None),
-        port: 0,
-        mirror: None,
-        remote: Default::default(),
-        mrp: None,
-        session_group: Default::default(),
-        player: Arc::new(crate::media::Player::new(
-            audio_stream::Config {
-                device: "null".into(),
-                ..Default::default()
-            },
-            timesync::TimeSync::idle(37),
-        )),
-    });
+    let receiver = receiver_context(true);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let receiver_server = tokio::spawn(async move {
@@ -254,4 +220,132 @@ async fn selection_pin(disconnect: bool) {
             .is_some()
     );
     std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[tokio::test]
+async fn receiver_control_failure_keeps_other_session_and_media_epoch_alive() {
+    use sender::pool::SessionState;
+    let mut servers = Vec::new();
+    let mut sessions = Vec::new();
+    for id in ["first", "second"] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        servers.push(tokio::spawn(async move {
+            let (socket, peer) = listener.accept().await.unwrap();
+            crate::serve::serve_connection(socket, receiver_context(false), peer).await
+        }));
+        let mut config = sender::SessionConfig::new(address, sender::Identity::new(id, "test"));
+
+        config.preserve_receiver_volume = true;
+        sessions.push(sender::Session::connect(config).await.unwrap());
+    }
+    let (audio, packets) = tokio::sync::broadcast::channel(8);
+    let mut pool = SessionPool::new(packets);
+    let mut handles = Vec::new();
+    for (id, session) in ["first", "second"].into_iter().zip(sessions) {
+        handles.push(pool.add(id, session).unwrap());
+    }
+    let origin = std::time::Instant::now();
+    let clock = sender::MediaClock::at(origin, 0);
+    audio
+        .send(Arc::new(
+            clock.packet(0, &[7; sender::PACKET_BYTES]).unwrap(),
+        ))
+        .unwrap();
+    for handle in &mut handles {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while handle.progress.borrow_and_update().is_none() {
+                handle.progress.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+    }
+    // Lose only the second encrypted RTSP connection. Its next feedback fails.
+    servers[1].abort();
+    tokio::time::timeout(Duration::from_secs(4), async {
+        while *handles[1].state.borrow_and_update() == SessionState::Running {
+            handles[1].state.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(*handles[1].state.borrow(), SessionState::Failed);
+    assert_eq!(*handles[0].state.borrow(), SessionState::Running);
+    assert!(pool.remove("second").await.is_err());
+    let index = ((origin.elapsed().as_nanos() * u128::from(sender::SAMPLE_RATE) / 1_000_000_000)
+        / sender::FRAMES_PER_PACKET as u128) as u64
+        * sender::FRAMES_PER_PACKET as u64;
+    audio
+        .send(Arc::new(
+            clock.packet(index, &[9; sender::PACKET_BYTES]).unwrap(),
+        ))
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if handles[0]
+                .progress
+                .borrow_and_update()
+                .as_ref()
+                .is_some_and(|p| p.packets_sent == 2 && p.frame_index == index)
+            {
+                break;
+            }
+            handles[0].progress.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert!(index > 0);
+    let result = pool.shutdown().await;
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].0, "first");
+    assert_eq!(result[0].1.as_ref().unwrap().packets_sent, 2);
+    assert_eq!(*handles[0].state.borrow(), SessionState::Ended);
+    let failed = servers.pop().unwrap();
+    assert!(failed.await.unwrap_err().is_cancelled());
+    tokio::time::timeout(Duration::from_secs(3), servers.pop().unwrap())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}
+
+fn receiver_context(require_pin: bool) -> Arc<crate::session::Context> {
+    let identity = pair::Identity::from_seed("pin-wire-receiver", &[37; 32]);
+    let receiver = Arc::new(crate::session::Context {
+        device: device::DeviceInfo {
+            name: "PIN loopback".into(),
+            device_id: "02:00:00:00:00:37".into(),
+            model: "AirPlay".into(),
+            features: device::Features::AUDIO_RECEIVER,
+            status_flags: 4,
+            pairing_id: identity.pairing_id.clone(),
+            public_key: identity.public_key(),
+            source_version: "366.0".into(),
+            display: None,
+            audio_only_ui: false,
+            group: None,
+            pgid: "00000000-0000-4000-8000-000000000000".into(),
+            enclosure_color: None,
+        },
+        identity,
+        store: Box::new(pair::MemoryStore::default()),
+        pin: "4821".into(),
+        require_pin,
+        mdns: Mutex::new(None),
+        port: 0,
+        mirror: None,
+        remote: Default::default(),
+        mrp: None,
+        session_group: Default::default(),
+        player: Arc::new(crate::media::Player::new(
+            audio_stream::Config {
+                device: "null".into(),
+                ..Default::default()
+            },
+            timesync::TimeSync::idle(37),
+        )),
+    });
+    receiver
 }
