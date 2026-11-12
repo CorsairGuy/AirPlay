@@ -6,8 +6,7 @@
 
 1. Комплексно проверить PTP group selection/peer reconciliation/cancellation; opt-in continuous/Card pipeline уже есть, frontend/Station integration остаётся.
 2. Проверить PIN на iPhone (сквозной loopback уже проходит); довести native topology/button/slider на основании захватов.
-3. Audio-only profile перенесён и проверен. Локальные Glagol deadline/Retry-After перенести в адаптер Станции; обновить differential harness под нынешний API.
-4. Подключить адаптер Станции к pin ядра, сохранив native PCM tap, AirPlay/BT, локальный голос/duck и готовое recovery/autostart.
+3. Подключить адаптер Станции к pin ядра, сохранив native PCM tap, AirPlay/BT, локальный голос/duck и готовое recovery/autostart.
 
 ## Ограничения
 
@@ -19,4 +18,4 @@
 - В другом worktree airplay-core остались старый исходный audio-only черновик (уже портирован выборочно), mediaremote/MRP/sender и документы. Сверять полезные отличия, не накатывать целиком.
 - Station source: поздняя ld5dy4 a538a30; интеграционная ветка сохраняет её runtime и опубликованные архивы/документацию. Локальные station-* часто являются контекстными портами/альтернативами, не списком готовых независимых функций.
 
-Последние проверки:311 core library tests;137 Station Rust tests + C focus-state. Это не полный cross-platform CI и не новая физическая проверка.
+Полные базовые проверки:311 core library tests;137 Station Rust tests + C focus-state. Последующие scoped-прогоны перечислены в VALIDATION.md. Glagol/deadline и standalone MRP probe перенесены в Station main ce8277f (25+6 тестов, controller check); audio-only ядра готов. Это не полный cross-platform CI и не новая физическая проверка.
