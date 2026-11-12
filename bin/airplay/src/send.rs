@@ -439,6 +439,36 @@ async fn run_inner<R: AsyncRead + Unpin>(
 mod tests {
     use super::*;
 
+    #[derive(Default)]
+    struct SampleCounts {
+        samples: usize,
+        exact_pairs: usize,
+        left: Option<i16>,
+    }
+    impl SampleCounts {
+        fn record(&mut self, samples: &[i16]) {
+            self.samples += samples.len();
+            for &sample in samples {
+                if let Some(left) = self.left.take() {
+                    self.exact_pairs += usize::from([left, sample] == [0x1234, -0x2345]);
+                } else {
+                    self.left = Some(sample);
+                }
+            }
+        }
+    }
+    #[test]
+    fn capture_counts_content_after_long_silence_and_split_stereo_writes() {
+        let mut counts = SampleCounts::default();
+        counts.record(&vec![0; 100_000]);
+        counts.record(&[0x1234]);
+        counts.record(&[-0x2345, 0x1234]);
+        counts.record(&[-0x2345]);
+        assert_eq!(counts.samples, 100_004);
+        assert_eq!(counts.exact_pairs, 2);
+        assert!(counts.left.is_none());
+    }
+
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|s| (*s).to_owned()).collect()
     }
@@ -511,7 +541,7 @@ mod tests {
 
         struct Capture {
             null: audio::Null,
-            samples: Arc<Mutex<Vec<i16>>>,
+            samples: Arc<Mutex<SampleCounts>>,
         }
         impl Sink for Capture {
             fn sample_rate(&self) -> u32 {
@@ -520,9 +550,7 @@ mod tests {
             fn write(&mut self, samples: &[i16]) -> std::io::Result<()> {
                 {
                     let mut captured = self.samples.lock().unwrap();
-                    if captured.len() + samples.len() <= 100_000 {
-                        captured.extend_from_slice(samples);
-                    }
+                    captured.record(samples);
                 }
                 self.null.write(samples)
             }
@@ -533,7 +561,7 @@ mod tests {
                 self.null.stop();
             }
         }
-        let captured = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::new(Mutex::new(SampleCounts::default()));
         let samples = captured.clone();
         let audio = audio_stream::Config {
             device: "null".into(),
@@ -687,13 +715,11 @@ mod tests {
             .unwrap()
             .unwrap();
         let actual = captured.lock().unwrap();
-        let exact_pairs = actual
-            .chunks_exact(2)
-            .filter(|pair| *pair == [0x1234, -0x2345])
-            .count();
+        let exact_pairs = actual.exact_pairs;
         assert!(
             exact_pairs >= FRAMES * 4,
-            "too few exact S16BE stereo frames: {exact_pairs}"
+            "too few exact S16BE stereo frames: {exact_pairs}; captured {} samples",
+            actual.samples
         );
         if with_local {
             let records = local_seen.lock().unwrap();
