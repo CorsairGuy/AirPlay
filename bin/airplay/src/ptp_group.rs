@@ -22,6 +22,21 @@ pub struct PtpGroup {
     lease: MasterLease,
     clock_peers: Option<ClockPeers>,
 }
+/// Source adapters own PCM acquisition and publish state before new-generation
+/// PCM. Timeline and clock must share one epoch; broadcast validates it.
+pub struct ContinuousSource {
+    pub timeline: sender::continuous::Timeline,
+    pub clock: MediaClock,
+    pub input: mpsc::Receiver<sender::continuous_source::SourceFrame>,
+    pub controls: watch::Receiver<sender::continuous_source::State>,
+}
+pub struct GroupOutputs<P> {
+    pub requests: mpsc::Receiver<OutputRequest>,
+    pub discovery: watch::Receiver<Arc<OutputCatalog>>,
+    pub local_ids: Vec<String>,
+    pub preparer: P,
+    pub updates: watch::Sender<output_worker::Snapshot>,
+}
 #[derive(Clone)]
 struct ClockPeers {
     service: Weak<timesync::service::Service>,
@@ -103,6 +118,65 @@ impl PtpGroup {
             timeline: self.timeline.clone(),
             clock,
             stop: self.stop(),
+        }
+    }
+    /// Compose the existing source, pool, selection and local supervisors.
+    /// Final EOF drains; any failure/stop cancels and awaits both branches.
+    /// No discovery/clock/device startup, source decoding or route changes.
+    pub async fn run_continuous_with_local(
+        self,
+        source: ContinuousSource,
+        outputs: GroupOutputs<impl SessionPreparer>,
+        sink: impl sender::LocalSink,
+        latency: std::time::Duration,
+    ) -> Result<sender::continuous_source::End> {
+        use sender::continuous_source::{self, End};
+        if latency < std::time::Duration::from_millis(250)
+            || latency > std::time::Duration::from_secs(10)
+        {
+            bail!("invalid continuous local lead");
+        }
+        let frames = (latency.as_nanos() * u128::from(sender::SAMPLE_RATE))
+            .div_ceil(1_000_000_000 * sender::FRAMES_PER_PACKET as u128);
+        let (audio, packets) = tokio::sync::broadcast::channel(frames as usize + 32);
+        let local = audio.subscribe();
+        let producer = self.producer(source.clock);
+        let stop = self.stop();
+        let cancel = self.lease.cancellation();
+        let pump = continuous_source::broadcast(
+            source.timeline,
+            source.input,
+            source.controls,
+            audio,
+            stop,
+            move |index, pcm| producer.packet(index, pcm),
+        );
+        let runtime = self.run_with_local(
+            SessionPool::new(packets),
+            outputs.requests,
+            outputs.discovery,
+            outputs.local_ids,
+            outputs.preparer,
+            outputs.updates,
+            sink,
+            local,
+            latency,
+        );
+        tokio::pin!(pump, runtime);
+        tokio::select! {
+            result = &mut pump => {
+                if !matches!(result, Ok(End::Eof)) { cancel.cancel(); }
+                let cleanup = runtime.await;
+                let end = result?;
+                cleanup?;
+                Ok(end)
+            },
+            result = &mut runtime => {
+                cancel.cancel();
+                let source_end = pump.await;
+                result?;
+                source_end
+            },
         }
     }
     /// Consumes the lifecycle owner, so queue closure/worker completion also
@@ -324,6 +398,102 @@ mod tests {
     struct Blocked {
         entered: Arc<AtomicBool>,
         dropped: Arc<AtomicBool>,
+    }
+    struct PipelineSink {
+        seen: Arc<std::sync::Mutex<Vec<Arc<AudioPacket>>>>,
+        finished: Arc<AtomicBool>,
+        fail: bool,
+    }
+    impl sender::LocalSink for PipelineSink {
+        async fn write(&mut self, packet: Arc<AudioPacket>, _: Instant) -> Result<()> {
+            self.seen.lock().unwrap().push(packet);
+            if self.fail {
+                bail!("pipeline sink failed");
+            }
+            Ok(())
+        }
+        async fn finish(&mut self) -> Result<()> {
+            self.finished.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+    #[tokio::test]
+    async fn continuous_pipeline_drains_eof_and_cancels_both_branches_on_failures() {
+        for mode in 0..3 {
+            let (_updates, _user, group, origin) = fixture();
+            let domain = group.timeline.domain();
+            let (source, input) = mpsc::channel(4);
+            source
+                .send(sender::continuous_source::SourceFrame {
+                    generation: 0,
+                    pcm: Box::new([3; sender::PACKET_BYTES]),
+                })
+                .await
+                .unwrap();
+            // Keep the source live during sink failure: cleanup cannot rely on EOF.
+            if mode != 1 {
+                drop(source);
+            }
+            let (_state, controls) = watch::channel(sender::continuous_source::State::default());
+            let clock_origin = if mode == 2 {
+                origin + Duration::from_secs(1)
+            } else {
+                origin
+            };
+            let source = ContinuousSource {
+                timeline: sender::continuous::Timeline::new(origin, Duration::from_millis(250))
+                    .unwrap(),
+                clock: MediaClock::at(clock_origin, 0),
+                input,
+                controls,
+            };
+            let (_control, requests) = crate::output_control::OutputControl::channel(4);
+            let (_catalog, discovery) =
+                watch::channel(Arc::new(OutputCatalog::new(vec![]).unwrap()));
+            let (updates, final_state) = watch::channel(output_worker::Snapshot::default());
+            let outputs = GroupOutputs {
+                requests,
+                discovery,
+                local_ids: vec![],
+                preparer: Blocked {
+                    entered: Arc::new(AtomicBool::new(false)),
+                    dropped: Arc::new(AtomicBool::new(false)),
+                },
+                updates,
+            };
+            let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let finished = Arc::new(AtomicBool::new(false));
+            let result = tokio::time::timeout(
+                Duration::from_secs(2),
+                group.run_continuous_with_local(
+                    source,
+                    outputs,
+                    PipelineSink {
+                        seen: seen.clone(),
+                        finished: finished.clone(),
+                        fail: mode == 1,
+                    },
+                    Duration::from_millis(250),
+                ),
+            )
+            .await
+            .unwrap();
+            if mode == 0 {
+                assert_eq!(result.unwrap(), sender::continuous_source::End::Eof);
+                let seen = seen.lock().unwrap();
+                assert_eq!(seen.len(), 1);
+                assert_eq!(seen[0].pcm(), &[3; sender::PACKET_BYTES]);
+                assert_eq!(seen[0].ptp_reading().unwrap().domain(), domain);
+                assert!(finished.load(Ordering::SeqCst));
+            } else {
+                assert!(result.is_err());
+                assert!(!finished.load(Ordering::SeqCst));
+                if mode == 2 {
+                    assert!(seen.lock().unwrap().is_empty());
+                }
+            }
+            assert!(final_state.borrow().selected.is_empty());
+        }
     }
     #[tokio::test]
     async fn shared_clock_binding_releases_only_its_owner_after_worker_exit() {

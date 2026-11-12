@@ -34,7 +34,7 @@ Remote Session пропускает stale до pacing/проверки срок�
 
 ## Остаётся
 
-- Подключение готового broadcast API к рабочему frontend/PtpGroup и реальным source/control adapters.
+- Подключение единого PtpGroup runtime к default frontend/карточке и реальным source/control adapters.
 - Согласование receiver/hardware buffers и control операций при переходах состояния.
 - Сетевые pause/seek/track операции и tolerance действующей Session. Исторические FLUSH/restart варианты требуют отдельной сверки.
 - Debounce краткого !playing между треками и реальные interop/нагрузочные проверки.
@@ -56,3 +56,15 @@ PcmPacketizer::clear_retransmit_cache удаляет только сохранё
 Сверка поздней станционной ветки: native mini2_music tap переносит pause/seek/track в той же сессии; старые варианты FLUSH/restart не являются универсальным текущим рецептом. Этот cache guard не отправляет самодельный RTSP PAUSE или FLUSH и не объявляет завершённой отмену remote/hardware buffers.
 
 Проверка:94 library tests passed (RTP16 + sender78). Новый RTP regression очищает cache на переходе sequence65535→0 и подтверждает nonce1, прежний media origin, отсутствие повторного marker и точный ciphertext нового retransmit. Sender regression проверяет различение прежней/новой source revision; существующий encrypted PTP loopback также прошёл.
+
+## Единый opt-in runtime
+
+PtpGroup::run_continuous_with_local соединяет ContinuousSource, GroupOutputs, shared packet broadcast, SessionPool, source stamping и local supervision. Источник, управление и discovery передаются приложением; API не запускает clock/discovery/device services. Существующая Service по-прежнему подключается через with_clock_service.
+
+Final EOF закрывает единственный producer Sender и дренирует принятые кадры; ошибка источника, sink или stop отменяет обе ветки и дожидается их cleanup. Cloneable one-way Cancellation не позволяет снять stop и не меняет clock mapping. Локальный EOF/drain отдаёт приоритет уже пришедшей отмене.
+
+MediaClock и Timeline должны иметь одну эпоху; общий latency/SessionConfig и hardware latency задаются согласованным профилем адаптера. Размер media broadcast рассчитывается из local lead плюс32слота; lead ограничен250мс..10с. Source queues остаются ограниченными отдельно.
+
+Это библиотечная runtime композиция, не автоматическая активация CLI/карточки/Station source adapter и не новое подтверждение настоящей группы HomePod.
+
+Проверка единого runtime:185 tests passed (application80, sender78, timesync27). Новый сценарий соединяет source pump/PTP stamping/local sink и живую очередь управления без выбранных remote devices: EOF дренирует один кадр, sink failure отменяет незакрытый источник, неверная эпоха не доходит до sink. Отдельный тест Cancellation подтверждает, что отмена группы не инвалидирует общие часы. Это не новый аппаратный или двухполучательный interop результат.

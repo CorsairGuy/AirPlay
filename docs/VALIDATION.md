@@ -23,3 +23,5 @@ Continuous async source pump:73 sender library tests passed, включая5 н�
 Continuous broadcast/revision guards:78 sender library tests passed; дополнили encrypted-loopback и local renderer проверки. Hardware/receiver buffers и сетевой pause/seek автомат остаются отдельной незавершённой работой.
 
 Continuous retransmit protection:94 tests passed (16 RTP,78 sender), включая cache clear без сброса nonce/sequence/media epoch. Это не проверка remote PAUSE/FLUSH или hardware buffer reset.
+
+Unified continuous/PTP/local lifecycle:185 library tests passed (80 application,78 sender,27 timesync). Связка source→PTP stamp→local sink проверена без выбранных remote устройств; EOF, sink failure с открытым источником, неверная эпоха и one-way cancellation. Default frontend/Station integration и hardware buffers не подтверждены.

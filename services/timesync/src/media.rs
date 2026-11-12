@@ -76,6 +76,14 @@ pub struct MasterLease {
     stop: watch::Sender<bool>,
     task: tokio::task::JoinHandle<()>,
 }
+/// Cloneable one-way cancellation; it cannot restart an expired group.
+#[derive(Clone)]
+pub struct Cancellation(watch::Sender<bool>);
+impl Cancellation {
+    pub fn cancel(&self) {
+        self.0.send_replace(true);
+    }
+}
 impl MasterLease {
     pub fn spawn(timeline: Arc<MasterTimeline>, mut upstream: watch::Receiver<bool>) -> Self {
         let initially_stopped = *upstream.borrow()
@@ -88,6 +96,10 @@ impl MasterLease {
         let task = tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_millis(25));
             loop {
+                let cancelled = *signal.borrow();
+                if cancelled {
+                    break;
+                }
                 if *upstream.borrow()
                     || upstream.has_changed().is_err()
                     || timeline.reading_at(Instant::now()).is_err()
@@ -116,6 +128,9 @@ impl MasterLease {
     }
     pub fn subscribe(&self) -> watch::Receiver<bool> {
         self.stop.subscribe()
+    }
+    pub fn cancellation(&self) -> Cancellation {
+        Cancellation(self.stop.clone())
     }
     /// Fail the whole group explicitly (for example, local renderer failure).
     /// Cancellation is latched and cannot be reset by subsequent clock updates.
@@ -226,6 +241,20 @@ impl MasterTimeline {
 mod tests {
     use super::*;
     use clock::{domain::ClockMap, role::Selection};
+    #[tokio::test]
+    async fn cancellation_handle_stops_lease_without_invalidating_shared_clock() {
+        let (_, _updates, timeline) = fixture();
+        let timeline = Arc::new(timeline);
+        let (_user, upstream) = watch::channel(false);
+        let lease = MasterLease::spawn(timeline.clone(), upstream);
+        let stop = lease.subscribe();
+        let cancel = lease.cancellation();
+        cancel.clone().cancel();
+        assert!(*stop.borrow());
+        assert!(timeline.reading_at(Instant::now()).is_ok());
+        tokio::task::yield_now().await;
+        assert!(*stop.borrow());
+    }
     #[tokio::test]
     async fn already_stopped_upstream_never_exposes_a_running_lease() {
         let (_, _updates, timeline) = fixture();

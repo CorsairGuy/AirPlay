@@ -48,8 +48,9 @@ pub async fn run_local<S: LocalSink>(
                 Err(broadcast::error::RecvError::Lagged(n)) => bail!("local PCM queue overran by {n} packets"),
                 Err(broadcast::error::RecvError::Closed) => {
                     tokio::select! {
-                        result = timeout(deadline, sink.finish()) => result.context("local drain deadline exceeded")??,
+                        biased;
                         _ = stopped(&mut stop) => return Ok(()),
+                        result = timeout(deadline, sink.finish()) => result.context("local drain deadline exceeded")??,
                     }
                     if let Some(end) = last_end {
                         tokio::select! {
