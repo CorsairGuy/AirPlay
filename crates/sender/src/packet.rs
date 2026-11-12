@@ -43,6 +43,7 @@ impl MediaClock {
             produced,
             ntp: self.ntp.wrapping_add(offset),
             ptp: None,
+            source: None,
         })
     }
     /// Sample/map the shared producer instant once, before broadcasting the
@@ -74,9 +75,34 @@ pub struct AudioPacket {
     pub(crate) produced: Instant,
     pub(crate) ntp: u64,
     ptp: Option<clock::domain::Reading>,
+    source: Option<tokio::sync::watch::Receiver<crate::continuous_source::State>>,
 }
 
 impl AudioPacket {
+    pub(crate) fn guard_source(
+        mut self,
+        source: tokio::sync::watch::Receiver<crate::continuous_source::State>,
+    ) -> Self {
+        self.source = Some(source);
+        self
+    }
+    /// A control revision invalidates queued frames even after pause/resume
+    /// returns to the same state. Unmanaged legacy packets remain current.
+    pub fn source_is_current(&self) -> bool {
+        self.source
+            .as_ref()
+            .is_none_or(|source| matches!(source.has_changed(), Ok(false)))
+    }
+    pub(crate) fn silence(&self) -> Self {
+        Self {
+            data: vec![0; self.data.len()],
+            index: self.index,
+            produced: self.produced,
+            ntp: self.ntp,
+            ptp: self.ptp,
+            source: self.source.clone(),
+        }
+    }
     pub fn ptp_reading(&self) -> Option<clock::domain::Reading> {
         self.ptp
     }
@@ -107,6 +133,36 @@ pub(crate) fn frames_duration(frames: u64) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn source_revision_cannot_resurrect_after_pause_resume_or_owner_close() {
+        use crate::continuous_source::State;
+        let (control, mut source) = tokio::sync::watch::channel(State::default());
+        source.borrow_and_update();
+        let packet = MediaClock::now()
+            .packet(0, &[8; PACKET_BYTES])
+            .unwrap()
+            .guard_source(source);
+        assert!(packet.source_is_current());
+        control.send_replace(State {
+            generation: 0,
+            paused: true,
+        });
+        control.send_replace(State::default());
+        assert!(!packet.source_is_current());
+        assert_eq!(packet.pcm(), &[8; PACKET_BYTES]);
+        let silence = packet.silence();
+        assert_eq!(silence.frame_index(), packet.frame_index());
+        assert_eq!(silence.produced_at(), packet.produced_at());
+        assert!(silence.pcm().iter().all(|byte| *byte == 0));
+        drop(control);
+        assert!(!packet.source_is_current());
+        assert!(
+            MediaClock::now()
+                .packet(0, &[8; PACKET_BYTES])
+                .unwrap()
+                .source_is_current()
+        );
+    }
 
     #[test]
     fn ptp_provider_is_called_once_at_the_producer_instant() {

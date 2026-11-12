@@ -62,10 +62,14 @@ pub async fn run_local<S: LocalSink>(
             },
             _ = stopped(&mut stop) => return Ok(()),
         };
+        let stale = !packet.source_is_current();
         let play_at = packet
             .play_at(latency)
             .context("local presentation time overflow")?;
         if play_at <= Instant::now() {
+            if stale {
+                continue;
+            }
             bail!("local PCM expired before rendering");
         }
         last_end = play_at
@@ -73,6 +77,11 @@ pub async fn run_local<S: LocalSink>(
                 crate::FRAMES_PER_PACKET as u64,
             ))
             .map(Into::into);
+        let packet = if stale {
+            Arc::new(packet.silence())
+        } else {
+            packet
+        };
         tokio::select! {
             result = timeout(deadline, sink.write(packet, play_at)) => result.context("local renderer stalled")??,
             _ = stopped(&mut stop) => return Ok(()),
@@ -119,6 +128,42 @@ mod tests {
             packet.play_at(Duration::from_millis(50)).unwrap()
         );
         assert!(packet.pcm().iter().all(|b| *b == 0x35));
+    }
+    #[tokio::test]
+    async fn stale_source_renders_silence_at_original_deadline_without_mutating_remote_pcm() {
+        let (state, mut revision) = watch::channel(crate::continuous_source::State::default());
+        revision.borrow_and_update();
+        let packet = Arc::new(
+            MediaClock::now()
+                .packet(0, &[7; PACKET_BYTES])
+                .unwrap()
+                .guard_source(revision),
+        );
+        state.send_replace(crate::continuous_source::State {
+            generation: 1,
+            paused: false,
+        });
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (tx, rx) = broadcast::channel(4);
+        tx.send(packet.clone()).unwrap();
+        drop(tx);
+        let (_stop, stopped) = watch::channel(false);
+        run_local(
+            Capture(seen.clone()),
+            rx,
+            Duration::from_millis(100),
+            stopped,
+        )
+        .await
+        .unwrap();
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(
+            seen[0].1,
+            packet.play_at(Duration::from_millis(100)).unwrap()
+        );
+        assert!(seen[0].0.pcm().iter().all(|byte| *byte == 0));
+        assert_eq!(packet.pcm(), &[7; PACKET_BYTES]);
     }
     #[tokio::test]
     async fn queue_overrun_and_expired_packets_fail_instead_of_skipping() {

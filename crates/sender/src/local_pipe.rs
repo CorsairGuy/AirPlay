@@ -63,7 +63,7 @@ impl<W: AsyncWrite + Unpin + Send + 'static> LocalSink for LocalPcmPipe<W> {
         self.record.extend_from_slice(&timestamp.to_le_bytes());
         self.record
             .extend_from_slice(&((packet.pcm().len() / 4) as u32).to_le_bytes());
-        if !self.audible {
+        if !self.audible || !packet.source_is_current() {
             self.record.resize(16 + packet.pcm().len(), 0);
             return self
                 .writer

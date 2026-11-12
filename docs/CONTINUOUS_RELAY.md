@@ -22,10 +22,20 @@ Pump удерживает не более одного pending input и одно
 
 На выходе ScheduledFrame с index/generation/PCM; его ещё должен один раз штамповать общий MediaClock/PTP producer. Pump не создаёт часов, сессий, фоновых задач или сетевого управления.
 
+## Общая рассылка и защита очередей
+
+`continuous_source::broadcast` связывает pump с общей packet broadcast через bounded промежуточную очередь8 кадров. Callback штампует кадр существующим MediaClock или PtpProducer; проверяются тот же epoch/index/PCM. Получатели получают один immutable Arc, не независимые штампы времени. Финальный EOF дренирует принятые scheduled frames; stop/error отменяет pump/forward без скрытых spawned tasks.
+
+ScheduledFrame и AudioPacket сохраняют версию source-control watch, а не только число поколения. Любое обновление управления делает старую версию stale, даже после Pause→Resume с возвратом к прежним значениям. Закрытие владельца также инвалидирует кадры. Caller должен подавлять лишние уведомления с одинаковым состоянием, если не хочет инвалидировать очередь.
+
+Remote Session пропускает stale до pacing/проверки срока и повторно перед packetization: RTP sequence/nonce для таких кадров не расходуются. Local run_local подаёт тишину на прежнее presentation time, а уже просроченный stale кадр пропускает. LocalPcmPipe повторно проверяет revision при сериализации. Исходный PCM для других потребителей не меняется; legacy packets без guard сохраняют прежнее поведение.
+
+Это защита ещё не потреблённых host queues. Она не отзывает уже принятые hardware/receiver buffers или retransmit cache и не заменяет согласованные сетевые pause/flush/seek операции.
+
 ## Остаётся
 
-- Подключение async pump к frontend/PtpGroup и общей packet/broadcast очереди.
-- Поколения в remote/local очередях и их согласованная очистка/тишина.
+- Подключение готового broadcast API к рабочему frontend/PtpGroup и реальным source/control adapters.
+- Согласование receiver/hardware buffers и retransmit cache при переходах состояния.
 - Сетевые pause/seek/track операции и tolerance действующей Session. Исторические FLUSH/restart варианты требуют отдельной сверки.
 - Debounce краткого !playing между треками и реальные interop/нагрузочные проверки.
 
@@ -34,3 +44,7 @@ Pump удерживает не более одного pending input и одно
 Проверка:68 sender library tests passed (63 прежних +5 continuous-policy cases) в автономном контейнере Pi. Проверены gap silence, неизменная эпоха pause/resume, stale/future generation, lateness и pause expiry. Это не физическая или полная async/network проверка.
 
 Следующий автономный прогон:73 sender library tests passed. Пять async-сценариев проверяют gap→content→EOF, Pause/поколения поверх PCM backlog, отмену/stall при полном выходе, смену управления во время ожидания capacity и закрытие control owner/регресс поколения.
+
+Дополнение к контракту: stale scheduled slots не удаляются из общей рассылки до local/remote разветвления — иначе локальная ветка потеряет временной слот. Они сохраняют guard; remote пропускает их, local заполняет тишиной. Отдельный тест покрывает coalesced Pause→Resume во время ожидания capacity: pending PCM не становится снова актуальным. Custom sinks с собственными очередями должны проверять source_is_current при фактическом потреблении; уже переданные hardware/network buffers не отзываются автоматически.
+
+Проверка:78 sender library tests passed. Новые случаи: один shared Arc/один stamp, неверная эпоха до рассылки, невосстановимость старой revision, локальная тишина на прежнем deadline и сохранение stale scheduled slot. Зашифрованный PTP loopback дополнен stale future frame: он не расходует RTP/nonce и не ломает pacing; mock по-прежнему получает ровно два актуальных audio packets.

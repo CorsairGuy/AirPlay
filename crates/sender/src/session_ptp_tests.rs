@@ -191,6 +191,21 @@ async fn ptp_negotiates_setpeers_sends_d7_and_rejects_ntp_downgrade() {
             assert_eq!(pool.sync_ptp_members().unwrap(), vec![endpoint.ip()]);
             pool.sync_ptp_members().unwrap();
             let clock = MediaClock::now();
+            let (source, mut revision) = watch::channel(crate::continuous_source::State::default());
+            revision.borrow_and_update();
+            let stale = clock
+                .packet_with_ptp(44_100, &[9; PACKET_BYTES], domain, |_| {
+                    Ok(domain.reading(8_000_000_000))
+                })
+                .unwrap()
+                .guard_source(revision);
+            source.send_replace(crate::continuous_source::State {
+                generation: 1,
+                paused: false,
+            });
+            // This future packet must be discarded BEFORE pacing validation or
+            // nonce/RTP advancement. The peer still expects exactly two packets.
+            audio.send(Arc::new(stale)).unwrap();
             let frame = clock
                 .packet_with_ptp(0, &[0; PACKET_BYTES], domain, |_| {
                     Ok(domain.reading(7_000_000_000))

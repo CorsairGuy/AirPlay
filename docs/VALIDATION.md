@@ -19,3 +19,5 @@
 Последующее дополнение12ноября: source continuous policy —68 sender library tests passed, включая5 новых случаев. Полный workspace311 выше относится к предшествующему исходному срезу; включённая continuous-сессия и аппаратный interop этим не подтверждены.
 
 Continuous async source pump:73 sender library tests passed, включая5 новых async-сценариев; только память, bounded-каналы и таймеры. Сетевой continuous runtime и установленная Станция этим не подтверждены.
+
+Continuous broadcast/revision guards:78 sender library tests passed; дополнили encrypted-loopback и local renderer проверки. Hardware/receiver buffers и сетевой pause/seek автомат остаются отдельной незавершённой работой.

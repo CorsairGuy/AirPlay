@@ -854,6 +854,7 @@ impl Session {
                             break;
                         }
                     };
+                    if !chunk.source_is_current() { continue; }
                     if chunk.play_at(self.latency()).is_none_or(|deadline| deadline <= Instant::now()) {
                         bail!("PCM packet expired before transmission");
                     }
@@ -864,6 +865,7 @@ impl Session {
                         _ = sleep_until(chunk.produced.into()) => {}
                         _ = wait_stop(stop) => break,
                     }
+                    if !chunk.source_is_current() { continue; }
                     let packet = self.packetizer.packetize(&chunk)?;
                     if last_sync.elapsed() >= Duration::from_secs(1) {
                         self.control.send_to(packet.sync.bytes(), self.control_destination).await?;

@@ -22,6 +22,7 @@ pub struct ScheduledFrame {
     pub frame_index: u64,
     pub generation: u64,
     pub pcm: Box<[u8; PACKET_BYTES]>,
+    source: watch::Receiver<State>,
 }
 #[derive(Debug, PartialEq, Eq)]
 pub enum End {
@@ -100,14 +101,17 @@ pub async fn run(
                     frame_index,
                     generation,
                     pcm,
+                    source: controls.clone(),
                 };
                 let deadline = tokio::time::Instant::now() + timeline.output_deadline();
                 loop {
                     if stopped(&stop) || controls.has_changed().is_err() {
                         return Ok(End::Stopped);
                     }
+                    let invalidated = !matches!(frame.source.has_changed(), Ok(false));
                     let latest = state(&mut timeline, &mut controls)?;
-                    if latest.paused || latest.generation != frame.generation {
+                    frame.source = controls.clone();
+                    if invalidated || latest.paused || latest.generation != frame.generation {
                         frame.pcm.fill(0);
                         frame.generation = latest.generation;
                     }
@@ -142,12 +146,173 @@ pub async fn run(
     }
 }
 
+/// Connect the source pump to the shared immutable packet broadcast. `stamp`
+/// must use the same epoch, index and PCM (MediaClock or qualified PtpProducer).
+/// No per-receiver reads, tasks, clock creation or network operations here.
+pub async fn broadcast(
+    timeline: Timeline,
+    input: mpsc::Receiver<SourceFrame>,
+    controls: watch::Receiver<State>,
+    output: tokio::sync::broadcast::Sender<std::sync::Arc<crate::AudioPacket>>,
+    stop: watch::Receiver<bool>,
+    mut stamp: impl FnMut(u64, &[u8]) -> Result<crate::AudioPacket> + Send,
+) -> Result<End> {
+    let epoch = timeline.epoch();
+    let (scheduled, mut frames) = mpsc::channel::<ScheduledFrame>(8);
+    let pump = run(timeline, input, controls.clone(), scheduled, stop.clone());
+    let forward = async move {
+        let mut stop = stop;
+        let mut controls = controls;
+        loop {
+            if stopped(&stop) || controls.has_changed().is_err() {
+                return Ok(End::Stopped);
+            }
+            let frame = tokio::select! {
+                biased;
+                _ = wait_stop(&mut stop) => return Ok(End::Stopped),
+                changed = controls.changed() => {
+                    if changed.is_err() { return Ok(End::Stopped); }
+                    continue;
+                },
+                frame = frames.recv() => match frame { Some(frame) => frame, None => return Ok(End::Eof) },
+            };
+            // Retain stale slots for local silence; remote consumers skip them.
+            let packet = stamp_frame(frame, epoch, &mut stamp)?;
+            output
+                .send(std::sync::Arc::new(packet))
+                .map_err(|_| anyhow::anyhow!("continuous packet broadcast has no consumers"))?;
+        }
+    };
+    tokio::pin!(pump, forward);
+    tokio::select! {
+        end = &mut pump => match end? {
+            End::Eof => forward.await, // Drain only frames accepted before final EOF.
+            other => Ok(other),
+        },
+        end = &mut forward => end,
+    }
+}
+
+fn stamp_frame(
+    frame: ScheduledFrame,
+    epoch: Instant,
+    stamp: &mut impl FnMut(u64, &[u8]) -> Result<crate::AudioPacket>,
+) -> Result<crate::AudioPacket> {
+    let packet = stamp(frame.frame_index, &*frame.pcm)?;
+    let produced = epoch
+        .checked_add(crate::packet::frames_duration(frame.frame_index))
+        .ok_or_else(|| anyhow::anyhow!("continuous packet timestamp overflow"))?;
+    if packet.frame_index() != frame.frame_index
+        || packet.produced_at() != produced
+        || packet.pcm() != &*frame.pcm
+    {
+        bail!("continuous packet stamper changed media epoch/index/PCM");
+    }
+    Ok(packet.guard_source(frame.source))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Duration;
     fn timeline() -> Timeline {
         Timeline::new(Instant::now(), Duration::from_millis(250)).unwrap()
+    }
+    #[test]
+    fn stale_scheduled_slot_keeps_its_time_for_local_silence() {
+        let epoch = Instant::now();
+        let clock = crate::MediaClock::at(epoch, 0);
+        let (state, mut source) = watch::channel(State::default());
+        source.borrow_and_update();
+        let frame = ScheduledFrame {
+            frame_index: 352,
+            generation: 0,
+            pcm: Box::new([7; PACKET_BYTES]),
+            source,
+        };
+        state.send_replace(State {
+            generation: 1,
+            paused: false,
+        });
+        let packet = stamp_frame(frame, epoch, &mut |index, pcm| clock.packet(index, pcm)).unwrap();
+        assert!(!packet.source_is_current());
+        assert_eq!(packet.frame_index(), 352);
+        assert_eq!(
+            packet.produced_at(),
+            epoch + crate::packet::frames_duration(352)
+        );
+    }
+    #[tokio::test]
+    async fn broadcast_stamps_shared_pcm_once_and_preserves_eof_tail() {
+        let timeline = timeline();
+        let clock = crate::MediaClock::at(timeline.epoch(), 0);
+        let (source, input) = mpsc::channel(2);
+        source
+            .send(SourceFrame {
+                generation: 0,
+                pcm: Box::new([5; PACKET_BYTES]),
+            })
+            .await
+            .unwrap();
+        drop(source);
+        let (_controls, controls) = watch::channel(State::default());
+        let (_stop, stop) = watch::channel(false);
+        let (output, mut a) = tokio::sync::broadcast::channel(4);
+        let mut b = output.subscribe();
+        let stamps = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = stamps.clone();
+        assert_eq!(
+            broadcast(
+                timeline,
+                input,
+                controls,
+                output,
+                stop,
+                move |index, pcm| {
+                    counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    clock.packet(index, pcm)
+                }
+            )
+            .await
+            .unwrap(),
+            End::Eof
+        );
+        let first = a.recv().await.unwrap();
+        let second = b.recv().await.unwrap();
+        assert!(std::sync::Arc::ptr_eq(&first, &second));
+        assert_eq!(first.pcm(), &[5; PACKET_BYTES]);
+        assert!(first.source_is_current());
+        assert_eq!(stamps.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+    #[tokio::test]
+    async fn wrong_stamping_epoch_fails_before_broadcast() {
+        let timeline = timeline();
+        let wrong = crate::MediaClock::at(timeline.epoch() + Duration::from_secs(1), 0);
+        let (source, input) = mpsc::channel(1);
+        source
+            .send(SourceFrame {
+                generation: 0,
+                pcm: Box::new([5; PACKET_BYTES]),
+            })
+            .await
+            .unwrap();
+        drop(source);
+        let (_controls, controls) = watch::channel(State::default());
+        let (_stop, stop) = watch::channel(false);
+        let (output, mut received) = tokio::sync::broadcast::channel(4);
+        assert!(
+            broadcast(
+                timeline,
+                input,
+                controls,
+                output,
+                stop,
+                move |index, pcm| wrong.packet(index, pcm)
+            )
+            .await
+            .is_err()
+        );
+        assert!(received.try_recv().is_err());
     }
     async fn received(rx: &mut mpsc::Receiver<ScheduledFrame>) -> ScheduledFrame {
         tokio::time::timeout(Duration::from_secs(1), rx.recv())
@@ -263,40 +428,45 @@ mod tests {
     }
     #[tokio::test]
     async fn control_changes_mute_the_frame_waiting_for_output_capacity() {
-        let (source, input) = mpsc::channel(4);
-        for _ in 0..2 {
-            source
-                .send(SourceFrame {
-                    generation: 0,
-                    pcm: Box::new([7; PACKET_BYTES]),
-                })
-                .await
-                .unwrap();
-        }
-        let (state, controls) = watch::channel(State::default());
-        let (_stop, stopped) = watch::channel(false);
-        let (output, mut frames) = mpsc::channel(1);
-        let queued = output.clone();
-        let task = tokio::spawn(run(timeline(), input, controls, output, stopped));
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while queued.capacity() != 0 {
-                tokio::task::yield_now().await;
+        for resume in [false, true] {
+            let (source, input) = mpsc::channel(4);
+            for _ in 0..2 {
+                source
+                    .send(SourceFrame {
+                        generation: 0,
+                        pcm: Box::new([7; PACKET_BYTES]),
+                    })
+                    .await
+                    .unwrap();
             }
-        })
-        .await
-        .unwrap();
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        state.send_replace(State {
-            generation: 1,
-            paused: true,
-        });
-        let old = received(&mut frames).await;
-        assert_eq!(old.generation, 0); // Already delivered queue needs its own generation guard.
-        let blocked = received(&mut frames).await;
-        assert_eq!(blocked.generation, 1);
-        assert!(blocked.pcm.iter().all(|byte| *byte == 0));
-        drop(source);
-        assert_eq!(task.await.unwrap().unwrap(), End::Eof);
+            let (state, controls) = watch::channel(State::default());
+            let (_stop, stopped) = watch::channel(false);
+            let (output, mut frames) = mpsc::channel(1);
+            let queued = output.clone();
+            let task = tokio::spawn(run(timeline(), input, controls, output, stopped));
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while queued.capacity() != 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            state.send_replace(State {
+                generation: if resume { 0 } else { 1 },
+                paused: true,
+            });
+            if resume {
+                state.send_replace(State::default());
+            }
+            let old = received(&mut frames).await;
+            assert_eq!(old.generation, 0); // Already delivered queue needs its own generation guard.
+            let blocked = received(&mut frames).await;
+            assert_eq!(blocked.generation, if resume { 0 } else { 1 });
+            assert!(blocked.pcm.iter().all(|byte| *byte == 0));
+            drop(source);
+            assert_eq!(task.await.unwrap().unwrap(), End::Eof);
+        }
     }
     #[tokio::test]
     async fn closed_control_owner_stops_source_and_backwards_generation_fails() {

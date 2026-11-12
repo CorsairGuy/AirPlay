@@ -55,6 +55,9 @@ impl Timeline {
     pub fn generation(&self) -> u64 {
         self.generation
     }
+    pub fn epoch(&self) -> Instant {
+        self.epoch
+    }
     pub(super) fn apply_source_state(
         &mut self,
         generation: u64,
