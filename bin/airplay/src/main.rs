@@ -5,9 +5,11 @@
 
 use std::process::ExitCode;
 
-#[cfg(feature = "ffmpeg")]
+#[cfg(feature = "mirroring")]
+use airplay::mirror;
+#[cfg(all(feature = "mirroring", feature = "ffmpeg"))]
 use airplay::video;
-use airplay::{audio_stream, device, mirror, serve, state};
+use airplay::{audio_stream, device, serve, state};
 
 use tracing_subscriber::EnvFilter;
 
@@ -101,6 +103,7 @@ fn parse_serve(args: &[String]) -> Result<serve::Options, String> {
         model: "AirPlay".into(),
         audio: audio_stream::Config::default(),
         require_pin: false,
+        #[cfg(feature = "mirroring")]
         mirror: None,
         remote: Default::default(),
         mrp: serve::Mrp::Off,
@@ -126,6 +129,14 @@ fn parse_serve(args: &[String]) -> Result<serve::Options, String> {
     };
     let mut it = args.iter();
     while let Some(arg) = it.next() {
+        if !cfg!(feature = "mirroring")
+            && matches!(
+                arg.as_str(),
+                "--mirror" | "--video-dump" | "--video-decoder" | "--video-delay" | "--display"
+            )
+        {
+            return Err(format!("{arg}: build with --features mirroring"));
+        }
         let mut value = || it.next().cloned().ok_or(format!("{arg}: нужно значение"));
         match arg.as_str() {
             "--name" => opts.name = value()?,
@@ -184,6 +195,7 @@ fn parse_serve(args: &[String]) -> Result<serve::Options, String> {
     if delay.is_some() && decoder.is_none() {
         return Err("--video-delay только вместе с --video-decoder".into());
     }
+    #[cfg(feature = "mirroring")]
     if mirror {
         if opts.model == "AirPlay" {
             // Как у UxPlay: под этой моделью iOS предлагает «Повтор экрана».
@@ -305,7 +317,7 @@ fn parse_display(v: &str) -> Result<device::Display, String> {
 }
 
 /// Декодирование без показа: проверить, тянет ли железо поток.
-#[cfg(feature = "ffmpeg")]
+#[cfg(all(feature = "mirroring", feature = "ffmpeg"))]
 fn decode_factory(
     name: String,
     delay: Option<std::time::Duration>,
@@ -326,7 +338,7 @@ fn decode_factory(
     }))
 }
 
-#[cfg(not(feature = "ffmpeg"))]
+#[cfg(all(feature = "mirroring", not(feature = "ffmpeg")))]
 fn decode_factory(
     _name: String,
     _delay: Option<std::time::Duration>,
@@ -335,6 +347,7 @@ fn decode_factory(
 }
 
 /// Каждый новый видеопоток пишется в файл заново.
+#[cfg(feature = "mirroring")]
 fn dump_sink(path: &str) -> Box<dyn mirror::VideoSink> {
     if path == "-" {
         return Box::new(mirror::AnnexBWriter::new(std::io::stdout()));
@@ -345,5 +358,35 @@ fn dump_sink(path: &str) -> Box<dyn mirror::VideoSink> {
             tracing::warn!("{path}: {e}");
             Box::new(mirror::CountingSink(0))
         }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(not(feature = "mirroring"))]
+    #[test]
+    fn audio_build_rejects_mirroring_options_before_starting_services() {
+        for option in [
+            "--mirror",
+            "--video-dump",
+            "--video-decoder",
+            "--video-delay",
+            "--display",
+        ] {
+            let error = parse_serve(&[option.into()])
+                .err()
+                .expect("unsupported option accepted");
+            assert!(error.contains("--features mirroring"), "{error}");
+        }
+        assert!(parse_serve(&["--audio".into(), "null".into(), "--no-mdns".into()]).is_ok());
+    }
+
+    #[cfg(feature = "mirroring")]
+    #[test]
+    fn default_build_keeps_mirroring_factory_and_model() {
+        let options = parse_serve(&["--mirror".into()]).unwrap_or_else(|e| panic!("{e}"));
+        assert!(options.mirror.is_some());
+        assert_eq!(options.model, "AppleTV3,2");
     }
 }

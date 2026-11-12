@@ -90,7 +90,9 @@ impl Player {
         let reported = self.reported_owner.clone();
         {
             let mut current = reported.lock().unwrap_or_else(|e| e.into_inner());
-            if current.is_some_and(|id| id != owner) { *current = None; }
+            if current.is_some_and(|id| id != owner) {
+                *current = None;
+            }
         }
         stream.on_realtime_started(move || {
             if *reported.lock().unwrap_or_else(|e| e.into_inner()) != Some(owner) {
@@ -102,7 +104,6 @@ impl Player {
         {
             info!("новый отправитель, прежний поток остановлен");
         }
-
     }
 
     fn with<R>(&self, owner: u64, f: impl FnOnce(&Stream) -> R) -> Option<R> {
@@ -115,23 +116,36 @@ impl Player {
     fn release(&self, owner: u64) {
         let mut active = self.lock();
         if active.as_ref().is_some_and(|(id, _)| *id == owner) {
-            let realtime = active.as_ref().is_some_and(|(_, stream)|
-                stream.kind == audio_stream::StreamKind::Realtime);
+            let realtime = active
+                .as_ref()
+                .is_some_and(|(_, stream)| stream.kind == audio_stream::StreamKind::Realtime);
             *active = None;
             drop(active);
-            if realtime && *self.reported_owner.lock().unwrap_or_else(|e| e.into_inner()) != Some(owner) {
+            if realtime
+                && *self
+                    .reported_owner
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    != Some(owner)
+            {
                 self.events.playing(false);
             }
         }
     }
 
     fn report_state(&self, owner: u64, playing: bool) {
-        *self.reported_owner.lock().unwrap_or_else(|e| e.into_inner()) = Some(owner);
+        *self
+            .reported_owner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(owner);
         self.events.playing(playing);
     }
 
     fn forget_reported_state(&self, owner: u64) {
-        let mut reported = self.reported_owner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut reported = self
+            .reported_owner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if *reported == Some(owner) {
             *reported = None;
             drop(reported);
@@ -166,13 +180,17 @@ pub struct Media {
     /// Адрес отправителя: туда шлём запросы времени NTP.
     remote: IpAddr,
     /// Куда отдавать видео; `None` — зеркалирование выключено.
+    #[cfg(feature = "mirroring")]
     mirror: Option<mirror::VideoSinkFactory>,
     /// Ключ AES из FairPlay `ekey` и IV `eiv` (зеркалирование).
+    #[cfg(feature = "mirroring")]
     aes_key: Option<[u8; 16]>,
+    #[cfg(feature = "mirroring")]
     eiv: Option<[u8; 16]>,
     /// Часы отправителя по NTP (зеркалирование или realtime audio).
     ntp: Option<timesync::ntp::NtpClock>,
     /// Общий секрет legacy pair-verify: подмешивается в ключ видео.
+    #[cfg(feature = "mirroring")]
     legacy_shared: Option<[u8; 32]>,
     /// Часы NTP, видеопоток и заглушка звука зеркалирования.
     tasks: Vec<JoinHandle<()>>,
@@ -201,10 +219,14 @@ impl Media {
             events: None,
             anchor: None,
             remote: remote.to_canonical(),
+            #[cfg(feature = "mirroring")]
             mirror: ctx.mirror.clone(),
+            #[cfg(feature = "mirroring")]
             aes_key: None,
+            #[cfg(feature = "mirroring")]
             eiv: None,
             ntp: None,
+            #[cfg(feature = "mirroring")]
             legacy_shared: None,
             tasks: Vec::new(),
             control: ctx.remote.clone(),
@@ -216,6 +238,7 @@ impl Media {
         }
     }
 
+    #[cfg(feature = "mirroring")]
     pub fn set_legacy_shared(&mut self, shared: [u8; 32]) {
         self.legacy_shared = Some(shared);
     }
@@ -308,11 +331,17 @@ impl Media {
     }
 
     fn sender_command(&self, req: &Request) {
-        let Some(command) = plist_dict(&req.body) else { return };
+        let Some(command) = plist_dict(&req.body) else {
+            return;
+        };
         let kind = command.get("type").and_then(Value::as_string).unwrap_or("");
         debug!(kind, "sender command");
-        if kind != "updateMRPlaybackState" || self.rc_only { return; }
-        let state = command.get("params").and_then(Value::as_dictionary)
+        if kind != "updateMRPlaybackState" || self.rc_only {
+            return;
+        }
+        let state = command
+            .get("params")
+            .and_then(Value::as_dictionary)
             .and_then(|p| uint(p, "mrPlaybackState"));
         match state {
             Some(1) => self.player.report_state(self.id, true),
@@ -352,6 +381,7 @@ impl Media {
             .unwrap_or(false);
         info!(timing, rc_only = self.rc_only, "SETUP сессии");
         let mut d = Dictionary::new();
+        #[cfg(feature = "mirroring")]
         if let Some(ekey) = body.get("ekey").and_then(Value::as_data) {
             match <&[u8; 72]>::try_from(ekey).map(|e| self.fairplay.decrypt(e)) {
                 Ok(Ok(key)) => self.aes_key = Some(key),
@@ -359,6 +389,7 @@ impl Media {
                 Err(_) => warn!(len = ekey.len(), "ekey неожиданной длины"),
             }
         }
+        #[cfg(feature = "mirroring")]
         if let Some(eiv) = body.get("eiv").and_then(Value::as_data) {
             self.eiv = eiv.try_into().ok();
         }
@@ -414,6 +445,7 @@ impl Media {
     }
 
     /// Тип 110: видеопоток зеркалирования.
+    #[cfg(feature = "mirroring")]
     fn setup_video(&mut self, s: &Dictionary, r: &mut Dictionary) -> Result<(), String> {
         let factory = self
             .mirror
@@ -448,6 +480,7 @@ impl Media {
     /// Звук зеркалирования: тип 96 без `shk`, AAC-ELD, AES-128-CBC ключом
     /// сессии и `eiv`, время по NTP. Без декодера AAC-ELD (сборка без фичи
     /// `ffmpeg`) порты всё равно отдаём, иначе отправитель не начнёт видео.
+    #[cfg(feature = "mirroring")]
     fn setup_mirror_audio(&mut self, s: &Dictionary, r: &mut Dictionary) -> Result<(), String> {
         let format = Format {
             codec: Codec::AacEld,
@@ -478,6 +511,7 @@ impl Media {
         Ok(())
     }
 
+    #[cfg(feature = "mirroring")]
     fn drain_mirror_audio(&mut self, r: &mut Dictionary) -> Result<(), String> {
         for key in ["dataPort", "controlPort"] {
             let socket = std::net::UdpSocket::bind((std::net::Ipv6Addr::UNSPECIFIED, 0))
@@ -564,10 +598,14 @@ impl Media {
             let mut r = Dictionary::new();
             r.insert("type".into(), Value::Integer(kind.into()));
             match kind {
+                #[cfg(feature = "mirroring")]
                 96 if self.mirror.is_some() && !s.contains_key("shk") => {
                     self.setup_mirror_audio(s, &mut r)?;
                 }
+                #[cfg(feature = "mirroring")]
                 110 => self.setup_video(s, &mut r)?,
+                #[cfg(not(feature = "mirroring"))]
+                110 => return Err("mirroring is disabled in this build".into()),
                 96 | 103 => {
                     let shk: [u8; 32] = s
                         .get("shk")
@@ -902,7 +940,6 @@ mod tests {
     }
 }
 
-
 #[cfg(test)]
 mod realtime_state_tests {
     use super::*;
@@ -910,31 +947,65 @@ mod realtime_state_tests {
     #[derive(Default)]
     struct States(Mutex<Vec<bool>>);
     impl Events for States {
-        fn playing(&self, value: bool) { self.0.lock().unwrap().push(value); }
+        fn playing(&self, value: bool) {
+            self.0.lock().unwrap().push(value);
+        }
     }
     #[tokio::test]
     async fn realtime_state_requires_audio_and_respects_owner() {
         let states = Arc::new(States::default());
-        let mut player = Player::new(audio_stream::Config {
-            device: "null".into(), ..Default::default()
-        }, TimeSync::idle(1));
+        let mut player = Player::new(
+            audio_stream::Config {
+                device: "null".into(),
+                ..Default::default()
+            },
+            TimeSync::idle(1),
+        );
         player.events = states.clone();
-        let stream = Stream::realtime(player.audio.clone(), StreamKey::ChaCha([7; 32]),
-            Format { codec: Codec::Pcm { frames_per_packet: 352 }, sample_rate: 44100, channels: 2 },
-            Arc::new(clock::NoTime)).unwrap();
+        let stream = Stream::realtime(
+            player.audio.clone(),
+            StreamKey::ChaCha([7; 32]),
+            Format {
+                codec: Codec::Pcm {
+                    frames_per_packet: 352,
+                },
+                sample_rate: 44100,
+                channels: 2,
+            },
+            Arc::new(clock::NoTime),
+        )
+        .unwrap();
         let port = stream.data_port;
         player.replace(1, stream);
         let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        socket.send_to(b"invalid", ("127.0.0.1", port)).await.unwrap();
+        socket
+            .send_to(b"invalid", ("127.0.0.1", port))
+            .await
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(40)).await;
-        assert!(states.0.lock().unwrap().is_empty(), "SETUP or invalid data must not announce playing");
-        let packet = rtp::AudioCipher::new(&[7; 32]).seal(&rtp::Header {
-            marker: false, payload_type: 96, seq: 1, timestamp: 0, ssrc: 0
-        }, &[0; 1408], 1);
+        assert!(
+            states.0.lock().unwrap().is_empty(),
+            "SETUP or invalid data must not announce playing"
+        );
+        let packet = rtp::AudioCipher::new(&[7; 32]).seal(
+            &rtp::Header {
+                marker: false,
+                payload_type: 96,
+                seq: 1,
+                timestamp: 0,
+                ssrc: 0,
+            },
+            &[0; 1408],
+            1,
+        );
         socket.send_to(&packet, ("127.0.0.1", port)).await.unwrap();
         tokio::time::timeout(Duration::from_secs(2), async {
-            while states.0.lock().unwrap().is_empty() { tokio::task::yield_now().await; }
-        }).await.unwrap();
+            while states.0.lock().unwrap().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
         player.release(2);
         assert_eq!(*states.0.lock().unwrap(), vec![true]);
         player.release(1);

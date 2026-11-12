@@ -23,12 +23,10 @@ codec.workspace = true
 plist.workspace = true
 audio.workspace = true
 audio_stream.workspace = true
-mirror.workspace = true
-video.workspace = true
-hls.workspace = true
+mirror = { workspace = true, optional = true }
+video = { workspace = true, optional = true }
 ipc.workspace = true
 timesync.workspace = true
-mediaserver.workspace = true
 mediaremote.workspace = true
 mrp.workspace = true
 anyhow.workspace = true
@@ -43,8 +41,10 @@ uuid = { version = "1", features = ["v4", "v5"] }
 if-addrs.workspace = true
 
 [features]
+default = ["mirroring"]
+mirroring = ["dep:mirror", "dep:video"]
 # Звук (AAC-ELD) и видео (H.264/H.265) зеркалирования через libavcodec.
-ffmpeg = ["codec/ffmpeg", "video/ffmpeg"]
+ffmpeg = ["codec/ffmpeg", "video?/ffmpeg"]
 
 [lints]
 workspace = true

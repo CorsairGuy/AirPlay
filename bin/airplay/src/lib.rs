@@ -41,5 +41,7 @@ macro_rules! station_elog {($($arg:tt)*)=>{{$crate::mrp_log!($($arg)*);}}}
 pub use audio;
 pub use audio_stream;
 pub use device;
+#[cfg(feature = "mirroring")]
 pub use mirror;
+#[cfg(feature = "mirroring")]
 pub use video;

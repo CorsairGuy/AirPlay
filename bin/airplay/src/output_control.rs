@@ -72,6 +72,7 @@ impl OutputControl {
         let (tx, rx) = mpsc::channel(capacity.clamp(1, 64));
         (Self(tx), rx)
     }
+    #[cfg(test)]
     pub(crate) fn submit(&self, body: Node) -> Result<oneshot::Receiver<u64>, ()> {
         self.submit_authorized(body, None)
     }

@@ -20,6 +20,8 @@
 
 ## Сборка
 
+Без видео: `cargo build -p airplay --no-default-features --profile release-small`. Стандартная сборка сохраняет mirroring; [профили и ограничения](docs/BUILD_PROFILES.md).
+
 ```sh
 cargo build --release
 # для устройств с маленькой флеш-памятью

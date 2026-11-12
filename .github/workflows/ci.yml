@@ -33,6 +33,22 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --workspace
 
+  # Минимальный аудиопрофиль без зависимостей видео.
+  audio-only:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test -p airplay --no-default-features
+      - name: Audio profile excludes video and mirroring crates
+        shell: bash
+        run: |
+          cargo tree -p airplay --no-default-features --prefix none > audio-tree.txt
+          if grep -E '^(ap_mirror|ap_video|ap_hls|ap_capture|mediaserver) v' audio-tree.txt; then
+            echo 'Unexpected video dependency in audio-only profile'
+            exit 1
+          fi
+
   # Звук зеркалирования (AAC-ELD) через libavcodec: фича ffmpeg.
   ffmpeg:
     runs-on: ubuntu-latest

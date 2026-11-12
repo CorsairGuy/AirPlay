@@ -34,6 +34,7 @@ pub struct Context {
     pub mdns: std::sync::Mutex<Option<mdns::Advertiser>>,
     pub port: u16,
     /// Зеркалирование экрана: куда отдавать видео.
+    #[cfg(feature = "mirroring")]
     pub mirror: Option<mirror::VideoSinkFactory>,
     /// Команды отправителю.
     pub remote: crate::remote::Remote,
@@ -99,7 +100,11 @@ impl Context {
     /// Описание приёмника с флагами по текущему состоянию сопряжения.
     pub fn device(&self) -> DeviceInfo {
         let mut d = self.device.clone();
-        d.group = self.session_group.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        d.group = self
+            .session_group
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         if self.require_pin {
             d.require_pin(!self.store.is_empty());
         }
@@ -183,7 +188,8 @@ impl Session {
                 (resp, None)
             }
             ("GET", "/info") => (
-                Response::to(req, 200).with_body(BPLIST, self.ctx.device().info_plist_for(Some(&self.peer))),
+                Response::to(req, 200)
+                    .with_body(BPLIST, self.ctx.device().info_plist_for(Some(&self.peer))),
                 None,
             ),
             ("POST", "/pair-pin-start") => {
@@ -306,7 +312,10 @@ impl Session {
             Ok(LegacyOutcome::Continue(body)) => Response::to(req, 200).with_body(OCTETS, body),
             Ok(LegacyOutcome::Verified { shared }) => {
                 info!(peer = %self.peer, "legacy pair-verify выполнен");
+                #[cfg(feature = "mirroring")]
                 self.media.set_legacy_shared(shared);
+                #[cfg(not(feature = "mirroring"))]
+                let _ = shared;
                 Response::to(req, 200)
             }
             Err(e) => {
@@ -359,6 +368,7 @@ mod tests {
             require_pin: false,
             mdns: std::sync::Mutex::new(None),
             port: 7000,
+            #[cfg(feature = "mirroring")]
             mirror: None,
             remote: Default::default(),
             mrp: None,
@@ -562,13 +572,36 @@ mod tests {
         frames
     }
 
+    #[cfg(not(feature = "mirroring"))]
+    #[tokio::test]
+    async fn audio_build_rejects_video_setup_without_opening_a_stream() {
+        let context = ctx();
+        let mut client = Client::new(context.clone());
+        let mut stream = plist::Dictionary::new();
+        stream.insert("type".into(), plist::Value::Integer(110.into()));
+        let mut body = plist::Dictionary::new();
+        body.insert("streams".into(), plist::Value::Array(vec![stream.into()]));
+        let mut encoded = Vec::new();
+        plist::Value::Dictionary(body)
+            .to_writer_binary(&mut encoded)
+            .unwrap();
+        let response = client.call("SETUP", "rtsp://x/1", &[], encoded);
+        assert_eq!(response.status, 500);
+        assert!(response.body.is_empty());
+        assert_eq!(context.player.active_packets(), None);
+        assert_eq!(context.device.features, device::Features::AUDIO_RECEIVER);
+    }
+
     /// Видео сохраняется для проверки в тесте.
+    #[cfg(feature = "mirroring")]
     #[derive(Default, Clone)]
     struct Recorded(Arc<std::sync::Mutex<Vec<Packet>>>);
 
     /// `true` — параметры декодера, `false` — кадр.
+    #[cfg(feature = "mirroring")]
     type Packet = (bool, Vec<u8>);
 
+    #[cfg(feature = "mirroring")]
     impl mirror::VideoSink for Recorded {
         fn config(&mut self, _codec: mirror::Codec, record: &[u8]) {
             self.0.lock().unwrap().push((true, record.to_vec()));
@@ -581,6 +614,7 @@ mod tests {
     /// Зеркалирование: FairPlay → SETUP с ekey и NTP → поток 110 → кадры,
     /// расшифрованные ключом, выведенным из ekey.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[cfg(feature = "mirroring")]
     async fn mirroring_end_to_end() {
         use plist::{Dictionary, Value};
         use tokio::io::AsyncWriteExt;
@@ -923,7 +957,10 @@ mod tests {
         let body = m[0].nested(f::ProtocolMessage::deviceInfoMessage).unwrap();
         // Имя у карточки станции общее на процесс (её константа NAME), в тестах
         // его мог задать другой тест.
-        assert!(body.string(f::DeviceInfoMessage::name).is_some_and(|n| !n.is_empty()));
+        assert!(
+            body.string(f::DeviceInfoMessage::name)
+                .is_some_and(|n| !n.is_empty())
+        );
 
         // Трек от отправителя — карточка подписанному iPhone.
         use crate::events::Events;
@@ -1157,19 +1194,28 @@ mod tests {
     fn sender_playback_commands_update_events_without_teardown() {
         let events = Arc::new(EventLog::default());
         let mut context = ctx();
-        Arc::get_mut(&mut Arc::get_mut(&mut context).unwrap().player).unwrap().events = events.clone();
+        Arc::get_mut(&mut Arc::get_mut(&mut context).unwrap().player)
+            .unwrap()
+            .events = events.clone();
         let mut client = Client::new(context);
         for state in [1u64, 2, 1, 99] {
             let mut params = plist::Dictionary::new();
-            params.insert("mrPlaybackState".into(), plist::Value::Integer(state.into()));
+            params.insert(
+                "mrPlaybackState".into(),
+                plist::Value::Integer(state.into()),
+            );
             let mut command = plist::Dictionary::new();
             command.insert("type".into(), "updateMRPlaybackState".into());
             command.insert("params".into(), params.into());
             let mut body = Vec::new();
-            plist::Value::Dictionary(command).to_writer_binary(&mut body).unwrap();
+            plist::Value::Dictionary(command)
+                .to_writer_binary(&mut body)
+                .unwrap();
             assert_eq!(client.call("POST", "/command", &[], body).status, 200);
         }
-        assert_eq!(*events.0.lock().unwrap(), vec!["playing true", "playing false", "playing true"]);
+        assert_eq!(
+            *events.0.lock().unwrap(),
+            vec!["playing true", "playing false", "playing true"]
+        );
     }
-
 }

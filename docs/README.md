@@ -10,6 +10,7 @@
 | AIRPLAY-WIRE-SPEC.md | Wire reference с закреплёнными источниками и датированными наблюдениями |
 | VALIDATION.md | Выполненные проверки и отсутствующие доказательства |
 | SESSION_PROFILES.md | Границы AP1/AP2/control/mirroring |
+| BUILD_PROFILES.md | Audio-only/default, границы feature и проверки |
 | ROUTE_AUTHORIZATION.md | Connection-scoped PIN путь и проверки |
 | CARD_UPDATES.md | История artwork/timeline/framing и ограничения UI |
 | RELAY_IPC.md | Существующий Unix IPC contract; не native group adoption |

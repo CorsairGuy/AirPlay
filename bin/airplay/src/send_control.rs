@@ -21,24 +21,28 @@ struct Target {
     media: watch::Receiver<Option<MediaProgress>>,
 }
 enum Gain {
+    #[cfg(test)]
     Watch(watch::Sender<Volume>),
     Session(sender::pool::SessionHandle),
 }
 impl Gain {
     fn requested(&self) -> Volume {
         match self {
+            #[cfg(test)]
             Self::Watch(v) => *v.borrow(),
             Self::Session(v) => v.requested_volume(),
         }
     }
     fn available(&self) -> bool {
         match self {
+            #[cfg(test)]
             Self::Watch(v) => !v.is_closed(),
             Self::Session(v) => *v.state.borrow() == sender::pool::SessionState::Running,
         }
     }
     fn request(&self, volume: Volume) -> Result<()> {
         match self {
+            #[cfg(test)]
             Self::Watch(v) => {
                 v.send_replace(volume);
                 Ok(())
@@ -146,6 +150,7 @@ impl RelayControl {
         state.expected = expected;
         Ok(RunGuard(self.clone()))
     }
+    #[cfg(test)]
     pub(crate) fn register(
         &self,
         endpoint: SocketAddr,

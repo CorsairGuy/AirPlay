@@ -27,6 +27,7 @@ pub struct Options {
     pub require_pin: bool,
     /// Зеркалирование экрана вместо звука AirPlay 2: набор возможностей
     /// UxPlay, видео уходит в эту фабрику.
+    #[cfg(feature = "mirroring")]
     pub mirror: Option<mirror::VideoSinkFactory>,
     /// Экран, который объявляем для зеркалирования.
     pub display: device::Display,
@@ -65,7 +66,14 @@ fn random_pgid() -> String {
     b[6] = (b[6] & 0x0f) | 0x40;
     b[8] = (b[8] & 0x3f) | 0x80;
     let h = hex::encode(b);
-    format!("{}-{}-{}-{}-{}", &h[..8], &h[8..12], &h[12..16], &h[16..20], &h[20..])
+    format!(
+        "{}-{}-{}-{}-{}",
+        &h[..8],
+        &h[8..12],
+        &h[12..16],
+        &h[16..20],
+        &h[20..]
+    )
 }
 
 pub async fn run(opts: Options) -> Result<()> {
@@ -75,7 +83,10 @@ pub async fn run(opts: Options) -> Result<()> {
     let pin = opts
         .pin
         .unwrap_or_else(|| format!("{:04}", rand::random::<u16>() % 10_000));
+    #[cfg(feature = "mirroring")]
     let mirroring = opts.mirror.is_some();
+    #[cfg(not(feature = "mirroring"))]
+    let mirroring = false;
     let device = DeviceInfo {
         name: opts.name.clone(),
         device_id: device_id.clone(),
@@ -148,6 +159,7 @@ pub async fn run(opts: Options) -> Result<()> {
         player,
         mdns: std::sync::Mutex::new(None),
         port: opts.port,
+        #[cfg(feature = "mirroring")]
         mirror: opts.mirror,
         remote: opts.remote,
         mrp,

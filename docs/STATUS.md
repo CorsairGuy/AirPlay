@@ -17,7 +17,7 @@
 | MRP | Карточка, frame boundaries, команды/таймлайн, кеш обложки, outputs backend и отдельная/общая громкости | Общая подпись кнопки и удержание ползунков в реальной группе не подтверждены исправленными |
 | Continuous relay | Source Timeline/pump/broadcast, queue/cache guards, единый PtpGroup runtime и opt-in MRP-card SourceControl с playback observer/grace | Default frontend composition, native/BT adapters, receiver/hardware buffers и полный control автомат остаются; [подробности](CONTINUOUS_RELAY.md) |
 | Mirroring/video | Отдельный существующий профиль и декодирующие компоненты | Modern mirroring вместе с AP2/PTP/group остаётся исследованием; 60fps не гарантируются для любого железа |
-| Минимальная сборка | Существующий Cargo workspace и ffmpeg feature | Локальный audio-only/mirroring feature-патч старого worktree ещё не перенесён; --no-default-features пока не обещает отсутствие video зависимостей |
+| Минимальная сборка | --no-default-features исключает mirror/video/hls/capture/mediaserver из дерева airplay; default сохраняет mirroring | Оба профиля и CLI проверены на Pi/Linux; FFmpeg/cross-platform матрица отдельно; [профили](BUILD_PROFILES.md) |
 | Станция | Отдельный адаптер Quasar/Glagol, ALSA tap/output, BT/focus, LED, install/recovery | Не переведён на новое ядро. Готовые guard/recovery Claude сохраняются, не реализуются заново |
 
 ## Что подтверждено
@@ -32,7 +32,7 @@
 1. Довести continuous runtime до frontend/адаптеров и комплексной проверки нескольких получателей. Opt-in композиция карточки и pipeline уже проверена:164 теста (application86 + sender78), включая MRP Pause/Play → PCM в памяти; реальное оборудование не проверялось.
 2. iPhone interop connection-scoped PIN пути (автономный сквозной обмен уже проверен); комплексные add/remove/failure проверки PTP-группы. Отказ одного из двух настоящих NTP/RTSP loopback-получателей уже проверен без остановки второго; это не PTP native-group interop.
 3. Native group topology/подпись кнопки/ползунки: сверять с захватами, не менять gid и capability flags наугад.
-4. Перенести audio-only профиль и полезные локальные Glagol deadline/Retry-After правки в соответствующие слои.
+4. Перенести полезные локальные Glagol deadline/Retry-After правки в адаптер и обновить differential harness. Audio-only профиль уже перенесён и проверен.
 5. Подключить frontend/адаптер Станции к общему ядру с pin версии и сохранить capture/routes/recovery/BT/LED.
 6. Отдельно разрешённые домашние проверки всех источников, голоса Алисы, синхронизации и сбоев. Проверку buffered-only Яндекс Музыки делать на отдельном тихом приёмнике.
 

@@ -598,6 +598,7 @@ mod tests {
             player: Arc::new(Player::new(audio, timesync::TimeSync::idle(23))),
             mdns: Mutex::new(None),
             port: 0,
+            #[cfg(feature = "mirroring")]
             mirror: None,
             remote: Default::default(),
             mrp: None,

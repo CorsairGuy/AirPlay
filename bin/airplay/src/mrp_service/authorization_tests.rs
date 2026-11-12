@@ -335,6 +335,7 @@ fn receiver_context(require_pin: bool) -> Arc<crate::session::Context> {
         require_pin,
         mdns: Mutex::new(None),
         port: 0,
+        #[cfg(feature = "mirroring")]
         mirror: None,
         remote: Default::default(),
         mrp: None,

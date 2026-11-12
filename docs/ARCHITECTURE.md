@@ -27,7 +27,7 @@ PtpGroup получает MasterTimeline существующей общей PTP
 - AP1 classic, AP2 realtime/buffered, control-only MRP и mirroring не смешиваются неявно.
 - AP2 timing выбирается явно: ядро имеет NTP и PTP; групповой профиль использует PTP. Обязательность NTP для всех AP2-устройств по закрытой спецификации Apple не заявляется. In-session fallback отсутствует.
 - Общая служба может жить без групп. MasterTimeline TX пока ограничен qualified local master; полноценный follower TX/RAW bridge не объявлены готовыми.
-- Универсальный audio-only Cargo profile ещё не перенесён из старого локального черновика. Выключенный показ видео и исключённые зависимости — разные вещи.
+- Audio-only профиль перенесён выборочно из старого черновика: cargo -p airplay --no-default-features исключает видео-зависимости, сохраняя NTP realtime audio. Default включает mirroring. См. BUILD_PROFILES.md.
 - Ни Session Running, ни SETUP/SETPEERS ACK, ни MRP-галочка не доказывают звук, синхронизацию или принятие топологии.
 
 ## Перенос на Станцию
