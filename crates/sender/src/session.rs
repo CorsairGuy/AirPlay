@@ -367,6 +367,12 @@ struct TargetPacket {
     sync: SyncPacket,
 }
 impl TargetPacketizer {
+    fn clear_retransmit_cache(&mut self) {
+        match self {
+            Self::Ntp(packetizer) => packetizer.clear_retransmit_cache(),
+            Self::Ptp(packetizer) => packetizer.clear_retransmit_cache(),
+        }
+    }
     fn initial_timestamp(&self) -> u32 {
         match self {
             Self::Ntp(p) => p.initial_timestamp(),
@@ -827,6 +833,7 @@ impl Session {
         let mut last_sync = Instant::now() - Duration::from_secs(2);
         let mut control_buf = [0u8; 64];
         let mut last_presentation: Option<Instant> = None;
+        let mut last_source: Option<Arc<AudioPacket>> = None;
         let mut drain_until: Option<Instant> = None;
         loop {
             if *stop.borrow() {
@@ -866,6 +873,9 @@ impl Session {
                         _ = wait_stop(stop) => break,
                     }
                     if !chunk.source_is_current() { continue; }
+                    if last_source.as_ref().is_some_and(|previous| !previous.same_source_revision(&chunk)) {
+                        self.packetizer.clear_retransmit_cache();
+                    }
                     let packet = self.packetizer.packetize(&chunk)?;
                     if last_sync.elapsed() >= Duration::from_secs(1) {
                         self.control.send_to(packet.sync.bytes(), self.control_destination).await?;
@@ -874,6 +884,7 @@ impl Session {
                     // A failed datagram is a transport failure, not proof of a
                     // playable receiver. The caller decides whether to reconnect.
                     self.audio.send(&packet.audio).await?;
+                    last_source = Some(chunk.clone());
                     stats.packets_sent += 1;
                     if let Some(progress)=progress {
                         progress.send_replace(Some(MediaProgress{packets_sent:stats.packets_sent,frame_index:chunk.index,play_at:chunk.play_at(self.latency()).context("presentation overflow")?}));
@@ -885,6 +896,10 @@ impl Session {
                     // Do not become an unauthenticated UDP reflector. Retransmit
                     // only to the exact control endpoint negotiated with the peer.
                     if from != self.control_destination { continue; }
+                    if last_source.as_ref().is_some_and(|previous| !previous.source_is_current()) {
+                        self.packetizer.clear_retransmit_cache();
+                        continue;
+                    }
                     for retry in self.packetizer.retransmit(&control_buf[..size]) {
                         self.control.send_to(&retry, from).await?;
                         stats.retransmitted_packets += 1;

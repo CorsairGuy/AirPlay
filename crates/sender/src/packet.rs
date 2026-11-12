@@ -93,6 +93,15 @@ impl AudioPacket {
             .as_ref()
             .is_none_or(|source| matches!(source.has_changed(), Ok(false)))
     }
+    pub(crate) fn same_source_revision(&self, other: &Self) -> bool {
+        match (&self.source, &other.source) {
+            (None, None) => true,
+            (Some(a), Some(b)) => {
+                a.same_channel(b) && self.source_is_current() && other.source_is_current()
+            }
+            _ => false,
+        }
+    }
     pub(crate) fn silence(&self) -> Self {
         Self {
             data: vec![0; self.data.len()],
@@ -143,12 +152,29 @@ mod tests {
             .unwrap()
             .guard_source(source);
         assert!(packet.source_is_current());
+        let mut current = control.subscribe();
+        current.borrow_and_update();
+        let peer = MediaClock::now()
+            .packet(352, &[8; PACKET_BYTES])
+            .unwrap()
+            .guard_source(current);
+        assert!(packet.same_source_revision(&peer));
+        assert!(
+            !packet.same_source_revision(&MediaClock::now().packet(0, &[8; PACKET_BYTES]).unwrap())
+        );
         control.send_replace(State {
             generation: 0,
             paused: true,
         });
         control.send_replace(State::default());
         assert!(!packet.source_is_current());
+        let mut current = control.subscribe();
+        current.borrow_and_update();
+        let new = MediaClock::now()
+            .packet(704, &[8; PACKET_BYTES])
+            .unwrap()
+            .guard_source(current);
+        assert!(!packet.same_source_revision(&new));
         assert_eq!(packet.pcm(), &[8; PACKET_BYTES]);
         let silence = packet.silence();
         assert_eq!(silence.frame_index(), packet.frame_index());

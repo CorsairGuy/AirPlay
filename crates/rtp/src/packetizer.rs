@@ -138,6 +138,13 @@ impl PcmPacketizer {
     pub fn cached_packets(&self) -> usize {
         self.cache.iter().filter(|v| v.is_some()).count()
     }
+    /// Drop obsolete ciphertext without rewinding sequence, nonce, timestamp
+    /// origin or first-marker state. Never recreate the packetizer for a seek.
+    pub fn clear_retransmit_cache(&mut self) {
+        for entry in &mut self.cache {
+            *entry = None;
+        }
+    }
 
     pub fn packetize(
         &mut self,
@@ -239,6 +246,27 @@ mod tests {
     }
     fn sender(seq: u16) -> PcmPacketizer {
         PcmPacketizer::new([3; 32], 0x12345678, seq, 44_100)
+    }
+    #[test]
+    fn clearing_retransmits_keeps_cipher_nonce_sequence_and_media_epoch() {
+        let mut sender = sender(u16::MAX);
+        let first = sender.packetize(&[7; 1408], 1000, 1).unwrap();
+        assert_eq!(sender.retransmit(&request(first.header.seq, 1)).len(), 1);
+        sender.clear_retransmit_cache();
+        assert_eq!(sender.cached_packets(), 0);
+        assert!(sender.retransmit(&request(first.header.seq, 1)).is_empty());
+        let next = sender.packetize(&[8; 1408], 1352, 2).unwrap();
+        assert_eq!(next.header.seq, 0);
+        assert_eq!(
+            next.header.timestamp,
+            first.header.timestamp.wrapping_add(352)
+        );
+        assert!(!next.header.marker);
+        assert_eq!(&next.audio[next.audio.len() - 8..], &1u64.to_le_bytes());
+        assert_eq!(
+            &sender.retransmit(&request(0, 1))[0][4..],
+            next.audio.as_slice()
+        );
     }
     #[test]
     fn pcm_encrypts_once_with_first_marker_and_shared_producer_epoch() {

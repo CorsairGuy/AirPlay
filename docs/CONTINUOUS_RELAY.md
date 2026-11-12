@@ -30,12 +30,12 @@ ScheduledFrame и AudioPacket сохраняют версию source-control wat
 
 Remote Session пропускает stale до pacing/проверки срока и повторно перед packetization: RTP sequence/nonce для таких кадров не расходуются. Local run_local подаёт тишину на прежнее presentation time, а уже просроченный stale кадр пропускает. LocalPcmPipe повторно проверяет revision при сериализации. Исходный PCM для других потребителей не меняется; legacy packets без guard сохраняют прежнее поведение.
 
-Это защита ещё не потреблённых host queues. Она не отзывает уже принятые hardware/receiver buffers или retransmit cache и не заменяет согласованные сетевые pause/flush/seek операции.
+Это защита ещё не потреблённых host queues. Она не отзывает уже принятые hardware/receiver buffers и не заменяет согласованные сетевые pause/flush/seek операции. Защита retransmit cache добавлена отдельно ниже.
 
 ## Остаётся
 
 - Подключение готового broadcast API к рабочему frontend/PtpGroup и реальным source/control adapters.
-- Согласование receiver/hardware buffers и retransmit cache при переходах состояния.
+- Согласование receiver/hardware buffers и control операций при переходах состояния.
 - Сетевые pause/seek/track операции и tolerance действующей Session. Исторические FLUSH/restart варианты требуют отдельной сверки.
 - Debounce краткого !playing между треками и реальные interop/нагрузочные проверки.
 
@@ -48,3 +48,11 @@ Remote Session пропускает stale до pacing/проверки срок�
 Дополнение к контракту: stale scheduled slots не удаляются из общей рассылки до local/remote разветвления — иначе локальная ветка потеряет временной слот. Они сохраняют guard; remote пропускает их, local заполняет тишиной. Отдельный тест покрывает coalesced Pause→Resume во время ожидания capacity: pending PCM не становится снова актуальным. Custom sinks с собственными очередями должны проверять source_is_current при фактическом потреблении; уже переданные hardware/network buffers не отзываются автоматически.
 
 Проверка:78 sender library tests passed. Новые случаи: один shared Arc/один stamp, неверная эпоха до рассылки, невосстановимость старой revision, локальная тишина на прежнем deadline и сохранение stale scheduled slot. Зашифрованный PTP loopback дополнен stale future frame: он не расходует RTP/nonce и не ломает pacing; mock по-прежнему получает ровно два актуальных audio packets.
+
+## Retransmit cache при смене источника
+
+PcmPacketizer::clear_retransmit_cache удаляет только сохранённый ciphertext, не сбрасывая sequence/nonce, media origin или first-marker state. NTP/PTP wrappers используют один контракт. Session очищает cache перед первым новым source revision; если revision старого отправленного кадра уже invalid, поздний retransmit запрос не получает старые байты даже до поступления нового PCM. Legacy unmanaged packets сохраняют прежнее поведение.
+
+Сверка поздней станционной ветки: native mini2_music tap переносит pause/seek/track в той же сессии; старые варианты FLUSH/restart не являются универсальным текущим рецептом. Этот cache guard не отправляет самодельный RTSP PAUSE или FLUSH и не объявляет завершённой отмену remote/hardware buffers.
+
+Проверка:94 library tests passed (RTP16 + sender78). Новый RTP regression очищает cache на переходе sequence65535→0 и подтверждает nonce1, прежний media origin, отсутствие повторного marker и точный ciphertext нового retransmit. Sender regression проверяет различение прежней/новой source revision; существующий encrypted PTP loopback также прошёл.

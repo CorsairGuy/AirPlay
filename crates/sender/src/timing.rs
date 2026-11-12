@@ -102,6 +102,9 @@ impl PtpPacketizer {
     pub fn retransmit(&self, request: &[u8]) -> Vec<Vec<u8>> {
         self.inner.retransmit(request)
     }
+    pub fn clear_retransmit_cache(&mut self) {
+        self.inner.clear_retransmit_cache();
+    }
 }
 impl PtpPlan {
     /// Derive a new connection plan for the selected physical receivers while
