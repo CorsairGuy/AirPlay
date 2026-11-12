@@ -15,6 +15,7 @@
 | AIRPLAY-WIRE-SPEC.md | Wire reference с закреплёнными источниками и датированными наблюдениями |
 | VALIDATION.md | Выполненные проверки и отсутствующие доказательства |
 | SESSION_PROFILES.md | Границы AP1/AP2/control/mirroring |
+| [PCM_HOST.md](PCM_HOST.md) | Библиотечная композиция raw tap → Card/PTP/local pipeline |
 | BUILD_PROFILES.md | Audio-only/default, границы feature и проверки |
 | ROUTE_AUTHORIZATION.md | Connection-scoped PIN путь и проверки |
 | CARD_UPDATES.md | История artwork/timeline/framing и ограничения UI |

@@ -733,10 +733,7 @@ mod tests {
         let (state, controls) = watch::channel(State::default());
         let (_stop, stop) = watch::channel(false);
         source
-            .send(SourceFrame {
-                generation: 0,
-                pcm: Box::new([7; PACKET_BYTES]),
-            })
+            .send(SourceFrame::new(0, Box::new([7; PACKET_BYTES])))
             .await
             .unwrap();
         let task = tokio::spawn(continuous_source::broadcast(
@@ -769,10 +766,7 @@ mod tests {
         });
         assert!(!first.1.source_is_current());
         source
-            .send(SourceFrame {
-                generation: 1,
-                pcm: Box::new([9; PACKET_BYTES]),
-            })
+            .send(SourceFrame::new(1, Box::new([9; PACKET_BYTES])))
             .await
             .unwrap();
         let resumed = tokio::time::timeout(Duration::from_secs(1), async {

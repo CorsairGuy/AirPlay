@@ -15,6 +15,31 @@ pub struct State {
 pub struct SourceFrame {
     pub generation: u64,
     pub pcm: Box<[u8; PACKET_BYTES]>,
+    source: Option<watch::Receiver<State>>,
+}
+impl SourceFrame {
+    /// Unmanaged input: the adapter owns invalidation of its acquisition queue.
+    pub fn new(generation: u64, pcm: Box<[u8; PACKET_BYTES]>) -> Self {
+        Self {
+            generation,
+            pcm,
+            source: None,
+        }
+    }
+    /// Capture the current control revision at acquisition, before queueing PCM.
+    pub fn guarded(pcm: Box<[u8; PACKET_BYTES]>, mut source: watch::Receiver<State>) -> Self {
+        let generation = source.borrow_and_update().generation;
+        Self {
+            generation,
+            pcm,
+            source: Some(source),
+        }
+    }
+    fn is_current(&self) -> bool {
+        self.source
+            .as_ref()
+            .is_none_or(|source| matches!(source.has_changed(), Ok(false)))
+    }
 }
 /// Stamp once with the existing MediaClock/PTP producer, then fan out. Keep
 /// generation when integrating downstream queues; it is not a new RTP epoch.
@@ -41,6 +66,76 @@ async fn wait_stop(stop: &mut watch::Receiver<bool>) {
         }
         if stop.changed().await.is_err() {
             return;
+        }
+    }
+}
+
+/// Read an already-selected S16BE/44.1kHz/stereo tap. No child/device startup,
+/// decoding, byte swapping or clock sampling. The owner must await this future
+/// alongside its pipeline using the SAME stop and control channels.
+/// Partial reads retain alignment across control changes; stale packets are
+/// discarded at packet boundaries. A frame-aligned final tail is zero-padded.
+pub async fn read_pcm(
+    mut reader: impl tokio::io::AsyncRead + Unpin,
+    output: mpsc::Sender<SourceFrame>,
+    mut controls: watch::Receiver<State>,
+    mut stop: watch::Receiver<bool>,
+) -> Result<End> {
+    use tokio::io::AsyncReadExt;
+    if output.max_capacity() > 512 {
+        bail!("PCM input queue capacity exceeds512");
+    }
+    'packet: loop {
+        if stopped(&stop) || controls.has_changed().is_err() {
+            return Ok(End::Stopped);
+        }
+        let state = *controls.borrow_and_update();
+        let revision = controls.clone();
+        let mut pcm = Box::new([0; PACKET_BYTES]);
+        let mut filled = 0;
+        let mut eof = false;
+        while filled < PACKET_BYTES {
+            tokio::select! {
+                biased;
+                _ = wait_stop(&mut stop) => return Ok(End::Stopped),
+                changed = controls.changed() => {
+                    if changed.is_err() { return Ok(End::Stopped); }
+                },
+                read = reader.read(&mut pcm[filled..]) => {
+                    let n = read?;
+                    if n == 0 { eof = true; break; }
+                    filled += n;
+                },
+            }
+        }
+        if eof && filled == 0 {
+            return Ok(End::Eof);
+        }
+        if eof && filled % crate::FRAME_BYTES != 0 {
+            bail!("PCM tail is not stereo-frame aligned");
+        }
+        let frame = SourceFrame {
+            generation: state.generation,
+            pcm,
+            source: Some(revision),
+        };
+        if !state.paused && frame.is_current() {
+            tokio::select! {
+                biased;
+                _ = wait_stop(&mut stop) => return Ok(End::Stopped),
+                changed = controls.changed() => {
+                    if changed.is_err() { return Ok(End::Stopped); }
+                    if eof { return Ok(End::Eof); }
+                    continue 'packet;
+                },
+                permit = output.reserve() => {
+                    let Ok(permit) = permit else { return Ok(End::Stopped); };
+                    if frame.is_current() { permit.send(frame); }
+                },
+            }
+        }
+        if eof {
+            return Ok(End::Eof);
         }
     }
 }
@@ -76,6 +171,18 @@ pub async fn run(
                 Err(mpsc::error::TryRecvError::Disconnected) => return Ok(End::Eof),
                 Err(mpsc::error::TryRecvError::Empty) => {}
             }
+        }
+        if pending
+            .as_ref()
+            .and_then(|frame| frame.source.as_ref())
+            .is_some_and(|source| !source.same_channel(&controls))
+        {
+            bail!("PCM input belongs to another source control");
+        }
+        if pending.as_ref().is_some_and(|frame| !frame.is_current()) {
+            pending = None;
+            tokio::task::yield_now().await;
+            continue;
         }
         let next = timeline.poll(
             Instant::now(),
@@ -214,6 +321,130 @@ fn stamp_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn raw_pcm_preserves_bytes_and_pads_only_aligned_final_frames() {
+        let (_owner, controls) = watch::channel(State::default());
+        let (_stop, stopped) = watch::channel(false);
+        let (output, mut frames) = mpsc::channel(2);
+        let mut bytes = vec![7; PACKET_BYTES];
+        bytes.extend([0x12, 0x34, 0xdc, 0xbb]);
+        assert_eq!(
+            read_pcm(&bytes[..], output, controls.clone(), stopped.clone())
+                .await
+                .unwrap(),
+            End::Eof
+        );
+        assert_eq!(frames.recv().await.unwrap().pcm[0], 7);
+        let tail = frames.recv().await.unwrap();
+        assert_eq!(&tail.pcm[..4], &[0x12, 0x34, 0xdc, 0xbb]);
+        assert!(tail.pcm[4..].iter().all(|b| *b == 0));
+        let (output, _) = mpsc::channel(1);
+        assert!(
+            read_pcm(&[1, 2][..], output, controls, stopped)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("aligned")
+        );
+    }
+    #[tokio::test]
+    async fn raw_pcm_keeps_alignment_across_partial_read_and_coalesced_pause_resume() {
+        use tokio::io::AsyncWriteExt;
+        let (mut writer, reader) = tokio::io::duplex(1);
+        let (owner, controls) = watch::channel(State::default());
+        let (_stop, stopped) = watch::channel(false);
+        let (output, mut frames) = mpsc::channel(2);
+        let task = tokio::spawn(read_pcm(reader, output, controls, stopped));
+        // Capacity1 ensures the acquisition of this packet has begun.
+        writer.write_all(&[8; PACKET_BYTES / 2]).await.unwrap();
+        owner.send_replace(State {
+            generation: 0,
+            paused: true,
+        });
+        owner.send_replace(State::default());
+        writer.write_all(&[8; PACKET_BYTES / 2]).await.unwrap();
+        writer.write_all(&[9; PACKET_BYTES]).await.unwrap();
+        drop(writer);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            End::Eof
+        );
+        let frame = frames.recv().await.unwrap();
+        assert!(frame.pcm.iter().all(|b| *b == 9));
+        assert!(frames.recv().await.is_none());
+    }
+    #[tokio::test]
+    async fn guarded_input_backlog_cannot_revive_and_rejects_foreign_control() {
+        for foreign in [false, true] {
+            let (owner, controls) = watch::channel(State::default());
+            let (_other, other) = watch::channel(State::default());
+            let stale = SourceFrame::guarded(
+                Box::new([8; PACKET_BYTES]),
+                if foreign { other } else { controls.clone() },
+            );
+            owner.send_replace(State {
+                generation: 0,
+                paused: true,
+            });
+            owner.send_replace(State::default());
+            let (source, input) = mpsc::channel(2);
+            source.send(stale).await.unwrap();
+            source
+                .send(SourceFrame::guarded(
+                    Box::new([9; PACKET_BYTES]),
+                    owner.subscribe(),
+                ))
+                .await
+                .unwrap();
+            drop(source);
+            let (_stop, stopped) = watch::channel(false);
+            let (output, mut frames) = mpsc::channel(2);
+            let result = tokio::time::timeout(
+                Duration::from_secs(1),
+                run(timeline(), input, controls, output, stopped),
+            )
+            .await
+            .unwrap();
+            if foreign {
+                assert!(result.unwrap_err().to_string().contains("another source"));
+            } else {
+                assert_eq!(result.unwrap(), End::Eof);
+                assert_eq!(frames.recv().await.unwrap().pcm[0], 9);
+                assert!(frames.recv().await.is_none());
+            }
+        }
+    }
+    #[tokio::test]
+    async fn raw_input_stop_cancels_blocked_read_and_full_output_queue() {
+        for full in [false, true] {
+            let (_writer, reader) = tokio::io::duplex(8);
+            let (_owner, controls) = watch::channel(State::default());
+            let (stop, stopped) = watch::channel(false);
+            let (output, _frames) = mpsc::channel(1);
+            let bytes = vec![7; PACKET_BYTES * 2];
+            let task = tokio::spawn(async move {
+                if full {
+                    read_pcm(&bytes[..], output, controls, stopped).await
+                } else {
+                    read_pcm(reader, output, controls, stopped).await
+                }
+            });
+            tokio::task::yield_now().await;
+            stop.send_replace(true);
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(1), task)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap(),
+                End::Stopped
+            );
+        }
+    }
     use std::time::Duration;
     fn timeline() -> Timeline {
         Timeline::new(Instant::now(), Duration::from_millis(250)).unwrap()
@@ -248,10 +479,7 @@ mod tests {
         let clock = crate::MediaClock::at(timeline.epoch(), 0);
         let (source, input) = mpsc::channel(2);
         source
-            .send(SourceFrame {
-                generation: 0,
-                pcm: Box::new([5; PACKET_BYTES]),
-            })
+            .send(SourceFrame::new(0, Box::new([5; PACKET_BYTES])))
             .await
             .unwrap();
         drop(source);
@@ -290,10 +518,7 @@ mod tests {
         let wrong = crate::MediaClock::at(timeline.epoch() + Duration::from_secs(1), 0);
         let (source, input) = mpsc::channel(1);
         source
-            .send(SourceFrame {
-                generation: 0,
-                pcm: Box::new([5; PACKET_BYTES]),
-            })
+            .send(SourceFrame::new(0, Box::new([5; PACKET_BYTES])))
             .await
             .unwrap();
         drop(source);
@@ -330,10 +555,7 @@ mod tests {
         let silence = received(&mut frames).await;
         assert!(silence.pcm.iter().all(|byte| *byte == 0));
         source
-            .send(SourceFrame {
-                generation: 0,
-                pcm: Box::new([9; PACKET_BYTES]),
-            })
+            .send(SourceFrame::new(0, Box::new([9; PACKET_BYTES])))
             .await
             .unwrap();
         let content = tokio::time::timeout(Duration::from_secs(1), async {
@@ -355,10 +577,7 @@ mod tests {
     async fn pause_and_generation_control_are_not_queued_behind_pcm() {
         let (source, input) = mpsc::channel(4);
         source
-            .send(SourceFrame {
-                generation: 0,
-                pcm: Box::new([8; PACKET_BYTES]),
-            })
+            .send(SourceFrame::new(0, Box::new([8; PACKET_BYTES])))
             .await
             .unwrap();
         let (state, controls) = watch::channel(State {
@@ -376,10 +595,7 @@ mod tests {
             paused: false,
         });
         source
-            .send(SourceFrame {
-                generation: 2,
-                pcm: Box::new([7; PACKET_BYTES]),
-            })
+            .send(SourceFrame::new(2, Box::new([7; PACKET_BYTES])))
             .await
             .unwrap();
         let content = tokio::time::timeout(Duration::from_secs(1), async {
@@ -432,10 +648,7 @@ mod tests {
             let (source, input) = mpsc::channel(4);
             for _ in 0..2 {
                 source
-                    .send(SourceFrame {
-                        generation: 0,
-                        pcm: Box::new([7; PACKET_BYTES]),
-                    })
+                    .send(SourceFrame::new(0, Box::new([7; PACKET_BYTES])))
                     .await
                     .unwrap();
             }

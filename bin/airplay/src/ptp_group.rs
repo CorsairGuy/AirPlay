@@ -30,6 +30,13 @@ pub struct ContinuousSource {
     pub input: mpsc::Receiver<sender::continuous_source::SourceFrame>,
     pub controls: watch::Receiver<sender::continuous_source::State>,
 }
+/// Inject a tap already owned by the adapter; no process or device is opened.
+pub struct RawPcmSource<R> {
+    pub reader: R,
+    pub epoch: std::time::Instant,
+    pub latency: std::time::Duration,
+    pub queue_capacity: usize,
+}
 impl ContinuousSource {
     pub fn for_card(
         card: &crate::card::Card,
@@ -166,6 +173,52 @@ impl PtpGroup {
                 let cleanup = pipeline.await;
                 observed?;
                 cleanup
+            },
+        }
+    }
+    /// Library host composition: raw tap, Card observer, qualified PTP pool and
+    /// local sink share one cancellation owner. EOF drains; errors cancel all
+    /// branches, whose cleanup is awaited. The adapter retains route ownership.
+    pub async fn run_card_pcm_with_local(
+        self,
+        card: Arc<crate::card::Card>,
+        source: RawPcmSource<impl tokio::io::AsyncRead + Unpin>,
+        outputs: GroupOutputs<impl SessionPreparer>,
+        sink: impl sender::LocalSink,
+    ) -> Result<sender::continuous_source::End> {
+        use sender::continuous_source::{self, End};
+        if !(1..=512).contains(&source.queue_capacity) {
+            bail!("invalid PCM input capacity");
+        }
+        let timeline = sender::continuous::Timeline::new(source.epoch, source.latency)?;
+        let (pcm, input) = mpsc::channel(source.queue_capacity);
+        let controls = card.continuous_controls();
+        let cancel = self.lease.cancellation();
+        let reader = continuous_source::read_pcm(source.reader, pcm, controls, self.stop());
+        let source_control =
+            ContinuousSource::for_card(&card, timeline, MediaClock::at(source.epoch, 0), input);
+        let pipeline = self.run_card_continuous_with_local(
+            card,
+            source_control,
+            outputs,
+            sink,
+            source.latency,
+        );
+        tokio::pin!(reader, pipeline);
+        tokio::select! {
+            biased;
+            result = &mut pipeline => {
+                cancel.cancel();
+                let read = reader.await;
+                let end = result?;
+                read?;
+                Ok(end)
+            },
+            read = &mut reader => {
+                if !matches!(read, Ok(End::Eof)) { cancel.cancel(); }
+                let result = pipeline.await;
+                read?;
+                result
             },
         }
     }
@@ -491,6 +544,89 @@ mod tests {
         )
     }
     #[tokio::test]
+    async fn raw_pcm_host_drains_input_and_awaits_cleanup_on_malformed_tail() {
+        struct HostSink {
+            inner: PipelineSink,
+            released: Arc<AtomicBool>,
+        }
+        impl Drop for HostSink {
+            fn drop(&mut self) {
+                self.released.store(true, Ordering::SeqCst);
+            }
+        }
+        impl sender::LocalSink for HostSink {
+            async fn write(&mut self, packet: Arc<AudioPacket>, at: Instant) -> Result<()> {
+                self.inner.write(packet, at).await
+            }
+            async fn finish(&mut self) -> Result<()> {
+                self.inner.finish().await
+            }
+        }
+        for malformed in [false, true] {
+            let (_clock, _user, group, origin) = fixture();
+            let card = pipeline_card(crate::remote::Remote::new());
+            let (_control, requests) = crate::output_control::OutputControl::channel(4);
+            let (_catalog, discovery) =
+                watch::channel(Arc::new(OutputCatalog::new(vec![]).unwrap()));
+            let (updates, state) = watch::channel(output_worker::Snapshot::default());
+            let outputs = GroupOutputs {
+                requests,
+                discovery,
+                local_ids: vec![],
+                preparer: Blocked {
+                    entered: Arc::new(AtomicBool::new(false)),
+                    dropped: Arc::new(AtomicBool::new(false)),
+                },
+                updates,
+            };
+            let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let finished = Arc::new(AtomicBool::new(false));
+            let released = Arc::new(AtomicBool::new(false));
+            let source = RawPcmSource {
+                reader: std::io::Cursor::new(vec![
+                    9;
+                    if malformed { 2 } else { sender::PACKET_BYTES }
+                ]),
+                epoch: origin,
+                latency: Duration::from_millis(250),
+                queue_capacity: 2,
+            };
+            let result = tokio::time::timeout(
+                Duration::from_secs(2),
+                group.run_card_pcm_with_local(
+                    card,
+                    source,
+                    outputs,
+                    HostSink {
+                        inner: PipelineSink {
+                            seen: seen.clone(),
+                            finished: finished.clone(),
+                            fail: false,
+                        },
+                        released: released.clone(),
+                    },
+                ),
+            )
+            .await
+            .unwrap();
+            if malformed {
+                assert!(result.unwrap_err().to_string().contains("aligned"));
+                assert!(seen.lock().unwrap().is_empty());
+            } else {
+                assert_eq!(result.unwrap(), sender::continuous_source::End::Eof);
+                assert!(
+                    seen.lock()
+                        .unwrap()
+                        .iter()
+                        .any(|packet| packet.pcm()[0] == 9)
+                );
+            }
+            assert_eq!(finished.load(Ordering::SeqCst), !malformed);
+            assert!(released.load(Ordering::SeqCst));
+            assert!(state.borrow().selected.is_empty());
+        }
+    }
+    #[tokio::test]
     async fn card_mrp_pause_play_reaches_continuous_pcm_and_all_owners_end() {
         use crate::{
             events::Events,
@@ -504,10 +640,10 @@ mod tests {
         card.playing(true);
         let mut states = card.continuous_controls();
         let (pcm, input) = mpsc::channel(8);
-        pcm.send(sender::continuous_source::SourceFrame {
-            generation: 0,
-            pcm: Box::new([7; sender::PACKET_BYTES]),
-        })
+        pcm.send(sender::continuous_source::SourceFrame::new(
+            0,
+            Box::new([7; sender::PACKET_BYTES]),
+        ))
         .await
         .unwrap();
         let source = ContinuousSource::for_card(
@@ -594,10 +730,10 @@ mod tests {
         })
         .await
         .unwrap();
-        pcm.send(sender::continuous_source::SourceFrame {
-            generation: 0,
-            pcm: Box::new([9; sender::PACKET_BYTES]),
-        })
+        pcm.send(sender::continuous_source::SourceFrame::new(
+            0,
+            Box::new([9; sender::PACKET_BYTES]),
+        ))
         .await
         .unwrap();
         tokio::time::timeout(Duration::from_secs(1), async {
@@ -678,10 +814,10 @@ mod tests {
             let domain = group.timeline.domain();
             let (source, input) = mpsc::channel(4);
             source
-                .send(sender::continuous_source::SourceFrame {
-                    generation: 0,
-                    pcm: Box::new([3; sender::PACKET_BYTES]),
-                })
+                .send(sender::continuous_source::SourceFrame::new(
+                    0,
+                    Box::new([3; sender::PACKET_BYTES]),
+                ))
                 .await
                 .unwrap();
             // Keep the source live during sink failure: cleanup cannot rely on EOF.

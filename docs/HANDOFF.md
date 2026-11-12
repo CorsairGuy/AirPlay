@@ -6,7 +6,7 @@
 
 ## Следующая работа
 
-1. Комплексно проверить PTP group selection/peer reconciliation/cancellation; opt-in continuous/Card pipeline уже есть, frontend/Station integration остаётся.
+1. Комплексно проверить PTP group selection/peer reconciliation/cancellation; opt-in continuous/Card pipeline и raw PCM host уже есть (PCM_HOST.md), frontend/Station integration остаётся.
 2. Проверить PIN на iPhone (сквозной loopback уже проходит); довести native topology/button/slider на основании захватов.
 3. Подключить адаптер Станции к pin ядра, сохранив native PCM tap, AirPlay/BT, локальный голос/duck и готовое recovery/autostart.
 
