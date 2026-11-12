@@ -703,6 +703,106 @@ mod tests {
         pool.shutdown().await;
     }
     #[tokio::test]
+    async fn continuous_fanout_shares_packets_and_removal_preserves_survivor() {
+        use crate::continuous_source::{self, SourceFrame, State};
+        let origin = std::time::Instant::now();
+        let clock = MediaClock::at(origin, 0);
+        let (audio, packets) = broadcast::channel(64);
+        let mut pool = SessionPool::new(packets);
+        let (events, mut received) = mpsc::unbounded_channel();
+        let mut handles = Vec::new();
+        for (id, port) in [("a", 7001), ("b", 7002)] {
+            let events = events.clone();
+            handles.push(pool.launch(id, ([127,0,0,1],port).into(), Volume::MUTE,
+                Duration::from_secs(1), move |mut audio, _volume, mut stop, _progress| async move {
+                    let mut stats = StreamStats::default();
+                    loop {
+                        tokio::select! {
+                            biased;
+                            _ = stop.changed() => break,
+                            packet = audio.recv() => match packet {
+                                Ok(packet) => { events.send((id, packet))?; stats.packets_sent += 1; },
+                                Err(_) => break,
+                            }
+                        }
+                    }
+                    Ok(stats)
+                }).unwrap());
+        }
+        let (source, input) = mpsc::channel(8);
+        let (state, controls) = watch::channel(State::default());
+        let (_stop, stop) = watch::channel(false);
+        source
+            .send(SourceFrame {
+                generation: 0,
+                pcm: Box::new([7; PACKET_BYTES]),
+            })
+            .await
+            .unwrap();
+        let task = tokio::spawn(continuous_source::broadcast(
+            crate::continuous::Timeline::new(origin, Duration::from_millis(250)).unwrap(),
+            input,
+            controls,
+            audio,
+            stop,
+            move |index, pcm| clock.packet(index, pcm),
+        ));
+        async fn next(
+            received: &mut mpsc::UnboundedReceiver<(&'static str, Arc<AudioPacket>)>,
+        ) -> (&'static str, Arc<AudioPacket>) {
+            tokio::time::timeout(Duration::from_secs(1), received.recv())
+                .await
+                .unwrap()
+                .unwrap()
+        }
+        let first = next(&mut received).await;
+        let second = next(&mut received).await;
+        assert_ne!(first.0, second.0);
+        assert!(Arc::ptr_eq(&first.1, &second.1));
+        assert_eq!(first.1.pcm()[0], 7);
+        assert!(first.1.source_is_current());
+        pool.remove("b").await.unwrap();
+        assert_eq!(*handles[1].state.borrow(), SessionState::Ended);
+        state.send_replace(State {
+            generation: 1,
+            paused: false,
+        });
+        assert!(!first.1.source_is_current());
+        source
+            .send(SourceFrame {
+                generation: 1,
+                pcm: Box::new([9; PACKET_BYTES]),
+            })
+            .await
+            .unwrap();
+        let resumed = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let (id, packet) = next(&mut received).await;
+                if packet.source_is_current() && packet.pcm()[0] == 9 {
+                    assert_eq!(id, "a");
+                    break packet;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(resumed.frame_index() > first.1.frame_index());
+        assert_eq!(*handles[0].state.borrow(), SessionState::Running);
+        drop(source);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            continuous_source::End::Eof
+        );
+        let results = pool.shutdown().await;
+        assert_eq!(results.len(), 1);
+        assert!(results[0].1.is_ok());
+        assert_eq!(*handles[0].state.borrow(), SessionState::Ended);
+    }
+    #[tokio::test]
     async fn add_remove_and_failure_do_not_restart_surviving_receivers() {
         let (audio, packets) = broadcast::channel(16);
         let mut pool = SessionPool::new(packets);
