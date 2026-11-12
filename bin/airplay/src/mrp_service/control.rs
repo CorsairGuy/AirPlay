@@ -10,6 +10,7 @@ use tokio::sync::watch;
 pub struct Control {
     pub feed: watch::Sender<Feed>,
     remote: Remote,
+    source: Option<crate::continuous_control::SourceControl>,
     pub(crate) outputs: Option<crate::output_control::OutputControl>,
     pub(crate) groups: std::sync::Arc<GroupControlState>,
 }
@@ -24,6 +25,7 @@ impl Control {
         Self {
             feed,
             remote,
+            source: None,
             outputs: None,
             groups: Default::default(),
         }
@@ -31,6 +33,13 @@ impl Control {
 
     pub fn with_outputs(mut self, outputs: crate::output_control::OutputControl) -> Self {
         self.outputs = Some(outputs);
+        self
+    }
+    pub fn with_continuous_source(
+        mut self,
+        source: crate::continuous_control::SourceControl,
+    ) -> Self {
+        self.source = Some(source);
         self
     }
 
@@ -152,6 +161,9 @@ impl Control {
             if !self.remote.send(Command::Seek(position)) {
                 bail!("seek not accepted")
             }
+            if let Some(source) = &self.source {
+                source.accepted(Command::Seek(position))?;
+            }
             return Ok(());
         }
         let feed = self.feed.borrow().clone();
@@ -179,6 +191,9 @@ impl Control {
             Command::Pause => self.feed.send_modify(|feed| feed.set_playing(false)),
             _ => {}
         }
+        if let Some(source) = &self.source {
+            source.accepted(command)?;
+        }
         Ok(())
     }
 }
@@ -187,6 +202,30 @@ impl Control {
 mod tests {
     use super::*;
     use std::time::{Duration, Instant};
+    #[tokio::test]
+    async fn continuous_source_changes_only_after_command_queue_acceptance() {
+        let remote = Remote::new();
+        let mut commands = remote.attach(1);
+        let (feed, _) = watch::channel(Feed::default());
+        let source = crate::continuous_control::SourceControl::default();
+        let states = source.subscribe();
+        let control = Control::new(feed, remote).with_continuous_source(source);
+        control.action(2, None).await.unwrap();
+        assert!(states.borrow().paused);
+        assert_eq!(commands.recv().await, Some(Command::Pause));
+        drop(commands); // closed remote queue must reject Play without a state change
+        assert!(control.action(1, None).await.is_err());
+        assert!(states.borrow().paused);
+        let mut commands = control.remote.attach(2);
+        control.action(1, None).await.unwrap();
+        assert!(!states.borrow().paused);
+        assert_eq!(commands.recv().await, Some(Command::Play));
+        control.action(45, Some(30.0)).await.unwrap();
+        assert_eq!(states.borrow().generation, 1);
+        assert_eq!(commands.recv().await, Some(Command::Seek(30.0)));
+        assert!(control.action(45, Some(f64::NAN)).await.is_err());
+        assert_eq!(states.borrow().generation, 1);
+    }
     #[tokio::test]
     async fn group_individual_group_preserves_reader_order_and_fresh_levels() {
         use crate::{

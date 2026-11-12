@@ -7,6 +7,7 @@
 //! [`serve::run`].
 
 pub mod card;
+pub mod continuous_control;
 pub mod discovery_catalog;
 pub mod discovery_feed;
 pub mod events;

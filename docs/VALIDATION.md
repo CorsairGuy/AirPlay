@@ -25,3 +25,5 @@ Continuous broadcast/revision guards:78 sender library tests passed; допол�
 Continuous retransmit protection:94 tests passed (16 RTP,78 sender), включая cache clear без сброса nonce/sequence/media epoch. Это не проверка remote PAUSE/FLUSH или hardware buffer reset.
 
 Unified continuous/PTP/local lifecycle:185 library tests passed (80 application,78 sender,27 timesync). Связка source→PTP stamp→local sink проверена без выбранных remote устройств; EOF, sink failure с открытым источником, неверная эпоха и one-way cancellation. Default frontend/Station integration и hardware buffers не подтверждены.
+
+MRP/continuous source binding:162 library tests passed (84 application,78 sender). Новый opt-in follower и реальные Control.action callbacks проверены автономно; native/BT source adapter и аппаратная задержка не подтверждены.

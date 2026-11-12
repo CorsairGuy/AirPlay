@@ -33,6 +33,7 @@ pub struct Card {
     inner: Arc<dyn Events>,
     outputs: Option<crate::output_control::OutputControl>,
     groups: Arc<crate::mrp_service::control::GroupControlState>,
+    source: crate::continuous_control::SourceControl,
 }
 
 /// SHA-256 в hex, как `hash()` в sources.rs станции.
@@ -155,6 +156,7 @@ impl Card {
             inner,
             outputs,
             groups: Default::default(),
+            source: Default::default(),
         })
     }
 
@@ -181,7 +183,8 @@ impl Card {
     where
         S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
     {
-        let mut control = Control::new(self.feed.clone(), self.remote.clone());
+        let mut control = Control::new(self.feed.clone(), self.remote.clone())
+            .with_continuous_source(self.source.clone());
         control.groups = self.groups.clone();
         if let Some(outputs) = &self.outputs {
             control = control.with_outputs(outputs.clone());
@@ -208,6 +211,17 @@ impl Card {
         });
     }
 
+    /// Opt-in continuous control receiver. The application also awaits
+    /// follow_continuous_source with the SAME group stop watch.
+    pub fn continuous_controls(&self) -> watch::Receiver<sender::continuous_source::State> {
+        self.source.subscribe()
+    }
+    pub async fn follow_continuous_source(
+        &self,
+        stop: watch::Receiver<bool>,
+    ) -> anyhow::Result<()> {
+        self.source.follow(self.feed.subscribe(), stop).await
+    }
     fn update(&self, f: impl FnOnce(&mut Feed)) {
         self.feed.send_if_modified(|feed| {
             let before = feed.clone();
