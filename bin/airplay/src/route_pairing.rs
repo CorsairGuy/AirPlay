@@ -18,6 +18,10 @@ pub struct Request {
     pub answer_window: Duration,
 }
 
+fn cancelled(stop: &watch::Receiver<bool>) -> bool {
+    *stop.borrow() || stop.has_changed().is_err()
+}
+
 /// Use the application store's controller identity, reusing existing credentials
 /// or saving successful PIN pairing off the async reader thread. The UID must be
 /// the physical receiver's stable UID, not a UI group alias or network address.
@@ -29,7 +33,7 @@ pub async fn authorize_and_save(
     incoming: mpsc::Receiver<Node>,
     stop: watch::Receiver<bool>,
 ) -> Result<Option<PairingCredentials>> {
-    if *stop.borrow() {
+    if cancelled(&stop) {
         return Ok(None);
     }
     if let Some(credentials) = store.get(&receiver_uid)? {
@@ -62,7 +66,7 @@ async fn authorize_inner(
     mut stop: watch::Receiver<bool>,
     persistence: Option<(String, std::sync::Arc<crate::sender_store::SenderStore>)>,
 ) -> Result<Option<PairingCredentials>> {
-    if *stop.borrow() {
+    if cancelled(&stop) {
         return Ok(None);
     }
     if request.answer_window.is_zero() || request.answer_window > Duration::from_secs(120) {
@@ -95,13 +99,14 @@ async fn authorize_inner(
     };
     let started = tokio::time::Instant::now();
     let mut result = tokio::select! {
-        result = tokio::time::timeout(request.answer_window, exchange) =>
-            result.context("route authorization deadline exceeded").and_then(|r| r),
+        biased;
         _ = async {
             loop {
                 if *stop.borrow_and_update() || stop.changed().await.is_err() { break; }
             }
         } => Ok(None),
+        result = tokio::time::timeout(request.answer_window, exchange) =>
+            result.context("route authorization deadline exceeded").and_then(|r| r),
     };
     if let (Ok(Some(credentials)), Some((uid, store))) = (&result, persistence) {
         let saved = credentials.clone();
@@ -143,6 +148,50 @@ mod tests {
         PairingStore,
         hap::{PairSetup, SetupOutcome},
     };
+
+    #[tokio::test]
+    async fn cancelled_owner_never_starts_pairing_or_opens_a_pin_sheet() {
+        for closed in [false, true] {
+            let directory = std::env::temp_dir()
+                .join(format!("airplay-cancelled-owner-{}", uuid::Uuid::new_v4()));
+            let store =
+                std::sync::Arc::new(crate::sender_store::SenderStore::open(&directory).unwrap());
+            for persistent in [false, true] {
+                let (owner, stop) = watch::channel(!closed);
+                if closed {
+                    drop(owner);
+                }
+                let (outgoing, mut messages) = mpsc::channel(1);
+                let (_answers, incoming) = mpsc::channel(1);
+                // Invalid configuration must never be examined after owner loss;
+                // no socket or PIN prompt may be started on this path.
+                let request = Request {
+                    endpoint: ([127, 0, 0, 1], 0).into(),
+                    controller: store.controller(),
+                    route: Node::default(),
+                    answer_window: Duration::ZERO,
+                };
+                let result = if persistent {
+                    authorize_and_save(
+                        request,
+                        "receiver".into(),
+                        store.clone(),
+                        outgoing,
+                        incoming,
+                        stop,
+                    )
+                    .await
+                } else {
+                    authorize(request, outgoing, incoming, stop).await
+                };
+                assert!(result.unwrap().is_none());
+                assert!(messages.recv().await.is_none());
+                assert!(store.get("receiver").unwrap().is_none());
+            }
+            drop(store);
+            std::fs::remove_dir_all(directory).unwrap();
+        }
+    }
 
     #[tokio::test]
     async fn pin_sheet_drives_real_setup_without_starting_media() {
