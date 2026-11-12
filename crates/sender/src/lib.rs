@@ -9,6 +9,7 @@
 //! This is a port of an experimental sender, not a claim of production-ready TX.
 //! See the crate README and PROVENANCE for supported formats and limitations.
 
+pub mod continuous;
 pub mod group;
 pub mod group_volume;
 mod local;

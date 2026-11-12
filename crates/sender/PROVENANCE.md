@@ -55,3 +55,5 @@ source adapter, не к сетевой сессии.
 Применяется metadata лицензии текущего workspace (`GPL-3.0-or-later`); исходные
 уведомления/лицензии общих зависимостей сохраняются в их компонентах. Порт не
 перелицензирует сторонние компоненты и не включает firmware или новый FairPlay SAP.
+
+Continuous source policy: continuous::Timeline ports the late ld5dy4 a538a30 sender reader's40ms gap grace, continuous lateness and the controller's600s pause window. Uses typed per-source generations and an injected Instant epoch instead of global GENERATION/magic stdin markers. This is a source-policy port, not a completed network pause/seek state machine; see docs/CONTINUOUS_RELAY.md.

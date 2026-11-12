@@ -15,7 +15,7 @@
 | Pairing | Transient, PIN setup, постоянные credentials/pair-verify, store и MRP59/60/61 helper | Интерактивный PIN конкретного контроллера ещё не соединён целиком с активным выбором устройств |
 | Discovery | DNS-SD browser/feed, logical/physical catalog, aliases/cluster/leader descriptors | Объявление возможностей не заменяет проверку транспорта; весь runtime не включается автоматически |
 | MRP | Карточка, frame boundaries, команды/таймлайн, кеш обложки, outputs backend и отдельная/общая громкости | Общая подпись кнопки и удержание ползунков в реальной группе не подтверждены исправленными |
-| Continuous relay | Базовые lifecycle/EOF/drain и cancellation | Поздний станционный автомат pause600s/seek/track/gap/generation ещё не перенесён целиком |
+| Continuous relay | Базовые lifecycle/EOF/drain/cancellation и opt-in source Timeline: gap silence, pause600s, поколения, late-slot skip | Async pump, сетевой/control автомат и remote/local очереди ещё не подключены; [подробности](CONTINUOUS_RELAY.md) |
 | Mirroring/video | Отдельный существующий профиль и декодирующие компоненты | Modern mirroring вместе с AP2/PTP/group остаётся исследованием; 60fps не гарантируются для любого железа |
 | Минимальная сборка | Существующий Cargo workspace и ffmpeg feature | Локальный audio-only/mirroring feature-патч старого worktree ещё не перенесён; --no-default-features пока не обещает отсутствие video зависимостей |
 | Станция | Отдельный адаптер Quasar/Glagol, ALSA tap/output, BT/focus, LED, install/recovery | Не переведён на новое ядро. Готовые guard/recovery Claude сохраняются, не реализуются заново |
