@@ -55,6 +55,26 @@ impl Timeline {
     pub fn generation(&self) -> u64 {
         self.generation
     }
+    pub(super) fn apply_source_state(
+        &mut self,
+        generation: u64,
+        paused: bool,
+        now: Instant,
+    ) -> Result<()> {
+        if generation < self.generation {
+            bail!("source generation regressed");
+        }
+        self.generation = generation;
+        if paused {
+            self.pause(now)?;
+        } else {
+            self.resume();
+        }
+        Ok(())
+    }
+    pub(super) fn output_deadline(&self) -> Duration {
+        self.max_late + Duration::from_millis(250)
+    }
     pub fn pause(&mut self, now: Instant) -> Result<()> {
         if self.paused_until.is_none() {
             self.paused_until = Some(

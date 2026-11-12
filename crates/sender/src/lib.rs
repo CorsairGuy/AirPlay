@@ -10,6 +10,7 @@
 //! See the crate README and PROVENANCE for supported formats and limitations.
 
 pub mod continuous;
+pub mod continuous_source;
 pub mod group;
 pub mod group_volume;
 mod local;
