@@ -58,3 +58,5 @@ the active source path. Do not replace its executable alone: readiness, volume,
 per-session gate/stats and process lifecycle must be connected together.
 
 Tests use Unix sockets in a network-isolated container, no HomePod or audio device.
+
+Station startup predicate:Status::ready_for(expected) requires the exact nonempty endpoint set and transmitted packets for every member; a started flag from a previous/partial selection is insufficient. The parent must independently qualify child liveness, shared clock and local renderer. The candidate remains unselected by outputs.rs. The present CLI send path is NTP; the library PtpGroup/continuous runtime needs a dedicated adapter host before group migration.81 Station MRP tests passed for this predicate/socket contract; no installation occurred.
