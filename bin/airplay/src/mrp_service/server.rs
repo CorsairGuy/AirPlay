@@ -78,11 +78,21 @@ fn command_reply(identifier: Option<&str>, error: u64) -> Node {
 }
 
 /// Queue output selection without awaiting pairing/teardown on the MRP reader.
+#[cfg(test)]
 fn dispatch_output(
     message: &Node,
     control: &Control,
     tx: &mpsc::Sender<Output>,
     pending: &mut tokio::task::JoinSet<()>,
+) -> Result<bool> {
+    dispatch_output_authorized(message, control, tx, pending, None)
+}
+fn dispatch_output_authorized(
+    message: &Node,
+    control: &Control,
+    tx: &mpsc::Sender<Output>,
+    pending: &mut tokio::task::JoinSet<()>,
+    authorization: Option<crate::route_pairing::AuthorizationContext>,
 ) -> Result<bool> {
     if message.number(f("ProtocolMessage", "type"))
         != Some(kind("MODIFY_OUTPUT_CONTEXT_REQUEST_MESSAGE") as u64)
@@ -108,7 +118,9 @@ fn dispatch_output(
         Err(100)
     } else {
         match parsed {
-            Ok(body) => backend.submit(body).map_err(|_| 100),
+            Ok(body) => backend
+                .submit_authorized(body, authorization)
+                .map_err(|_| 100),
             Err(_) => Err(18),
         }
     };
@@ -459,6 +471,8 @@ pub async fn connection(
     let (mut read, write) = tokio::io::split(socket);
     let (tx, rx) = mpsc::channel(64);
     let writer = tokio::spawn(writer(write, rx));
+    let (pin_out, mut pin_messages) = mpsc::channel(4);
+    let authorization = crate::route_pairing::ControllerAuthorization::new(pin_out);
     let mut buffer = Vec::new();
     let mut chunk = [0u8; 16384];
     let mut subscribed = false;
@@ -468,11 +482,12 @@ pub async fn connection(
     let mut pending = tokio::task::JoinSet::new();
     println!("{} MRP connection opened", crate::mrp_service::stamp::now());
     let result:Result<()>=async{loop{tokio::select!{
+  Some(message)=pin_messages.recv()=>{tx.send(Output::Messages(vec![Node::parse(&message.encode())?])).await?;},
   count=read.read(&mut chunk)=>{let count=count?;if count==0{break}buffer.extend_from_slice(&chunk[..count]);while buffer.len()>=32{
    let size=u32::from_be_bytes(buffer[..4].try_into()?)as usize;if !(32..=4*1024*1024).contains(&size){bail!("invalid data frame size")};if buffer.len()<size{break}
    let rest=buffer.split_off(size);let frame=std::mem::replace(&mut buffer,rest);let seq=u64::from_be_bytes(frame[20..28].try_into()?);
    if &frame[4..8]==b"sync"{tx.send(Output::Ack(seq)).await?}
-   if size>32{let value=match model::decode_plist(&frame[32..]){Ok(v)=>v,Err(error)=>{crate::mrp_log!("MRP frame skipped, bad plist: {error:#}");continue}};if let Some(data)=value.as_dictionary().and_then(|v|v.get("params")).and_then(Value::as_dictionary).and_then(|v|v.get("data")).and_then(Value::as_data){let messages=match wire::decode_packet(data){Ok(m)=>m,Err(error)=>{crate::mrp_log!("MRP frame skipped, bad protobuf: {error:#}");continue}};for message in messages{if dispatch_output(&message,&control,&tx,&mut pending)?{continue;}let current=updates.borrow().clone();if dispatch_group_volume(&message,&identity,&current,&control,&tx,&mut pending)?{continue;}if dispatch_remote_volume(&message,&identity,&current,&control,&tx,&mut pending)?{continue;}let typ=message.number(f("ProtocolMessage","type")).unwrap_or(0);let id=message.string(f("ProtocolMessage","identifier")).map(str::to_owned);let out=match handle(message,&identity,&current,&control,&mut subscribed).await{Ok(out)=>out,Err(error)=>{crate::mrp_log!("MRP message type={typ} failed: {error:#}");if id.is_some(){vec![reply(id.as_deref(),6)]}else{Vec::new()}}};last=typ;if !out.is_empty(){tx.send(Output::Messages(out)).await?}}}}
+   if size>32{let value=match model::decode_plist(&frame[32..]){Ok(v)=>v,Err(error)=>{crate::mrp_log!("MRP frame skipped, bad plist: {error:#}");continue}};if let Some(data)=value.as_dictionary().and_then(|v|v.get("params")).and_then(Value::as_dictionary).and_then(|v|v.get("data")).and_then(Value::as_data){let messages=match wire::decode_packet(data){Ok(m)=>m,Err(error)=>{crate::mrp_log!("MRP frame skipped, bad protobuf: {error:#}");continue}};for message in messages{if message.number(f("ProtocolMessage","type"))==Some(kind("PROMPT_FOR_ROUTE_AUTHORIZATION_RESPONSE_MESSAGE") as u64){authorization.response(mrp::wire::Node::parse(&message.encode())?)?;continue;}if dispatch_output_authorized(&message,&control,&tx,&mut pending,Some(authorization.context()))?{continue;}let current=updates.borrow().clone();if dispatch_group_volume(&message,&identity,&current,&control,&tx,&mut pending)?{continue;}if dispatch_remote_volume(&message,&identity,&current,&control,&tx,&mut pending)?{continue;}let typ=message.number(f("ProtocolMessage","type")).unwrap_or(0);let id=message.string(f("ProtocolMessage","identifier")).map(str::to_owned);let out=match handle(message,&identity,&current,&control,&mut subscribed).await{Ok(out)=>out,Err(error)=>{crate::mrp_log!("MRP message type={typ} failed: {error:#}");if id.is_some(){vec![reply(id.as_deref(),6)]}else{Vec::new()}}};last=typ;if !out.is_empty(){tx.send(Output::Messages(out)).await?}}}}
   }},
   changed=updates.changed()=>{if changed.is_err(){break}let current=updates.borrow_and_update().clone();if subscribed{
    let mut output=Vec::new();if current.source!=previous.source{output.extend(model::announcement(&identity,&current));}else{output.extend(model::state_change(&identity,&previous,&current));}
@@ -481,6 +496,7 @@ pub async fn connection(
    if !output.is_empty(){tx.send(Output::Messages(output)).await?;previous=current;}
   }}
  }}Ok(())}.await;
+    drop(authorization);
     drop(tx);
     writer.abort();
     let reason = match &result {
@@ -691,6 +707,40 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn output_request_carries_only_its_connection_authorization_context() {
+        let (feed, _) = watch::channel(Feed::default());
+        let (backend, mut requests) = crate::output_control::OutputControl::channel(2);
+        let control = Control::new(feed, crate::remote::Remote::new()).with_outputs(backend);
+        let (tx, _replies) = mpsc::channel(4);
+        let (out, _pin_messages) = mpsc::channel(4);
+        let owner = crate::route_pairing::ControllerAuthorization::new(out);
+        let mut pending = tokio::task::JoinSet::new();
+        let message = model::envelope(
+            "MODIFY_OUTPUT_CONTEXT_REQUEST_MESSAGE",
+            Node::default().text(5, "group").clone(),
+            Some("selection"),
+        );
+        assert!(
+            dispatch_output_authorized(
+                &message,
+                &control,
+                &tx,
+                &mut pending,
+                Some(owner.context())
+            )
+            .unwrap()
+        );
+        let request = requests.recv().await.unwrap();
+        let context = request.authorization.as_ref().unwrap();
+        let scope = context.begin().unwrap();
+        assert!(owner.begin().is_err());
+        drop(scope);
+        drop(owner);
+        assert!(context.begin().is_err());
+        request.finish(100);
+        pending.join_next().await.unwrap().unwrap();
+    }
     #[tokio::test]
     async fn queued_output_reply_preserves_request_id_and_disconnect_cancels_wait() {
         let (feed, _) = watch::channel(Feed::default());

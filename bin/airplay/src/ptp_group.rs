@@ -363,8 +363,18 @@ impl<P: SessionPreparer> SessionPreparer for QualifiedPreparer<P> {
         self.inner.selection(receivers)
     }
     async fn prepare(&mut self, receiver: ReceiverEndpoint) -> Result<Session> {
+        self.prepare_authorized(receiver, None).await
+    }
+    async fn prepare_authorized(
+        &mut self,
+        receiver: ReceiverEndpoint,
+        authorization: Option<&crate::route_pairing::AuthorizationContext>,
+    ) -> Result<Session> {
         self.timeline.reading_at(std::time::Instant::now())?;
-        let session = self.inner.prepare(receiver).await?;
+        let session = self
+            .inner
+            .prepare_authorized(receiver, authorization)
+            .await?;
         self.timeline.reading_at(std::time::Instant::now())?;
         let control = session
             .ptp_peer_control()

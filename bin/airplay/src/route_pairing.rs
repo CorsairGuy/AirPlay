@@ -38,6 +38,14 @@ pub struct AuthorizationScope {
     incoming: Option<mpsc::Receiver<Node>>,
     stop: watch::Receiver<bool>,
 }
+/// Cloneable request context does not own the connection lifetime. The worker
+/// opens a fresh scope only when a selected receiver actually needs a PIN.
+#[derive(Clone)]
+pub struct AuthorizationContext {
+    outgoing: mpsc::Sender<Node>,
+    active: std::sync::Arc<std::sync::Mutex<Option<(uuid::Uuid, mpsc::Sender<Node>)>>>,
+    stop: watch::Receiver<bool>,
+}
 impl ControllerAuthorization {
     pub fn new(outgoing: mpsc::Sender<Node>) -> Self {
         let (stop, _) = watch::channel(false);
@@ -48,6 +56,21 @@ impl ControllerAuthorization {
         }
     }
     pub fn begin(&self) -> Result<AuthorizationScope> {
+        self.context().begin()
+    }
+    pub fn context(&self) -> AuthorizationContext {
+        AuthorizationContext {
+            outgoing: self.outgoing.clone(),
+            active: self.active.clone(),
+            stop: self.stop.subscribe(),
+        }
+    }
+}
+impl AuthorizationContext {
+    pub fn begin(&self) -> Result<AuthorizationScope> {
+        if cancelled(&self.stop) {
+            bail!("authorization controller disconnected");
+        }
         let mut active = self.active.lock().unwrap();
         if active.is_some() {
             bail!("controller already has a pending authorization");
@@ -60,9 +83,11 @@ impl ControllerAuthorization {
             active: self.active.clone(),
             outgoing: self.outgoing.clone(),
             incoming: Some(incoming),
-            stop: self.stop.subscribe(),
+            stop: self.stop.clone(),
         })
     }
+}
+impl ControllerAuthorization {
     /// No PIN content is logged or retained outside the bounded request queue.
     /// A response without an active sheet is ignored; overflow is an error for
     /// the connection owner, never silent delivery to a different controller.

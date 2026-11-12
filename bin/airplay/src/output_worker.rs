@@ -12,6 +12,16 @@ use tokio::sync::{mpsc, watch};
 /// Application supplies authentication/configuration. Dropping this future
 /// must release pending pairing resources; do not detach network work here.
 pub trait SessionPreparer: Send {
+    /// Connection-private context; default noninteractive preparers ignore it.
+    /// Implementations must never retain one controller's context for another
+    /// request. Opening a scope is lazy, only for receivers needing a PIN.
+    fn prepare_authorized(
+        &mut self,
+        receiver: ReceiverEndpoint,
+        _authorization: Option<&crate::route_pairing::AuthorizationContext>,
+    ) -> impl Future<Output = Result<Session>> + Send {
+        self.prepare(receiver)
+    }
     /// Bounded reconciliation after pool changes and periodic task-state
     /// observation. Failure terminates the owner and awaits pool cleanup.
     fn active(&mut self, _pool: &SessionPool) -> impl Future<Output = Result<()>> + Send {
@@ -74,10 +84,9 @@ fn publish(updates: &watch::Sender<Snapshot>, value: Snapshot) {
 ///
 /// Preparation is cancellable on controller loss/stop; applying a validated
 /// change finishes bounded teardown even if the controller leaves. Shutdown
-/// awaits pool cleanup. Use preauthorized/transient session preparation here:
-/// interactive PIN still requires per-request controller authorization context,
-/// which this shared preparer interface does not yet carry. Never share one
-/// controller's PIN channels across requests from different controllers.
+/// awaits pool cleanup. Interactive PIN requires the per-request authorization
+/// context supplied by the MRP reader and an explicitly interactive preparer.
+/// Never retain/share one controller's context across unrelated requests.
 pub async fn run(
     pool: SessionPool,
     requests: mpsc::Receiver<OutputRequest>,
@@ -199,7 +208,12 @@ pub async fn run_discovered(
             let mut prepared = Vec::new();
             for receiver in plan.adding {
                 let uid = receiver.uid.clone();
-                prepared.push((uid, preparer.prepare(receiver).await?));
+                prepared.push((
+                    uid,
+                    preparer
+                        .prepare_authorized(receiver, request.authorization.as_ref())
+                        .await?,
+                ));
             }
             Ok::<_, anyhow::Error>(prepared)
         };

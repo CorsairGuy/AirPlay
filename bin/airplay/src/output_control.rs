@@ -25,6 +25,7 @@ pub(crate) type VolumeOperation =
     Box<dyn FnOnce(&dyn VolumeBackend, &sender::outputs::OutputCatalog) -> u64 + Send>;
 pub struct OutputRequest {
     pub body: Node,
+    pub authorization: Option<crate::route_pairing::AuthorizationContext>,
     pub volume: Option<(String, f32)>,
     pub batch: Option<Vec<(String, f32)>>,
     pub(crate) operation: Option<VolumeOperation>,
@@ -72,10 +73,18 @@ impl OutputControl {
         (Self(tx), rx)
     }
     pub(crate) fn submit(&self, body: Node) -> Result<oneshot::Receiver<u64>, ()> {
+        self.submit_authorized(body, None)
+    }
+    pub(crate) fn submit_authorized(
+        &self,
+        body: Node,
+        authorization: Option<crate::route_pairing::AuthorizationContext>,
+    ) -> Result<oneshot::Receiver<u64>, ()> {
         let (reply, result) = oneshot::channel();
         self.0
             .try_send(OutputRequest {
                 body,
+                authorization,
                 volume: None,
                 batch: None,
                 operation: None,
@@ -111,6 +120,7 @@ impl OutputControl {
         self.0
             .try_send(OutputRequest {
                 body: Node::default(),
+                authorization: None,
                 volume: Some((uid, value)),
                 batch: None,
                 operation: None,
@@ -128,6 +138,7 @@ impl OutputControl {
         self.0
             .try_send(OutputRequest {
                 body: Node::default(),
+                authorization: None,
                 volume: None,
                 batch: None,
                 operation: Some(operation),
