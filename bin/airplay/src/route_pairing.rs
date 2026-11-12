@@ -22,6 +22,100 @@ fn cancelled(stop: &watch::Receiver<bool>) -> bool {
     *stop.borrow() || stop.has_changed().is_err()
 }
 
+/// One MRP connection owns this router. Each selection gets a fresh private
+/// reply queue; concurrent PIN sheets on the same connection are rejected.
+/// The connection reader must route only authorization responses here and keep
+/// forwarding outgoing messages while the selection worker awaits pairing.
+pub struct ControllerAuthorization {
+    outgoing: mpsc::Sender<Node>,
+    active: std::sync::Arc<std::sync::Mutex<Option<(uuid::Uuid, mpsc::Sender<Node>)>>>,
+    stop: watch::Sender<bool>,
+}
+pub struct AuthorizationScope {
+    token: uuid::Uuid,
+    active: std::sync::Arc<std::sync::Mutex<Option<(uuid::Uuid, mpsc::Sender<Node>)>>>,
+    outgoing: mpsc::Sender<Node>,
+    incoming: Option<mpsc::Receiver<Node>>,
+    stop: watch::Receiver<bool>,
+}
+impl ControllerAuthorization {
+    pub fn new(outgoing: mpsc::Sender<Node>) -> Self {
+        let (stop, _) = watch::channel(false);
+        Self {
+            outgoing,
+            active: Default::default(),
+            stop,
+        }
+    }
+    pub fn begin(&self) -> Result<AuthorizationScope> {
+        let mut active = self.active.lock().unwrap();
+        if active.is_some() {
+            bail!("controller already has a pending authorization");
+        }
+        let token = uuid::Uuid::new_v4();
+        let (sender, incoming) = mpsc::channel(4);
+        *active = Some((token, sender));
+        Ok(AuthorizationScope {
+            token,
+            active: self.active.clone(),
+            outgoing: self.outgoing.clone(),
+            incoming: Some(incoming),
+            stop: self.stop.subscribe(),
+        })
+    }
+    /// No PIN content is logged or retained outside the bounded request queue.
+    /// A response without an active sheet is ignored; overflow is an error for
+    /// the connection owner, never silent delivery to a different controller.
+    pub fn response(&self, message: Node) -> Result<()> {
+        if message.number(mrp::schema::field::ProtocolMessage::r#type)
+            != Some(mrp::schema::kind::PROMPT_FOR_ROUTE_AUTHORIZATION_RESPONSE_MESSAGE as u64)
+        {
+            bail!("not a route authorization response");
+        }
+        if let Some((_, sender)) = self.active.lock().unwrap().as_ref() {
+            sender
+                .try_send(message)
+                .map_err(|_| anyhow::anyhow!("authorization response queue unavailable"))?;
+        }
+        Ok(())
+    }
+}
+impl Drop for ControllerAuthorization {
+    fn drop(&mut self) {
+        self.stop.send_replace(true);
+        self.active.lock().unwrap().take();
+    }
+}
+impl AuthorizationScope {
+    pub async fn authorize_and_save(
+        mut self,
+        request: Request,
+        receiver_uid: String,
+        store: std::sync::Arc<crate::sender_store::SenderStore>,
+    ) -> Result<Option<PairingCredentials>> {
+        authorize_and_save(
+            request,
+            receiver_uid,
+            store,
+            self.outgoing.clone(),
+            self.incoming.take().unwrap(),
+            self.stop.clone(),
+        )
+        .await
+    }
+}
+impl Drop for AuthorizationScope {
+    fn drop(&mut self) {
+        let mut active = self.active.lock().unwrap();
+        if active
+            .as_ref()
+            .is_some_and(|(token, _)| *token == self.token)
+        {
+            active.take();
+        }
+    }
+}
+
 /// Use the application store's controller identity, reusing existing credentials
 /// or saving successful PIN pairing off the async reader thread. The UID must be
 /// the physical receiver's stable UID, not a UI group alias or network address.
@@ -148,6 +242,73 @@ mod tests {
         PairingStore,
         hap::{PairSetup, SetupOutcome},
     };
+
+    #[tokio::test]
+    async fn controller_scopes_are_private_bounded_and_cancelled_with_the_connection() {
+        let (out_a, _messages_a) = mpsc::channel(4);
+        let (out_b, _messages_b) = mpsc::channel(4);
+        let a = ControllerAuthorization::new(out_a);
+        let b = ControllerAuthorization::new(out_b);
+        let mut first = a.begin().unwrap();
+        let mut other = b.begin().unwrap();
+        assert!(a.begin().is_err());
+        let reply = |id| {
+            envelope(
+                kind::PROMPT_FOR_ROUTE_AUTHORIZATION_RESPONSE_MESSAGE,
+                &Node::default(),
+                Some(id),
+            )
+        };
+        a.response(reply("a")).unwrap();
+        b.response(reply("b")).unwrap();
+        assert_eq!(
+            first
+                .incoming
+                .as_mut()
+                .unwrap()
+                .recv()
+                .await
+                .unwrap()
+                .string(2),
+            Some("a")
+        );
+        assert_eq!(
+            other
+                .incoming
+                .as_mut()
+                .unwrap()
+                .recv()
+                .await
+                .unwrap()
+                .string(2),
+            Some("b")
+        );
+        for _ in 0..4 {
+            a.response(reply("queued")).unwrap();
+        }
+        assert!(a.response(reply("overflow")).is_err());
+        assert!(a.response(Node::default()).is_err());
+        drop(first);
+        a.response(reply("no-active-request")).unwrap();
+        let mut fresh = a.begin().unwrap();
+        assert!(fresh.incoming.as_mut().unwrap().try_recv().is_err());
+        drop(a);
+        assert!(cancelled(&fresh.stop));
+        assert!(fresh.incoming.as_mut().unwrap().recv().await.is_none());
+        assert!(!cancelled(&other.stop));
+        b.response(reply("still-b")).unwrap();
+        assert_eq!(
+            other
+                .incoming
+                .as_mut()
+                .unwrap()
+                .recv()
+                .await
+                .unwrap()
+                .string(2),
+            Some("still-b")
+        );
+    }
 
     #[tokio::test]
     async fn cancelled_owner_never_starts_pairing_or_opens_a_pin_sheet() {
