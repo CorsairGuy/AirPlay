@@ -27,3 +27,5 @@ Continuous retransmit protection:94 tests passed (16 RTP,78 sender), включ�
 Unified continuous/PTP/local lifecycle:185 library tests passed (80 application,78 sender,27 timesync). Связка source→PTP stamp→local sink проверена без выбранных remote устройств; EOF, sink failure с открытым источником, неверная эпоха и one-way cancellation. Default frontend/Station integration и hardware buffers не подтверждены.
 
 MRP/continuous source binding:162 library tests passed (84 application,78 sender). Новый opt-in follower и реальные Control.action callbacks проверены автономно; native/BT source adapter и аппаратная задержка не подтверждены.
+
+Card/continuous pipeline composition:164 library tests passed (86 application,78 sender). Реальные MRP Pause/Play кадры через Card::serve и in-memory duplex управляют PCM общей pipeline; проверены совместное завершение и отказ control channel другой карточки. Тестовый clock/local capture, без выбранных удалённых получателей, LAN-сервисов и аудиооборудования. Это не проверка установленной Станции.

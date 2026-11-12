@@ -30,6 +30,21 @@ pub struct ContinuousSource {
     pub input: mpsc::Receiver<sender::continuous_source::SourceFrame>,
     pub controls: watch::Receiver<sender::continuous_source::State>,
 }
+impl ContinuousSource {
+    pub fn for_card(
+        card: &crate::card::Card,
+        timeline: sender::continuous::Timeline,
+        clock: MediaClock,
+        input: mpsc::Receiver<sender::continuous_source::SourceFrame>,
+    ) -> Self {
+        Self {
+            timeline,
+            clock,
+            input,
+            controls: card.continuous_controls(),
+        }
+    }
+}
 pub struct GroupOutputs<P> {
     pub requests: mpsc::Receiver<OutputRequest>,
     pub discovery: watch::Receiver<Arc<OutputCatalog>>,
@@ -118,6 +133,40 @@ impl PtpGroup {
             timeline: self.timeline.clone(),
             clock,
             stop: self.stop(),
+        }
+    }
+    /// Own the Card observer and the continuous runtime together. A card/source
+    /// mismatch fails before startup; any observer failure stops and awaits the
+    /// pipeline instead of dropping a still-running pool. No hidden tasks.
+    pub async fn run_card_continuous_with_local(
+        self,
+        card: Arc<crate::card::Card>,
+        source: ContinuousSource,
+        outputs: GroupOutputs<impl SessionPreparer>,
+        sink: impl sender::LocalSink,
+        latency: std::time::Duration,
+    ) -> Result<sender::continuous_source::End> {
+        if !source.controls.same_channel(&card.continuous_controls()) {
+            bail!("continuous source belongs to another Card");
+        }
+        let cancel = self.lease.cancellation();
+        let observer = card.follow_continuous_source(self.stop());
+        let pipeline = self.run_continuous_with_local(source, outputs, sink, latency);
+        tokio::pin!(observer, pipeline);
+        tokio::select! {
+            result = &mut pipeline => {
+                cancel.cancel();
+                let observed = observer.await;
+                let end = result?;
+                observed?;
+                Ok(end)
+            },
+            observed = &mut observer => {
+                cancel.cancel();
+                let cleanup = pipeline.await;
+                observed?;
+                cleanup
+            },
         }
     }
     /// Compose the existing source, pool, selection and local supervisors.
@@ -416,6 +465,201 @@ mod tests {
             self.finished.store(true, Ordering::SeqCst);
             Ok(())
         }
+    }
+    fn pipeline_card(remote: crate::remote::Remote) -> Arc<crate::card::Card> {
+        crate::card::Card::new(
+            mrp::messages::Device {
+                name: "Pipeline card".into(),
+                model: "AirPlayReceiver".into(),
+                localized_model: "Receiver".into(),
+                uid: "pipeline-card".into(),
+                group: "pipeline-group".into(),
+                system_app: "com.github.corsairguy.airplay".into(),
+            },
+            remote,
+            Arc::new(crate::events::NoEvents),
+        )
+    }
+    #[tokio::test]
+    async fn card_mrp_pause_play_reaches_continuous_pcm_and_all_owners_end() {
+        use crate::{
+            events::Events,
+            remote::{Command, Remote},
+        };
+        use tokio::io::AsyncWriteExt;
+        let (_clock, _user, group, origin) = fixture();
+        let remote = Remote::new();
+        let mut commands = remote.attach(1);
+        let card = pipeline_card(remote);
+        card.playing(true);
+        let mut states = card.continuous_controls();
+        let (pcm, input) = mpsc::channel(8);
+        pcm.send(sender::continuous_source::SourceFrame {
+            generation: 0,
+            pcm: Box::new([7; sender::PACKET_BYTES]),
+        })
+        .await
+        .unwrap();
+        let source = ContinuousSource::for_card(
+            &card,
+            sender::continuous::Timeline::new(origin, Duration::from_millis(250)).unwrap(),
+            MediaClock::at(origin, 0),
+            input,
+        );
+        let (_control, requests) = crate::output_control::OutputControl::channel(4);
+        let (_catalog, discovery) = watch::channel(Arc::new(OutputCatalog::new(vec![]).unwrap()));
+        let (updates, final_state) = watch::channel(output_worker::Snapshot::default());
+        let outputs = GroupOutputs {
+            requests,
+            discovery,
+            local_ids: vec![],
+            preparer: Blocked {
+                entered: Arc::new(AtomicBool::new(false)),
+                dropped: Arc::new(AtomicBool::new(false)),
+            },
+            updates,
+        };
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let finished = Arc::new(AtomicBool::new(false));
+        let pipeline = tokio::spawn(group.run_card_continuous_with_local(
+            card.clone(),
+            source,
+            outputs,
+            PipelineSink {
+                seen: seen.clone(),
+                finished: finished.clone(),
+                fail: false,
+            },
+            Duration::from_millis(250),
+        ));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while seen.lock().unwrap().is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let (mut client, server) = tokio::io::duplex(65536);
+        let mrp = tokio::spawn(card.clone().serve(server));
+        let command = |seq, value| {
+            let mut body = mrp::wire::Node::default();
+            body.int(1, value);
+            let mut message = mrp::wire::Node::default();
+            message.int(1, 1).text(2, "pipeline-command").node(6, &body);
+            mrp::frame::sync(seq, &[message])
+        };
+        client.write_all(&command(1, 2)).await.unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), commands.recv())
+                .await
+                .unwrap(),
+            Some(Command::Pause)
+        );
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !states.borrow_and_update().paused {
+                states.changed().await.unwrap();
+            }
+            while !seen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|frame| frame.pcm().iter().all(|byte| *byte == 0))
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        client.write_all(&command(2, 1)).await.unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), commands.recv())
+                .await
+                .unwrap(),
+            Some(Command::Play)
+        );
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while states.borrow_and_update().paused {
+                states.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        pcm.send(sender::continuous_source::SourceFrame {
+            generation: 0,
+            pcm: Box::new([9; sender::PACKET_BYTES]),
+        })
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !seen.lock().unwrap().iter().any(|frame| frame.pcm()[0] == 9) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(pcm);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), pipeline)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap(),
+            sender::continuous_source::End::Eof
+        );
+        assert!(finished.load(Ordering::SeqCst));
+        assert!(final_state.borrow().selected.is_empty());
+        drop(client);
+        let _closed = tokio::time::timeout(Duration::from_secs(1), mrp)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    #[tokio::test]
+    async fn card_pipeline_rejects_unrelated_source_control_before_startup() {
+        let (_clock, _user, group, origin) = fixture();
+        let card = pipeline_card(crate::remote::Remote::new());
+        let (_pcm, input) = mpsc::channel(1);
+        let (_state, controls) = watch::channel(sender::continuous_source::State::default());
+        let source = ContinuousSource {
+            timeline: sender::continuous::Timeline::new(origin, Duration::from_millis(250))
+                .unwrap(),
+            clock: MediaClock::at(origin, 0),
+            input,
+            controls,
+        };
+        let (_control, requests) = crate::output_control::OutputControl::channel(4);
+        let (_catalog, discovery) = watch::channel(Arc::new(OutputCatalog::new(vec![]).unwrap()));
+        let (updates, _) = watch::channel(output_worker::Snapshot::default());
+        let outputs = GroupOutputs {
+            requests,
+            discovery,
+            local_ids: vec![],
+            preparer: Blocked {
+                entered: Arc::new(AtomicBool::new(false)),
+                dropped: Arc::new(AtomicBool::new(false)),
+            },
+            updates,
+        };
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let finished = Arc::new(AtomicBool::new(false));
+        assert!(
+            group
+                .run_card_continuous_with_local(
+                    card,
+                    source,
+                    outputs,
+                    PipelineSink {
+                        seen: seen.clone(),
+                        finished: finished.clone(),
+                        fail: false
+                    },
+                    Duration::from_millis(250)
+                )
+                .await
+                .is_err()
+        );
+        assert!(seen.lock().unwrap().is_empty());
+        assert!(!finished.load(Ordering::SeqCst));
     }
     #[tokio::test]
     async fn continuous_pipeline_drains_eof_and_cancels_both_branches_on_failures() {
