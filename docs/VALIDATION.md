@@ -47,3 +47,15 @@ Two-receiver control failure:173 library tests passed (application94 + sender79)
 Build profiles: audio-only cargo check and dependency-tree exclusion passed; cargo test -p airplay --no-default-features passed94 library tests +1 CLI test (0 doctests). Default profile passed94 application +79 sender library tests +1 CLI test. Mirroring remains enabled by default; unsupported audio-only video flags and stream110 setup are rejected. NTP realtime audio support was preserved instead of copying the old draft's NTP gating. Three test-only API warnings were then fixed with cfg(test); cargo check for both profiles passed without warnings. Full CI/FFmpeg/cross-target matrix was not run.
 
 2026-11-12 — source 37e1790c98db288040301b5b300726eca6fde9e2:178 library tests passed (application95 + sender83), Pi/Linux, --network none. Raw PCM acquisition tests cover byte preservation/aligned tail padding, partial reads across coalesced Pause/Play, invalidated queued frames, foreign control channel, cancellation during blocked reads/full queues. The raw host composition tests EOF drain and malformed-tail cancellation with resource Drop. Its first test version incorrectly required finish on cancellation; corrected to the existing sink contract (finish on EOF, Drop on cancellation). No real remote receiver was selected in the new host cases; clocks/capture sinks are fixtures. Station bootstrap, source buffers upstream of acquisition, physical audio and PTP native adoption remain unverified.
+
+
+## Будущая измерительная приёмка v12 (не выполнена)
+
+D9/L-83: кросс-корреляция известного sweep/импульса на реальных выходах,
+регрессия offset по времени и прогон ≥2ч; указать sample rate, захват, калибровку
+задержки ADC/DAC и доверительную погрешность. soundcheck/signal-estimator — референсы
+методики с provenance-тегом, не скопированный код. Отдельно измерять scheduling jitter
+и фактический выход. Заявленные авторами точности не являются точностью нашего стенда.
+Bit-exact проверяется отдельно от временной синхронизации: lossless вход/выход без gain/ASRC,
+побитовое сравнение и объяснение преобразований; нулевой null-test сам по себе не доказывает timing.
+Добавить долгий RTP wraparound, packet loss, feedback под нагрузкой и матрицу iOS×приложение×profile.
