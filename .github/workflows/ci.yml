@@ -31,6 +31,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # The peer-union integration fixture needs two distinct local IPv4 peers.
+      # macOS does not configure the whole 127/8 range as Linux/Windows do.
+      - name: Configure isolated loopback peer on macOS
+        if: runner.os == 'macOS'
+        run: sudo ifconfig lo0 alias 127.0.0.3
       - run: cargo test --workspace
 
   # Минимальный аудиопрофиль без зависимостей видео.
@@ -59,6 +64,11 @@ jobs:
           components: clippy
       - run: sudo apt-get update && sudo apt-get install -y libavcodec-dev libavformat-dev libavutil-dev libswresample-dev libclang-dev pkg-config
       - run: cargo clippy --workspace --all-targets --features airplay/ffmpeg -- -D warnings
+      # The peer-union integration fixture needs two distinct local IPv4 peers.
+      # macOS does not configure the whole 127/8 range as Linux/Windows do.
+      - name: Configure isolated loopback peer on macOS
+        if: runner.os == 'macOS'
+        run: sudo ifconfig lo0 alias 127.0.0.3
       - run: cargo test --workspace --features airplay/ffmpeg
 
   # Станция (ARMv7) и Raspberry Pi (ARM64): пока только проверка сборки.
