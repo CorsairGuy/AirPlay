@@ -136,3 +136,18 @@ uses this same implementation; no second peer registry or wire protocol was
 introduced. Planning has no side effects: callers serialize apply/commit and
 retain domain/daemon attestation. Offline Pi validation: 41 timing tests and
 Clippy all targets passed. External NQPTP commands and live activation remain.
+
+### 2026-11-13 — external NQPTP command owner
+
+`nqptp_control::NqptpControl/NqptpWorker` now provides the explicit serialized
+legacy command host in the core. It uses the shared peer-interest planner,
+per-owner domain validation, queued update/withdrawal ordering, a 4 s keepalive,
+bounded UDP sends and before/after independently supplied Selection checks.
+Worker drop/stop/failure publishes loss for the host clock/relay stop path.
+Commands are sent only through an explicitly supplied loopback socket/interface.
+The Station module reexports this implementation rather than duplicating it.
+This is not daemon attestation or activation: the caller must establish exclusive
+command authority and wire loss into clock/relay termination. UDP send success
+is not an acknowledgement; abrupt cancellation relies on daemon lease expiry.
+No device update, listener319/320 startup or new clock source is introduced.
+Validation: 108 audio-only application tests (including both NQPTP controller loopback tests) and scoped Clippy passed offline on Pi; no device installation.
