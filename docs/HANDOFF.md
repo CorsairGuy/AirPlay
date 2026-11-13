@@ -55,3 +55,13 @@ f6600a0 adds external clock qualification. These are NOT live state migration or
 SHM/timeline wiring. Next clock work is real ordered reader/correlation sampler and a
 qualified external timeline contract; next control work is serialized worker publication
 with verified descriptor inventory, not racing two unrelated watches.
+
+
+Clock acquisition update e3be6e4: ordered read-only ABI10/11 reader and Linux
+RAW/Instant bracket sampler + two-sample rate estimator exist, scoped tests pass.
+Do NOT treat current Station files as verified: this stage compares repository
+main/pinned sources and local patch evidence only. Installed NQPTP ABI/patch/process
+still needs a separately permitted read-only snapshot before activation.
+Next work: combine acquisition, independent daemon/role evidence and qualified
+external timeline/lease; keep existing NQPTP sole319/320 owner. Adapter remains
+pinned to2a2c94f until the new clock API is actually integrated/tested there.

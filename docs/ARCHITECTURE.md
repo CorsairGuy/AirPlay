@@ -62,3 +62,16 @@ Still required: ordered SHM reader, actual cross-timestamp sampler/role attestat
 qualified external timeline/lease integration and owner-safe legacy peer control.
 `MasterTimeline` remains the explicit local-master API; no synthetic Service status
 or hidden second PTP owner was introduced.
+
+
+NQPTP acquisition now has explicit Linux `nqptp_reader::Reader` and
+`raw_correlation::capture/estimate` APIs. Reader identity checks do not establish
+a daemon instance, patch support or role. Same-inode restart still needs trusted
+external instance/selection evidence. Captures are scheduled by the owner, with
+explicit uncertainty/wander policy; no zero-rate correlation from one sample.
+
+`Selection::start_marker` distinguishes stable epoch markers from the Station
+patched-master refresh marker, which is rewritten on keepalive. The owner-attested
+epoch lower bound remains separate and stable. Do not infer epoch from marker
+refresh or infer patch support from ABI. Remaining integration: attestation and
+scheduling owner, external timeline/lease, peer-control ownership and frontend.

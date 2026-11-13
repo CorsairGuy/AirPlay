@@ -100,3 +100,22 @@ External qualification consumes supplied decoded observations, trusted selection
 evidence and MEASURED correlations. It does not sample actual clocks, read live SHM,
 attest the daemon, bind319/320, implement complete servo or plug into MasterTimeline.
 Observed readiness/software arithmetic is not measured synchronization at the DAC.
+
+
+## NQPTP ordered reader / measured correlation — 2026-11-13
+
+Source e3be6e4:69 ap_clock and34 timesync library tests passed in Pi/Linux
+offline container (`cargo test -p ap_clock -p timesync --lib --locked --offline`).
+New checks: patched-master start-marker refresh without epoch reset; ABI10/11 file
+fixtures, torn/unpublished/unsupported data, truncation/replacement/symlink/owner
+checks; synthetic positive/negative RAW rate, extrapolation uncertainty and invalid
+timespec/bracket bounds. Log: coordinator
+outputs/NQPTP-READER-CORRELATION-CHECK-20261113.log.
+
+Reader uses explicit read-only file operations, main before secondary and full
+ordering fences; no mmap, default SHM path, daemon commands or PTP sockets. Header
+reference: [pinned NQPTP ABI11](https://github.com/mikebrady/nqptp/blob/ab8fb67483411640fd7f1e193889482f2421c37c/nqptp-shm-structures.h).
+Provenance: declared GPL-2.0, layout/ordering facts only, new code written independently.
+Actual clock_gettime sampler is compiled; estimation tests use synthetic brackets,
+not hardware accuracy measurements. No installed Station binary/ABI, live SHM,
+role attestation, acoustic sync or full frontend transition was checked.
