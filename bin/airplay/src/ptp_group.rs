@@ -13,11 +13,35 @@ use std::sync::{Arc, Weak};
 use timesync::media::{MasterLease, MasterTimeline};
 use tokio::sync::{mpsc, watch};
 
+enum GroupTimeline {
+    Local(Arc<MasterTimeline>),
+    External(Arc<timesync::external_media::Timeline>),
+}
+impl GroupTimeline {
+    fn domain(&self) -> clock::domain::Domain {
+        match self {
+            Self::Local(t) => t.domain(),
+            Self::External(t) => t.domain(),
+        }
+    }
+    fn reading_at(&self, at: std::time::Instant) -> std::io::Result<clock::domain::Reading> {
+        match self {
+            Self::Local(t) => t.reading_at(at),
+            Self::External(t) => t.reading_at(at),
+        }
+    }
+    fn follows(&self, status: &watch::Receiver<timesync::engine::Snapshot>) -> bool {
+        match self {
+            Self::Local(t) => t.follows(status),
+            Self::External(_) => false,
+        }
+    }
+}
 /// Own this alongside the clock service. A new epoch requires a new group.
 /// Dropping it cancels the worker, producer and any local renderer subscribed
 /// to `stop()`. Graceful shutdown must await `run`, not abort its future.
 pub struct PtpGroup {
-    timeline: Arc<MasterTimeline>,
+    timeline: Arc<GroupTimeline>,
     group: u128,
     lease: MasterLease,
     clock_peers: Option<ClockPeers>,
@@ -100,7 +124,27 @@ impl PtpGroup {
         timeline.reading_at(std::time::Instant::now())?;
         let lease = MasterLease::spawn(timeline.clone(), upstream);
         Ok(Self {
-            timeline,
+            timeline: Arc::new(GroupTimeline::Local(timeline)),
+            group,
+            lease,
+            clock_peers: None,
+        })
+    }
+    /// Explicit qualified external clock. Caller owns attested daemon control
+    /// and timing peers through its preparer; this never starts a second PTP
+    /// service or manufactures a Service snapshot. Publish first, then construct.
+    pub fn new_external(
+        timeline: Arc<timesync::external_media::Timeline>,
+        group: u128,
+        upstream: watch::Receiver<bool>,
+    ) -> Result<Self> {
+        if group == 0 {
+            bail!("empty outgoing group identity");
+        }
+        timeline.reading_at(std::time::Instant::now())?;
+        let lease = MasterLease::spawn_external(timeline.clone(), upstream);
+        Ok(Self {
+            timeline: Arc::new(GroupTimeline::External(timeline)),
             group,
             lease,
             clock_peers: None,
@@ -379,7 +423,7 @@ impl PtpGroup {
 }
 
 pub struct PtpProducer {
-    timeline: Arc<MasterTimeline>,
+    timeline: Arc<GroupTimeline>,
     clock: MediaClock,
     stop: watch::Receiver<bool>,
 }
@@ -397,7 +441,7 @@ impl PtpProducer {
 
 struct QualifiedPreparer<P> {
     inner: P,
-    timeline: Arc<MasterTimeline>,
+    timeline: Arc<GroupTimeline>,
     group: u128,
     clock_peers: Option<ClockPeers>,
     last_members: Option<Vec<std::net::IpAddr>>,
@@ -556,6 +600,66 @@ mod tests {
             remote,
             Arc::new(crate::events::NoEvents),
         )
+    }
+    #[tokio::test]
+    async fn external_clock_stamps_packets_and_owner_loss_stops_group() {
+        use clock::external::{Correlation, Selection, StartMarker};
+        let origin = Instant::now();
+        let selection = Selection {
+            daemon_instance: 42,
+            domain: clock::domain::Domain::new(55, 2).unwrap(),
+            master_start_raw_ns: 100,
+            start_marker: StartMarker::RefreshedPublication,
+            clock_change_offset: None,
+            sender_master_verified: true,
+        };
+        let sample = clock::nqptp::Snapshot {
+            version: 10,
+            clock_id: 55,
+            local_time: 1_000_000_000,
+            offset: 37,
+            clock_change_offset: None,
+            master_start_time: 100,
+        };
+        let correlation = Correlation {
+            at: origin,
+            raw_ns: 1_000_000_100,
+            rate_ppb: 0,
+            rate_error_ppb: 10,
+            uncertainty_ns: 10,
+            valid_for: Duration::from_secs(1),
+        };
+        let (timeline, mut owner) = timesync::external_media::Timeline::new(
+            selection,
+            Duration::from_secs(1),
+            Duration::from_micros(1),
+            Duration::from_millis(100),
+        )
+        .unwrap();
+        let (_user, upstream) = watch::channel(false);
+        assert!(PtpGroup::new_external(timeline.clone(), 77, upstream.clone()).is_err());
+        owner.update(selection, sample, correlation).unwrap();
+        let group = PtpGroup::new_external(timeline.clone(), 77, upstream).unwrap();
+        let producer = group.producer(MediaClock::at(origin, 0));
+        let pcm = vec![7; sender::PACKET_BYTES];
+        let packet = producer.packet(0, &pcm).unwrap();
+        assert_eq!(packet.pcm(), pcm.as_slice());
+        assert_eq!(
+            packet.ptp_reading().unwrap(),
+            selection.domain.reading(1_000_000_137)
+        );
+        assert_eq!(packet.produced_at(), origin);
+        let mut stop = group.stop();
+        drop(owner);
+        assert!(producer.packet(1, &pcm).is_err());
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !*stop.borrow_and_update() {
+                stop.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        assert!(*stop.borrow());
     }
     #[tokio::test]
     async fn raw_pcm_host_drains_input_and_awaits_cleanup_on_malformed_tail() {

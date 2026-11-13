@@ -319,10 +319,17 @@ mod tests {
             })
             .is_err()
         );
-        if std::mem::size_of::<libc::time_t>() == 8 {
+        if std::mem::size_of_val(
+            &libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            }
+            .tv_sec,
+        ) == 8
+        {
             assert!(
                 timespec_ns(libc::timespec {
-                    tv_sec: libc::time_t::MAX,
+                    tv_sec: i64::MAX as _,
                     tv_nsec: 0
                 })
                 .is_err()

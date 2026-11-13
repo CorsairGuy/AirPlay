@@ -5,6 +5,7 @@
 //! работает вхолостую, и плеер играет по своим часам, без мультирума.
 
 pub mod engine;
+pub mod external_media;
 pub mod media;
 #[cfg(target_os = "linux")]
 pub mod nqptp_reader;

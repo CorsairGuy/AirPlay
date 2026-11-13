@@ -85,6 +85,44 @@ impl Cancellation {
     }
 }
 impl MasterLease {
+    /// External daemon remains owned elsewhere. No Service/socket is created.
+    pub fn spawn_external(
+        timeline: Arc<crate::external_media::Timeline>,
+        mut upstream: watch::Receiver<bool>,
+    ) -> Self {
+        let initial = *upstream.borrow()
+            || upstream.has_changed().is_err()
+            || timeline.reading_at(Instant::now()).is_err();
+        let (stop, _) = watch::channel(initial);
+        let signal = stop.clone();
+        let mut loss = timeline.loss();
+        let task = tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_millis(25));
+            loop {
+                if *signal.borrow() {
+                    break;
+                }
+                // Drop the loss watch read guard before reading_at can revoke
+                // that SAME watch on expiry; retaining it would deadlock send_replace.
+                let upstream_stopped = *upstream.borrow();
+                let clock_lost = *loss.borrow();
+                if upstream_stopped
+                    || upstream.has_changed().is_err()
+                    || clock_lost
+                    || timeline.reading_at(Instant::now()).is_err()
+                {
+                    signal.send_replace(true);
+                    break;
+                }
+                tokio::select! {
+                    _=tick.tick()=>{},
+                    result=loss.changed()=>{if result.is_err(){signal.send_replace(true);break;}},
+                    result=upstream.changed()=>{if result.is_err(){signal.send_replace(true);break;}},
+                }
+            }
+        });
+        Self { stop, task }
+    }
     pub fn spawn(timeline: Arc<MasterTimeline>, mut upstream: watch::Receiver<bool>) -> Self {
         let initially_stopped = *upstream.borrow()
             || upstream.has_changed().is_err()
