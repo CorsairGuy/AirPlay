@@ -141,9 +141,7 @@ impl PcmPacketizer {
     /// Drop obsolete ciphertext without rewinding sequence, nonce, timestamp
     /// origin or first-marker state. Never recreate the packetizer for a seek.
     pub fn clear_retransmit_cache(&mut self) {
-        for entry in &mut self.cache {
-            *entry = None;
-        }
+        self.cache.fill(None);
     }
 
     pub fn packetize(
