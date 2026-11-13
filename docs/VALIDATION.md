@@ -81,3 +81,22 @@ because a new module was added. Caller must supply independently verified descri
 Snapshot/catalog alone do not establish topology/adoption or observed volume.
 No production observer, device UI fix or native grouping is claimed.
 Log: coordinator outputs/CORE-OUTPUT-CARD-CHECK-20261113.log.
+
+
+## Offline state import and external clock qualification — 2026-11-13
+
+- Source2a2c94f:103 audio-only application library tests passed in Pi/Linux offline
+  container. Four new import fixtures cover exact ID/seed/public-key preservation,
+  restart, permissions, existing/dangling destinations and ambiguous/unsafe snapshots.
+  Direct Linux SYS_renameat2 preserves no-replace publication under musl; no live state.
+  Log: coordinator outputs/CORE-STATE-IMPORT-CHECK-20261113.log.
+- Sourcef6600a0:68 ap_clock library tests passed offline, including8 external-clock
+  fixtures for measured rate, signed modular offsets, stale/reversed samples, changed
+  epoch/daemon/role, uncertainty and RAW↔Instant correlation discontinuity.
+  Log: coordinator outputs/EXTERNAL-CLOCK-CHECK-20261113.log.
+  Independent source review confirmed the correlation-step regression is closed.
+
+External qualification consumes supplied decoded observations, trusted selection/role
+evidence and MEASURED correlations. It does not sample actual clocks, read live SHM,
+attest the daemon, bind319/320, implement complete servo or plug into MasterTimeline.
+Observed readiness/software arithmetic is not measured synchronization at the DAC.

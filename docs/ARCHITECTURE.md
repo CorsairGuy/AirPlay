@@ -49,3 +49,16 @@ PtpGroup получает MasterTimeline существующей общей PTP
 По пользовательской политике §0.5 v12 новые реализации пишутся с нуля: идеи/структура/
 wire-факты с provenance-тегом; внешний код и близкий перевод не копируются.
 Quad/hub из L-74 — кандидат для проверки, не установленный Apple-прецедент (§9 плана).
+
+
+## External clock transition contract
+
+`clock::external::Qualifier` pins a daemon instance, clock domain/epoch and external
+sender-master evidence. It uses supplied measured RAW/Instant rate and uncertainty,
+checks bounded freshness and continuity of successive correlations, and revokes on
+any failed observation. It cannot auto-rearm; the owner establishes a new selection.
+The offset-step limit is a conservative caller uncertainty policy, not a servo proof.
+Still required: ordered SHM reader, actual cross-timestamp sampler/role attestation,
+qualified external timeline/lease integration and owner-safe legacy peer control.
+`MasterTimeline` remains the explicit local-master API; no synthetic Service status
+or hidden second PTP owner was introduced.

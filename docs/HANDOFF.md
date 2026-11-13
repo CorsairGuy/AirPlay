@@ -47,3 +47,11 @@
   transaction/import, live source/control/discovery, confirmed outputs+observed descriptors
   to Card, existing stats/guard handoff and executable packaging. No recovery rewrite.
 - No device install/connect/audio test in this slice. Future v12 features remain secondary.
+
+
+Next migration slice (2026-11-13):2a2c94f adds explicit Linux SenderStore::import_new
+into a new private directory, preserves supplied identity, atomically refuses replacement;
+f6600a0 adds external clock qualification. These are NOT live state migration or active
+SHM/timeline wiring. Next clock work is real ordered reader/correlation sampler and a
+qualified external timeline contract; next control work is serialized worker publication
+with verified descriptor inventory, not racing two unrelated watches.
