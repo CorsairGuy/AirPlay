@@ -311,7 +311,7 @@ fn stamp_frame(
         .ok_or_else(|| anyhow::anyhow!("continuous packet timestamp overflow"))?;
     if packet.frame_index() != frame.frame_index
         || packet.produced_at() != produced
-        || packet.pcm() != &*frame.pcm
+        || packet.pcm() != frame.pcm.as_ref()
     {
         bail!("continuous packet stamper changed media epoch/index/PCM");
     }

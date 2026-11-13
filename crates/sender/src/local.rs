@@ -90,12 +90,21 @@ pub async fn run_local<S: LocalSink>(
     }
 }
 
+async fn stopped(stop: &mut watch::Receiver<bool>) {
+    loop {
+        if *stop.borrow_and_update() || stop.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{MediaClock, PACKET_BYTES};
     use std::sync::Mutex;
-    struct Capture(Arc<Mutex<Vec<(Arc<AudioPacket>, Instant)>>>);
+    type CapturedPackets = Arc<Mutex<Vec<(Arc<AudioPacket>, Instant)>>>;
+    struct Capture(CapturedPackets);
     impl LocalSink for Capture {
         async fn write(&mut self, packet: Arc<AudioPacket>, at: Instant) -> Result<()> {
             self.0.lock().unwrap().push((packet, at));
@@ -248,13 +257,5 @@ mod tests {
             .to_string()
             .contains("stalled")
         );
-    }
-}
-
-async fn stopped(stop: &mut watch::Receiver<bool>) {
-    loop {
-        if *stop.borrow_and_update() || stop.changed().await.is_err() {
-            return;
-        }
     }
 }

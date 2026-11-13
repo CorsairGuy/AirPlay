@@ -183,7 +183,7 @@ impl SessionPool {
         catalog.receivers(&ids)?;
         let mut physical = std::collections::BTreeMap::new();
         for (uid, gain) in levels {
-            for member in catalog.receivers(&[uid.clone()])? {
+            for member in catalog.receivers(std::slice::from_ref(uid))? {
                 let entry = self
                     .entries
                     .get(&member.uid)

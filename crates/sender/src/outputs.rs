@@ -303,12 +303,17 @@ mod tests {
         let old = peer("a", 7001);
         let new = peer("a", 7002);
         let catalog = OutputCatalog::new(vec![route("single", vec![new.clone()])]).unwrap();
-        let plan = catalog.plan(&[old.clone()], &["single".into()]).unwrap();
+        let plan = catalog
+            .plan(std::slice::from_ref(&old), &["single".into()])
+            .unwrap();
         assert_eq!(plan.adding, vec![new]);
         assert_eq!(plan.removing, vec![old.clone()]);
         assert!(plan.retained.is_empty());
         assert_eq!(
-            catalog.plan(&[old.clone()], &[]).unwrap().removing,
+            catalog
+                .plan(std::slice::from_ref(&old), &[])
+                .unwrap()
+                .removing,
             vec![old.clone()]
         );
         assert!(catalog.plan(&[old.clone(), old], &[]).is_err());
