@@ -71,7 +71,10 @@ pinned to2a2c94f until the new clock API is actually integrated/tested there.
 104 application tests; limits in VALIDATION). Next: actual attested owner combining
 reader/correlation scheduling and legacy peer control, then Station frontend/guards.
 Re-audit naming: COMPONENTS-AND-NAMING.md inventories24 packages and recommends
-6 logical runtime roles within1 daemon. Companion is a stub, existing Coordinator
+7 logical runtime roles within1 daemon. Companion is a stub, existing Coordinator
 is not a daemon; MRP wire/schema/frame/server duplicates are priority consolidation.
+Approved roles: discovery/sessions/timing/media/remote/coordinator/identity.
+remote replaces the proposed control name; identity owns persistent trust/state,
+not a second pairing implementation.
 Do not implement a second protocol or independent coordinator. Move/reuse existing
 code, preserve profile-specific state and test parity before removing legacy.

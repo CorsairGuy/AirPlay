@@ -28,11 +28,11 @@ reference/ — архив, не активные workspace members; чужие �
 - В core нет отдельных main для трёх каталогов services и нет оснований считать их
   тремя запущенными демонами. Bonjour service record — также не OS service.
 
-## Целевая схема: один daemon, шесть логических runtime-компонентов
+## Целевая схема: один daemon, семь логических runtime-компонентов
 
 Число компонентов не определяет число процессов. Базовый deployment — один `airplay`
 с командой `serve`; библиотеки доступны аппаратным адаптерам без обязательного CLI.
-Шесть — выбранные границы ответственности, а не обещание шести готовых служб или
+Семь — выбранные границы ответственности, а не обещание семи готовых служб или
 вечный лимит. Новый протокол добавляется в существующую границу, пока не доказана
 отдельная ответственность/владение ресурсом.
 
@@ -42,12 +42,13 @@ reference/ — архив, не активные workspace members; чужие �
 | sessions | ap_sessions | listeners, pairing dispatch, RX/TX session lifecycle и выбранный профиль | по процессу на AP1/AP2/RTSP/HTTP |
 | timing | ap_timing | общий physical clock, PTP/NTP sockets/roles/maps, consumers/leases | по clock-service на группу/получателя |
 | media | ap_media | pipeline supervision, decode/capture/render scheduling, backend factories | Apple-подобный mediaserverd только ради имени |
-| control | ap_control | MRP/Companion/DACP endpoints, metadata/views и translation в команды | отдельный mediaremote daemon и Companion daemon по умолчанию |
+| remote | ap_remote | MRP/Companion/DACP endpoints, metadata/views и translation в команды | отдельный mediaremote daemon и Companion daemon по умолчанию |
 | coordinator | ap_coordinator | источники, desired/confirmed membership, group volume, serialized intent/state | второй coordinator поверх уже существующего Coordinator/worker |
+| identity | ap_identity | долгоживущие device/controller identities, pairing records, trust/access policy и их сохранение | второй pairing/crypto engine или отдельный key daemon по умолчанию |
 
-Configuration, storage, local IPC, observability и supervisor — инфраструктура daemon,
+Общее configuration storage, local IPC, observability и supervisor — инфраструктура daemon,
 не ещё по службе на каждую функцию. Они не должны дублировать состояние coordinator.
-Если coordinator публикует интерфейс, control использует его; не ведёт свою альтернативную группу.
+Если coordinator публикует интерфейс, remote использует его; не ведёт свою альтернативную группу.
 
 Отдельный timing process допустим по подтверждённым причинам привилегий/изоляции,
 но не обязателен. Пока Shairport остаётся receiver Станции, NQPTP — внешний существующий
@@ -65,9 +66,9 @@ Configuration, storage, local IPC, observability и supervisor — инфрас�
 | PTP / NTP | разные timing protocols | ap_clock — pure protocol/math; ap_timing — один runtime owner; не смешивать wire semantics |
 | HAP pairing / SRP / TLV8 | authentication profiles/primitives | ap_pair + ap_crypto; Companion не получает второй SRP/HKDF/AEAD engine |
 | FairPlay | профиль negotiation/crypto | ap_fairplay, общий для поддержанных RX/video profiles |
-| MRP | Media Remote Protocol | ap_mrp — один framing/protobuf/schema; control::mrp — один server/client runtime |
-| Companion Link | самостоятельный control protocol | ap_companion; общий crypto/pairing/control model; OPACK — его data codec, не OS service |
-| DACP | reverse-control protocol | control::dacp, shared HTTP/transport; не заменять его MRP и не обобщать «DACP только AP1» |
+| MRP | Media Remote Protocol | ap_mrp — один framing/protobuf/schema; remote::mrp — один server/client runtime |
+| Companion Link | самостоятельный control protocol | ap_companion; общий crypto/pairing/command/event model; OPACK — его data codec, не OS service |
+| DACP | reverse-control protocol | remote::dacp, shared HTTP/transport; не заменять его MRP и не обобщать «DACP только AP1» |
 | DMAP | tagged metadata format | один metadata codec, сейчас events::Metadata::from_dmap; не новая сетевая служба |
 | HLS/URL casting | медиа delivery profile | ap_hls после реализации + sessions/media; capabilities объявлять по фактической готовности |
 | MLP1 / local IPC | внутренние контракты | один encoder/decoder и version contract; не протокол Apple и не отдельный AirPlay stack |
@@ -79,7 +80,7 @@ Configuration, storage, local IPC, observability и supervisor — инфрас�
 | crates/mrp/src/wire.rs ↔ bin/airplay/src/mrp_service/wire.rs | два protobuf Node/encode/decode/packet parser с разными error API | канонический ap_mrp; перенос недостающих возможностей, differential malformed/boundary/unknown-field tests, затем удалить второй parser |
 | crates/mrp/src/schema.rs ↔ mrp_service/schema.rs | две таблицы той же wire-схемы и lookup API | одна генерация из закреплённого schema source; compatibility lookup может быть wrapper без копии таблицы |
 | mrp/frame.rs ↔ mrp_service/server.rs framing | общий MRP envelope реализован и в библиотеке, и вручную в сервере | один codec, сервер держит только I/O/session/push; сохранить реальные frame boundaries |
-| services/mediaremote ↔ active mrp_service server/card | два MRP server path, generic старый и перенесённый активный | целевой ap_control::mrp собирается из проверенного active behavior; старый server удалить после feature/differential parity, не поддерживать два |
+| services/mediaremote ↔ active mrp_service server/card | два MRP server path, generic старый и перенесённый активный | целевой ap_remote::mrp собирается из проверенного active behavior; старый server удалить после feature/differential parity, не поддерживать два |
 | TimeSync/Ptp legacy ↔ unified timesync::Service | переходные receiver loop и новый RX/TX service | один выбранный backend на хосте; не объявлять уже объединёнными, завершить clock migration до удаления legacy |
 | Coordinator model ↔ worker/PtpGroup/volume/selection | разные части групповой логики, не две готовые равноценные службы | сохранить roles: model/serialized owner/session supervisor; связать attempt/evidence, не начинать новый независимый state engine |
 | Station MRP/sender ↔ core | временные две реализации в разных repos во время миграции | default остаётся legacy до приёмки; затем Station использует core libraries, hardware overlay не содержит второй protocol parser |
@@ -101,7 +102,7 @@ pair::hap обеих сторон использует единый crypto::srp 
   решение с IPC/config/service migration, а не автоматическое следствие новых протоколов.
 - Protocol/data libraries — `ap_<protocol/domain>`: уже имеющиеся ap_rtsp/ap_rtp/ap_mrp/
   ap_companion/ap_crypto/ap_pair/ap_clock и т.д. Имена протоколов в сети не переименовываются.
-- Runtime packages — `ap_<role>` в services/<role>; six target roles приведены выше.
+- Runtime packages — `ap_<role>` в services/<role>; seven target roles приведены выше.
   Существующий timesync переводится в timing через package/import compatibility alias,
   а не копированием каталога. Все переименования — move/reexport, затем снятие alias.
 - mediaserver/mediaremote — исторические Apple-подобные названия, а не обоснование
@@ -124,7 +125,7 @@ pair::hap обеих сторон использует единый crypto::srp 
 3. Первое реальное устранение дублей: MRP codec/schema/framing, затем единый control
    runtime. Сначала сохранить обложку/команды/group/control behavior в regression fixtures.
 4. Выделить coordinator из уже существующих model/worker/supervision, не написать заново;
-   построить dependency DAG: protocol/libs → runtime → daemon/adapters, без control↔coordinator
+   построить dependency DAG: protocol/libs → runtime → daemon/adapters, без remote↔coordinator
    циклов. Общая state/event model — только при доказанной потребности.
 5. Переименования runtime-пакетов и переносы из bin — отдельными move-коммитами с
    compatibility aliases, audio-only tree check и проверкой Station core pin/lock/package.
@@ -166,3 +167,17 @@ pair::hap обеих сторон использует единый crypto::srp 
 | bin/airplay | airplay | 33 | 13512 | есть код; полнота см. STATUS |
 
 *Без пустых и отдельных comment lines; включает tests/generated data. Числа — инвентаризация, не число работающих служб.
+
+
+## Согласованное уточнение — 2026-11-13
+
+Пользователь согласовал семь компонентов: discovery, sessions, timing, media,
+remote, coordinator, identity. Это актуальная целевая схема вместо предыдущих шести.
+remote — внешний пульт/карточка, coordinator — согласование действий и групп;
+identity — долгоживущее состояние и trust/access policy. Sessions проверяет доступ
+через этот policy, а существующие ap_pair/ap_crypto исполняют handshake и криптографию.
+Identity не реализует второй SRP/HAP engine и не дублирует session state. Новые имена
+ap_remote/ap_identity — целевые, пакетов с этими именами пока не создано. Текущие
+SenderStore/FileStore/Identity и pairing code должны перемещаться/обобщаться с
+сохранением device/controller roles, форматов, ключей и тестов, а не переписываться.
+Не выделять семь процессов или семь crates без реальной необходимости.
