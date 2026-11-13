@@ -534,6 +534,10 @@ mod tests {
     }
 
     async fn loopback(with_local: bool, with_routes: bool) {
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_env_filter("ap_audio_stream=debug,timesync::ntp=debug,airplay::media=debug")
+            .try_init();
         use crate::{media::Player, session::Context as ReceiverContext};
         use audio::Sink;
         use device::{DeviceInfo, Features};

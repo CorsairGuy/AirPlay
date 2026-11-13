@@ -41,12 +41,13 @@ struct PeerRequest {
 }
 /// Prepare the union before mutating engine or ownership. One group's removal
 /// must not withdraw another group's shared peer; port conflicts fail closed.
+type PeerUnion = (BTreeMap<u128, Vec<Peer>>, BTreeMap<IpAddr, Ports>);
 fn peer_union(
     bind: IpAddr,
     owners: &BTreeMap<u128, Vec<Peer>>,
     owner: u128,
     peers: Vec<Peer>,
-) -> io::Result<(BTreeMap<u128, Vec<Peer>>, BTreeMap<IpAddr, Ports>)> {
+) -> io::Result<PeerUnion> {
     peer_table(bind, &peers)?;
     let mut next = owners.clone();
     if peers.is_empty() {

@@ -544,15 +544,13 @@ impl Engine {
             self.snapshot.link = probe.latest(now);
         }
         if let Some(follower) = self.follower.as_mut() {
-            match follower
+            if follower
                 .receive(peer, packet, now)
                 .map_err(io::Error::other)?
+                == follower::Event::Step
             {
-                follower::Event::Step => {
-                    self.invalidate(now)?;
-                    return Ok(Vec::new());
-                }
-                _ => {}
+                self.invalidate(now)?;
+                return Ok(Vec::new());
             }
             self.refresh(now, own)?;
         }
