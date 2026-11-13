@@ -186,7 +186,26 @@ impl PtpGroup {
         outputs: GroupOutputs<impl SessionPreparer>,
         sink: impl sender::LocalSink,
     ) -> Result<sender::continuous_source::End> {
+        let local_lead = source.latency;
+        self.run_card_pcm_with_local_lead(card, source, outputs, sink, local_lead)
+            .await
+    }
+    /// Calibrate local presentation without changing network scheduling tolerance,
+    /// source epoch, RTP timestamps or receiver lead. The adapter owns calibration.
+    pub async fn run_card_pcm_with_local_lead(
+        self,
+        card: Arc<crate::card::Card>,
+        source: RawPcmSource<impl tokio::io::AsyncRead + Unpin>,
+        outputs: GroupOutputs<impl SessionPreparer>,
+        sink: impl sender::LocalSink,
+        local_lead: std::time::Duration,
+    ) -> Result<sender::continuous_source::End> {
         use sender::continuous_source::{self, End};
+        if !(std::time::Duration::from_millis(250)..=std::time::Duration::from_secs(10))
+            .contains(&local_lead)
+        {
+            bail!("invalid calibrated local lead");
+        }
         if !(1..=512).contains(&source.queue_capacity) {
             bail!("invalid PCM input capacity");
         }
@@ -197,13 +216,8 @@ impl PtpGroup {
         let reader = continuous_source::read_pcm(source.reader, pcm, controls, self.stop());
         let source_control =
             ContinuousSource::for_card(&card, timeline, MediaClock::at(source.epoch, 0), input);
-        let pipeline = self.run_card_continuous_with_local(
-            card,
-            source_control,
-            outputs,
-            sink,
-            source.latency,
-        );
+        let pipeline =
+            self.run_card_continuous_with_local(card, source_control, outputs, sink, local_lead);
         tokio::pin!(reader, pipeline);
         tokio::select! {
             biased;
@@ -556,6 +570,10 @@ mod tests {
         }
         impl sender::LocalSink for HostSink {
             async fn write(&mut self, packet: Arc<AudioPacket>, at: Instant) -> Result<()> {
+                assert_eq!(
+                    at.duration_since(packet.produced_at()),
+                    Duration::from_millis(375)
+                );
                 self.inner.write(packet, at).await
             }
             async fn finish(&mut self) -> Result<()> {
@@ -593,7 +611,7 @@ mod tests {
             };
             let result = tokio::time::timeout(
                 Duration::from_secs(2),
-                group.run_card_pcm_with_local(
+                group.run_card_pcm_with_local_lead(
                     card,
                     source,
                     outputs,
@@ -605,6 +623,7 @@ mod tests {
                         },
                         released: released.clone(),
                     },
+                    Duration::from_millis(375),
                 ),
             )
             .await
