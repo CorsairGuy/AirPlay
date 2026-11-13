@@ -151,3 +151,15 @@ command authority and wire loss into clock/relay termination. UDP send success
 is not an acknowledgement; abrupt cancellation relies on daemon lease expiry.
 No device update, listener319/320 startup or new clock source is introduced.
 Validation: 108 audio-only application tests (including both NQPTP controller loopback tests) and scoped Clippy passed offline on Pi; no device installation.
+
+### 2026-11-13 — external clock lifecycle moved into the core
+
+The Linux `external_clock::ExternalClock` host lifecycle (reader/acquisition,
+publication, group creation and acquisition scheduler) now resides in the core.
+The Station adapter only reexports it and no longer directly depends on clock
+or timesync. `maintain_with_control` additionally revokes acquisition when the
+NQPTP command worker is lost. This preserves the independently attested Selection
+requirement and does not create a daemon, PTP listener or device backend.
+Remaining composition: installed-daemon attestation/exclusive authority, source
+acquisition, renderer readiness/guard and frontend/package activation.
+Validation: 112 audio-only core application tests and scoped Clippy passed offline on Pi, including acquisition stop/failure and command-owner loss revocation. No device install.

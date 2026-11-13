@@ -11,6 +11,8 @@ pub mod continuous_control;
 pub mod discovery_catalog;
 pub mod discovery_feed;
 pub mod events;
+#[cfg(target_os = "linux")]
+pub mod external_clock;
 pub mod local_process;
 pub mod media;
 #[cfg(test)]
