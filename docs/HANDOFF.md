@@ -83,3 +83,13 @@ code, preserve profile-specific state and test parity before removing legacy.
 CLI a8b32e9: airplay without subcommand now starts daemon; serve is removed without
 alias. Help/version/send etc remain explicit commands. No binary split/airplayd.
 Optional systemd unit would ExecStart=/path/airplay; none installed on Station.
+
+External acquisition owner (2026-11-13): timesync::external_acquisition combines
+read-only Reader, measured bracket/rate estimation and sole Publisher. Explicit
+host poll validates independent selection/daemon/role evidence before/after I/O;
+errors latch revocation. Torn/unpublished SHM alone may retry without extending
+freshness. Host must schedule on a blocking/acquisition path, supply validated
+platform error bounds and actual evidence, and await first publication before
+creating an external PtpGroup. No tasks, PTP sockets, peer control or activation
+are started. Remaining: real daemon evidence/peer-control owner, Station frontend,
+existing renderer guard handoff and acceptance. This is not installed on Station.

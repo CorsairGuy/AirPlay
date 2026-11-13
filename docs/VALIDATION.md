@@ -150,3 +150,14 @@ commands do not; removed serve is rejected. Existing audio-only option rejection
 also passes. No daemon, socket or audio output was started by tests. Default-feature
 CLI build and full GitHub CI were not rerun. Examples and CI interop launch updated.
 Log: coordinator outputs/CLI-DEFAULT-DAEMON-CHECK-20261113.log.
+
+## External acquisition — 2026-11-13
+
+Pi isolated Docker, offline, no device/socket/audio startup: 41 timesync library
+ tests passed including daemon-instance/epoch/role mismatch and permanent loss
+on attestation failure. Initial implementation plus existing pipeline passed all
+104 audio-only application tests; final change only adds a timing test (41 vs40).
+Logs: outputs/EXTERNAL-ACQUISITION-CHECK-20261113.log and
+outputs/EXTERNAL-ACQUISITION-FINAL-CHECK-20261113.log in the local workspace.
+These are fixture/regression tests, not live NQPTP daemon attestation or physical
+synchronization measurements. No Station adapter pin/backend changed.

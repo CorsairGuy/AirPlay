@@ -5,6 +5,8 @@
 //! работает вхолостую, и плеер играет по своим часам, без мультирума.
 
 pub mod engine;
+#[cfg(target_os = "linux")]
+pub mod external_acquisition;
 pub mod external_media;
 pub mod media;
 #[cfg(target_os = "linux")]

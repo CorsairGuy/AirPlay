@@ -55,3 +55,9 @@ Workspace:24 пакета, а не24 службы; три каталога servi
 Companion пока заглушка; Coordinator — существующая библиотечная модель и runtime-части.
 Цель: один daemon `airplay` с семью логическими компонентами и включаемыми профилями.
 [Карта кода, владельцев протоколов, дублей и имён](COMPONENTS-AND-NAMING.md).
+
+External acquisition: `timesync::external_acquisition::Acquisition` now joins the
+ordered NQPTP reader, two-observation RAW/Instant estimator and cached publisher.
+Caller supplies evidence before/after every bounded poll; failures revoke the
+selection. It does not attest a daemon from SHM, manage peers, start a task/socket
+or enable the Station backend. Actual host evidence and scheduling remain required.
