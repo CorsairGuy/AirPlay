@@ -13,3 +13,13 @@ Guard относится к кадрам, уже принятым этим API. 
 EOF дренирует pipeline и вызывает finish sink; отмена/ошибка освобождает sink через Drop без проигрывания накопленной очереди. Ошибка чтения или sink, stop и окончание pipeline отменяют остальные ветки; host дожидается cleanup, включая reader и Card observer. Закрытие consumer означает Stopped. Для штатного завершения требуется stop + await. Маршруты, восстановление прямого вывода, ALSA latency/gain и выбранный native/AirPlay/BT источник остаются у адаптера; голос Алисы в этот content tap не включается.
 
 Это opt-in библиотечная композиция. Station outputs.rs не переключён, CLI send остаётся отдельным NTP-путём. Следующая интеграция — запуск этого API в адаптере с существующими tap/renderer/route guards, метаданными и фактическим shared-clock owner.
+
+
+## Adapter calibration (2026-11-13)
+
+`PtpGroup::run_card_pcm_with_local_lead` accepts a separate local presentation lead
+(250ms..10s). `RawPcmSource::latency` continues to set source scheduling tolerance;
+local calibration does not shift its epoch, RTP/PTP stamps or receiver session lead.
+The original `run_card_pcm_with_local` remains a wrapper using equal leads.
+A caller still supplies negotiated receiver configuration and a qualified shared-clock
+group; this API does not start clocks, select targets, mute routes or prove readiness.

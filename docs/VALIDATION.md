@@ -59,3 +59,13 @@ D9/L-83: кросс-корреляция известного sweep/импуль
 Bit-exact проверяется отдельно от временной синхронизации: lossless вход/выход без gain/ASRC,
 побитовое сравнение и объяснение преобразований; нулевой null-test сам по себе не доказывает timing.
 Добавить долгий RTP wraparound, packet loss, feedback под нагрузкой и матрицу iOS×приложение×profile.
+
+
+## Calibrated PCM host — 2026-11-13
+
+Source commit `91fa31c`: 95 application library tests passed on Pi/Linux in an offline
+container (`cargo test -p airplay --lib --no-default-features --locked --offline`).
+The raw-PCM host test uses 250ms source lead and asserts local write deadlines at
+packet.produced_at()+375ms; EOF drain and malformed-tail Drop cleanup remain checked.
+No real remote, NQPTP bridge, ALSA timing, Station installation or acoustic synchronization
+was tested. Log: coordinator outputs/CORE-CALIBRATED-HOST-CHECK-20261113.log.
