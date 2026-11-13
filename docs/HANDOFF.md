@@ -65,3 +65,13 @@ still needs a separately permitted read-only snapshot before activation.
 Next work: combine acquisition, independent daemon/role evidence and qualified
 external timeline/lease; keep existing NQPTP sole319/320 owner. Adapter remains
 pinned to2a2c94f until the new clock API is actually integrated/tested there.
+
+
+1d112ca connects cached external timeline to PtpProducer and group lease (39 timing,
+104 application tests; limits in VALIDATION). Next: actual attested owner combining
+reader/correlation scheduling and legacy peer control, then Station frontend/guards.
+Re-audit naming: COMPONENTS-AND-NAMING.md inventories24 packages and recommends
+6 logical runtime roles within1 daemon. Companion is a stub, existing Coordinator
+is not a daemon; MRP wire/schema/frame/server duplicates are priority consolidation.
+Do not implement a second protocol or independent coordinator. Move/reuse existing
+code, preserve profile-specific state and test parity before removing legacy.

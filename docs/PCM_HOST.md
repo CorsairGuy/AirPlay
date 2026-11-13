@@ -23,3 +23,10 @@ local calibration does not shift its epoch, RTP/PTP stamps or receiver session l
 The original `run_card_pcm_with_local` remains a wrapper using equal leads.
 A caller still supplies negotiated receiver configuration and a qualified shared-clock
 group; this API does not start clocks, select targets, mute routes or prove readiness.
+
+
+External daemon profile: publish qualified cached observations through
+`timesync::external_media`, construct `PtpGroup::new_external`, then use the same
+raw-PCM/local pipeline. Owner supplies attested role/daemon instance, scheduled
+reader/correlation updates and timing-peer control. No synthetic local Service
+snapshot or second319/320 listener. Adapter default/frontend remain unchanged.

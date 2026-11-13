@@ -46,3 +46,6 @@
 Корневые AIRPLAY-PROTOCOL.md и AIRPLAY-ARCHITECTURE-AND-MIGRATION.md были старым аудитом30октября. Их исходные версии сохранены в history; актуальные тексты — PROTOCOL.md и ARCHITECTURE.md. Прежний HANDOFF также в history; новый — HANDOFF.md. Исследование зеркалирования перенесено в docs без изменения результатов опытов. Даты в истории не заменены на дату обновления. README компонентов и лицензионные/provenance файлы остаются возле компонентов.
 
 - [Continuous relay: перенесённое состояние источника и оставшаяся интеграция](CONTINUOUS_RELAY.md)
+
+
+[Компоненты, протоколы, имена и устранение дублей](COMPONENTS-AND-NAMING.md) — инвентаризация workspace и целевая runtime-схема.

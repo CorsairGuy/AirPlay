@@ -2,7 +2,7 @@
 
 Экспериментальное универсальное ядро AirPlay на Rust: приём аудио, AP2 realtime PCM-отправитель, timing, MediaRemote и отдельные video/mirroring-компоненты. Это набор реализованных профилей с ограничениями, а не полная замена HomePod или обещание производительности на любом железе.
 
-Актуально12ноября2026: [состояние реализации](docs/STATUS.md), [архитектура](docs/ARCHITECTURE.md), [протокол](docs/PROTOCOL.md), [проверки](docs/VALIDATION.md).
+Актуально13ноября2026: [состояние реализации](docs/STATUS.md), [архитектура](docs/ARCHITECTURE.md), [протокол](docs/PROTOCOL.md), [проверки](docs/VALIDATION.md).
 
 ## Структура
 
@@ -10,13 +10,13 @@
 | --- | --- | --- |
 | `bin/airplay` | `airplay` | демон (`airplay serve`) и утилита управления (`airplay status`, `list`, `send`…) в одном бинарнике |
 | `services/timesync` | `timesync` | единые часы PTP/NTP |
-| `services/mediaserver` | `mediaserver` | конвейеры звука и видео |
-| `services/mediaremote` | `mediaremote` | карточка «Сейчас играет», пульт и громкость по MRP |
+| `services/mediaserver` | `mediaserver` | пока заглушка, pipeline code находится в других модулях |
+| `services/mediaremote` | `mediaremote` | альтернативный MRP server; активная карточка пока в mrp_service приложения |
 | `crates/<имя>` | `ap_<имя>` | библиотеки протоколов и медиа |
 
-Библиотеки называются `ap_<имя>`, а в коде подключаются без префикса: `use rtsp::…`. По умолчанию все службы работают в одном процессе `airplay`.
+Библиотеки называются `ap_<имя>`, а в коде подключаются без префикса: `use rtsp::…`. По умолчанию один процесс `airplay`; каталоги services не означают отдельные демоны. Companion пока заглушка; Coordinator — библиотечная модель. Целевая схема и обнаруженные дубли: [компоненты и имена](docs/COMPONENTS-AND-NAMING.md).
 
-Библиотеки: `base`, `rtsp`, `pair`, `crypto`, `fairplay`, `mdns`, `device`, `clock`, `rtp`, `audio_stream`, `mirror`, `hls`, `mrp`, `companion`, `codec`, `audio`, `video`, `capture`, `ipc`.
+Библиотеки: `base`, `rtsp`, `pair`, `crypto`, `fairplay`, `mdns`, `device`, `clock`, `rtp`, `sender`, `audio_stream`, `mirror`, `hls`, `mrp`, `companion`, `codec`, `audio`, `video`, `capture`, `ipc`.
 
 ## Сборка
 

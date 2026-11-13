@@ -18,7 +18,7 @@
 
 Source adapter → один paced PCM producer/MediaClock → immutable AudioPacket → SessionPool + optional local renderer. Входящие и исходящие ключи, nonce, RTP counters и session IDs независимы; общего clock/media epoch недостаточно для объявления native group adoption.
 
-PtpGroup получает MasterTimeline существующей общей PTP-службы. with_clock_service проверяет идентичность watch-канала, принимает отдельный fresh owner token и явные timing ports. Выбор устройств задаёт полный список физически выбранных адресатов новым connection plans. Работающие сессии обновляют SETPEERS без перезапуска. Реальный running состав обновляет интерес группы в общей службе; освобождение одного интереса сохраняет адресаты других потребителей.
+PtpGroup получает MasterTimeline существующей общей PTP-службы либо явно опубликованный qualified external timeline через new_external. with_clock_service проверяет идентичность watch-канала, принимает отдельный fresh owner token и явные timing ports. Выбор устройств задаёт полный список физически выбранных адресатов новым connection plans. Работающие сессии обновляют SETPEERS без перезапуска. Реальный running состав обновляет интерес группы в общей службе; освобождение одного интереса сохраняет адресаты других потребителей.
 
 Потеря корректных часов/эпохи или сбой local renderer останавливает передачу группы. Общая PTP-служба продолжает жить. При нормальном EOF применяется drain; при сбое — stop и bounded cleanup. Hard abort не заменяет signal stop + await. Адаптер восстанавливает прямой локальный маршрут существующими механизмами.
 
@@ -26,7 +26,7 @@ PtpGroup получает MasterTimeline существующей общей PTP
 
 - AP1 classic, AP2 realtime/buffered, control-only MRP и mirroring не смешиваются неявно.
 - AP2 timing выбирается явно: ядро имеет NTP и PTP; групповой профиль использует PTP. Обязательность NTP для всех AP2-устройств по закрытой спецификации Apple не заявляется. In-session fallback отсутствует.
-- Общая служба может жить без групп. MasterTimeline TX пока ограничен qualified local master; полноценный follower TX/RAW bridge не объявлены готовыми.
+- Общая служба может жить без групп. MasterTimeline TX ограничен qualified local master; cached external timeline отдельно допускает attested sender-master observations. Live owner/attestation/peer-control ещё не подключены; полноценный follower TX не объявлен готовым.
 - Audio-only профиль перенесён выборочно из старого черновика: cargo -p airplay --no-default-features исключает видео-зависимости, сохраняя NTP realtime audio. Default включает mirroring. См. BUILD_PROFILES.md.
 - Ни Session Running, ни SETUP/SETPEERS ACK, ни MRP-галочка не доказывают звук, синхронизацию или принятие топологии.
 
@@ -75,3 +75,19 @@ patched-master refresh marker, which is rewritten on keepalive. The owner-attest
 epoch lower bound remains separate and stable. Do not infer epoch from marker
 refresh or infer patch support from ABI. Remaining integration: attestation and
 scheduling owner, external timeline/lease, peer-control ownership and frontend.
+
+
+## External timeline → producer/lease
+
+`external_media::Timeline` держит только cached observations и Qualifier; producer
+не читает SHM и не ждёт clock lock. Единственный Publisher обновляет наблюдения;
+его Drop/явный revoke или ошибка qualification навсегда отзывает эту selection.
+`PtpGroup::new_external` принимает только уже опубликованный timeline; lease следит
+за publisher loss, upstream stop и тихим истечением свежести. Отмена одной группы
+не отзывает общий publisher и не выключает NQPTP. External group нельзя присоединить
+к отдельной Service через with_clock_service. Владение legacy peers остаётся явной
+обязанностью owner/preparer; daemon commands не добавлены и готовый host не заявлен.
+
+Runtime-разбиение/названия и устранение существующих повторных MRP-реализаций —
+[COMPONENTS-AND-NAMING](COMPONENTS-AND-NAMING.md). Это заменяет старое представление
+«три каталога services = три службы»; protocol module не становится daemon автоматически.

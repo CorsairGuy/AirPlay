@@ -119,3 +119,23 @@ Provenance: declared GPL-2.0, layout/ordering facts only, new code written indep
 Actual clock_gettime sampler is compiled; estimation tests use synthetic brackets,
 not hardware accuracy measurements. No installed Station binary/ABI, live SHM,
 role attestation, acoustic sync or full frontend transition was checked.
+
+
+## External timeline/lease integration — 2026-11-13
+
+Source1d112ca:39 timesync and104 audio-only application library tests passed
+on Pi/Linux in offline container. Separate commands run timesync first, then
+`cargo test -p airplay --lib --no-default-features --locked --offline`.
+Cached external timeline drives a real PtpProducer packet with expected PTP value
+and unchanged PCM/Instant. Tests cover unpublished construction, owner loss,
+permanent invalidation, group cancellation preserving shared owner and silent
+expiry with loss-watch read guard released before revocation (deadlock regression).
+Log: coordinator outputs/EXTERNAL-TIMELINE-INTEGRATION-CHECK-20261113.log.
+
+An earlier full application attempt failed the existing NTP local/remote loopback
+with zero exact captured pairs; the unchanged assertion passed in the repeat run.
+Root cause is not established; do not interpret the repeat as a diagnosed/fixed
+NTP timing issue. No device audio/SHM or native group adoption was tested.
+
+Architecture inventory is static source/manifests/call-site analysis, not runtime
+service enumeration on the installed Station and not proof every source line is correct.

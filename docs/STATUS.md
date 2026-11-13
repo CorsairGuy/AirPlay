@@ -1,4 +1,4 @@
-# Текущее состояние — 12 ноября 2026
+# Текущее состояние — 13 ноября 2026
 
 База последнего полного библиотечного прогона: `dd23261f2b8eebd8cae9b9c211361ba698c57a08`. Более поздние scoped-проверки continuous pipeline перечислены в [VALIDATION.md](VALIDATION.md). Дата документа не означает новую установку на устройство.
 
@@ -11,7 +11,7 @@
 | Приём аудио | AP2 realtime96 и buffered103; codec/format выбираются сессией; receiver events и команды источнику | Полная матрица отправителей/кодеков/ошибок не подтверждена; classic AP1 audio остаётся отдельным пробелом |
 | Отправка | Экспериментальный realtime96 PCM S16BE/44.1kHz/stereo; HAP, RTSP, RTP/crypto/retransmit | Не buffered TX, не AP1 TX и не готовый универсальный релиз |
 | Timing TX | Явные NTP или PTP; PtpPlan/SETPEERS/d7, общий MediaClock | Для группового профиля выбран PTP; явный отказ PTP не вызывает скрытый NTP fallback |
-| Общие часы | Одна внешне созданная Service с одним источником времени/парой сокетов; union адресатов разных владельцев | Не отдельный PTP на группу. MasterTimeline сейчас принимает квалифицированный local-master профиль; follower/внешний RAW bridge не объявлены готовыми TX-профилями |
+| Общие часы | Одна внешне созданная Service с одним источником времени/парой сокетов; union адресатов разных владельцев | Не отдельный PTP на группу. MasterTimeline принимает local-master; новый cached external timeline подключён к producer/lease, но daemon attestation, sampling owner и peer-control/frontend ещё не связаны; follower TX не объявлен готовым |
 | Группа TX | SessionPool, add/remove, реальные running members, live SETPEERS, общий producer, PtpGroup/local supervision | SETUP/SETPEERS ACK и Running не доказывают native adoption или акустическую синхронность |
 | Отмена | Потеря роли/эпохи/свежести, stop и local failure завершают передачу; finish освобождает интерес группы | Общая PTP-служба не выключается. Stop + await обязателен для гарантированного graceful cleanup; hard abort не равнозначен |
 | Pairing | Transient, PIN setup, постоянные credentials/pair-verify, store и MRP59/60/61 helper | MRP reader → request context → worker/PTP wrapper → явная InteractivePinForUnpaired policy соединены; сквозной MRP/PIN/persistent RTSP loopback проверен; iPhone interop ещё нужен |
@@ -47,3 +47,11 @@
 - [Протокол и границы достоверности](PROTOCOL.md), [wire reference](AIRPLAY-WIRE-SPEC.md)
 - [Журнал переносов](STATION_MIGRATION_20261111.md) — хронология, не текущий TODO.
 - [Проверки](VALIDATION.md), [индекс документов](README.md), [передача работы](HANDOFF.md).
+
+
+## Runtime-схема и имена
+
+Workspace:24 пакета, а не24 службы; три каталога services не равны трём демонам.
+Companion пока заглушка; Coordinator — существующая библиотечная модель и runtime-части.
+Цель: один daemon `airplay` с шестью логическими компонентами и включаемыми профилями.
+[Карта кода, владельцев протоколов, дублей и имён](COMPONENTS-AND-NAMING.md).
