@@ -180,3 +180,17 @@ Other portability fixes: short private Unix-socket fixture paths, explicit macOS
 loopback alias for the distinct-peer union fixture, a representable pre-origin
 Instant test delta, and answering fresh PTP probes instead of only a possibly
 expired first request. None is a physical clock/sound acceptance test.
+
+Peer-owner binding2026-11-13: core07bf07c adds ExternalPeerControl to the existing
+qualified group preparer lifecycle; explicit pinned Domain/owner accompanies
+membership and withdrawal. Offline workspace all-target Clippy,41 timing tests
+and106 audio-only application tests passed. External/local binding rejection,
+nonzero owner, updates and finish withdrawal are covered. No live NQPTP command
+controller/daemon attestation is claimed. A macOS fixed-burst warmup fixture was
+then changed to drive evidence until the same follower/mapping criterion is met,
+with the original2s deadline; final CI remains authoritative.
+
+Unified manual acceptance now lives in TESTING.md; historical hardware results
+are not carried over to a new core installation. The13November run identified
+initial AirPlay LED, volume feedback, wrong Bluetooth command routing, group
+button label and content interruption during Alice listening as separate defects.

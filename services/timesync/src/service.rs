@@ -216,14 +216,22 @@ mod tests {
         .await;
         let mut remote = Master::new(Domain::new(50, 1).unwrap()).unwrap();
         remote.set_peers(&["127.0.0.1".parse().unwrap()]).unwrap();
-        for n in 0..4 {
-            emit(&mut remote, n, &event, &general, addresses).await;
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        let foreign = wait_for(&mut status, |s| {
-            s.selection.role == Role::Follower(peer.ip) && s.mapping.is_some()
+        // Drive remote evidence until it is actually observed. A fixed burst of
+        // datagrams across separate sockets can miss election/warmup on macOS.
+        let foreign = timeout(Duration::from_secs(2), async {
+            let mut n = 0;
+            loop {
+                emit(&mut remote, n, &event, &general, addresses).await;
+                n += 1;
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                let value = *status.borrow_and_update();
+                if value.selection.role == Role::Follower(peer.ip) && value.mapping.is_some() {
+                    break value;
+                }
+            }
         })
-        .await;
+        .await
+        .expect("fresh remote evidence must create a follower mapping");
         assert_eq!(foreign.quality, Some(Quality::OneWay));
         assert_eq!(foreign.selection.domain.unwrap().id(), 50);
         assert_ne!(foreign.selection.domain, local.selection.domain);

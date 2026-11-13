@@ -109,3 +109,12 @@ VALIDATION and current GitHub Actions for the final full matrix.
 Names agreed: timesync for both component and package; media::rx, media::tx,
 media::output; common codec. Remove ap_ from library/target package names only
 at the later coordinated rename, not now.
+
+Unified test queue/results: TESTING.md (both repositories,73 Markdown sources).
+Fresh installed baseline: native Alice and two-iPhone AirPlay/card/pause/disconnect
+work; initial AirPlay white LED, iPhone volume feedback and physical control source
+routing have failures. Home Theater selection initially failed route verification;
+authorized one-second Music pulse + user confirmation restored255/255 and then
+created only verified-music for the current boot. Group sound works and is aligned
+by ear; label remains Station-only; gestures hold; Alice listening interrupts remote
+content. Do not erase these as passed by offline core tests. No new binary installed.
