@@ -7,6 +7,7 @@
 //! «будящего» Announce для замолчавших часов.
 
 pub mod domain;
+pub mod external;
 mod filter;
 pub mod follower;
 pub mod measurement;
