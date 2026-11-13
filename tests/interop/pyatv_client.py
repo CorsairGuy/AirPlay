@@ -4,7 +4,7 @@ MRP из pyatv.
 Запуск (нужны pyatv и srptools 1.0.1, на которую рассчитан pyatv):
 
     pip install pyatv "srptools==1.0.1"
-    airplay serve --port 7123 --pin 1234 --no-mdns --mrp &
+    airplay --port 7123 --pin 1234 --no-mdns --mrp &
     python tests/interop/pyatv_client.py 127.0.0.1 7123 1234
 """
 

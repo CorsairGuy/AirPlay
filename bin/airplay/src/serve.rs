@@ -1,4 +1,4 @@
-//! `airplay serve`: приём соединений на порту 7000 и объявление в Bonjour.
+//! `airplay`: приём соединений на порту 7000 и объявление в Bonjour.
 
 use std::path::PathBuf;
 use std::sync::Arc;

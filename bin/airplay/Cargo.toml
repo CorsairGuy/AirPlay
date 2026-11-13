@@ -1,6 +1,6 @@
 [package]
 name = "airplay"
-description = "Демон и утилита AirPlay: `airplay serve` запускает транспорт и службы, остальные подкоманды им управляют."
+description = "Демон и утилита AirPlay: `airplay` запускает транспорт и службы, остальные подкоманды им управляют."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

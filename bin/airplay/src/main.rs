@@ -1,6 +1,6 @@
 //! Демон и утилита AirPlay в одном бинарнике.
 //!
-//! `airplay serve` запускает демон (по умолчанию все службы в этом процессе),
+//! `airplay` запускает демон (по умолчанию все службы в этом процессе),
 //! остальные подкоманды управляют работающим демоном через `ipc`.
 
 use std::process::ExitCode;
@@ -14,10 +14,9 @@ use airplay::{audio_stream, device, serve, state};
 use tracing_subscriber::EnvFilter;
 
 const USAGE: &str = "\
-Использование: airplay <команда>
+Использование: airplay [параметры демона] | airplay <команда>
 
 Команды:
-  serve     запустить демон
   status    состояние демона и активные сессии
   list      AirPlay-устройства в сети
   send      отправить PCM-звук на приёмники (realtime NTP; без автопереподключения)
@@ -26,7 +25,9 @@ const USAGE: &str = "\
   log       логи и отладка
   version   версия
 
-Параметры serve:
+Без подкоманды запускается демон.
+
+Параметры демона:
   --name ИМЯ      имя в списке AirPlay (по умолчанию имя компьютера)
   --port ПОРТ     порт RTSP (по умолчанию 7000)
   --pin PIN       PIN для сопряжения (по умолчанию случайный, пишется в лог)
@@ -42,7 +43,7 @@ const USAGE: &str = "\
   --mirror        режим зеркалирования экрана вместо звука AirPlay 2
   --video-dump ПУТЬ
                   писать видео зеркалирования в файл H.264 или H.265 (Annex B);
-                  «-» — в stdout: airplay serve --mirror --video-dump - | ffplay -f h264 -
+                  «-» — в stdout: airplay --mirror --video-dump - | ffplay -f h264 -
                   (H.265: ffplay -f hevc -)
   --video-decoder ДЕКОДЕР
                   декодировать видео зеркалирования и писать в лог к/с и
@@ -210,14 +211,23 @@ fn parse_serve(args: &[String]) -> Result<serve::Options, String> {
     Ok(opts)
 }
 
+fn starts_daemon(args: &[String]) -> bool {
+    match args.first().map(String::as_str) {
+        None => true,
+        Some(value) => {
+            value.starts_with('-') && !matches!(value, "--help" | "-h" | "--version" | "-V")
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        Some("serve") => {
-            let opts = match parse_serve(&args[1..]) {
+        _ if starts_daemon(&args) => {
+            let opts = match parse_serve(&args) {
                 Ok(o) => o,
                 Err(e) => {
-                    eprintln!("airplay serve: {e}\n\n{USAGE}");
+                    eprintln!("airplay: {e}\n\n{USAGE}");
                     return ExitCode::from(2);
                 }
             };
@@ -236,7 +246,7 @@ fn main() -> ExitCode {
             match runtime.block_on(serve::run(opts)) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
-                    eprintln!("airplay serve: {e:#}");
+                    eprintln!("airplay: {e:#}");
                     ExitCode::FAILURE
                 }
             }
@@ -363,6 +373,29 @@ fn dump_sink(path: &str) -> Box<dyn mirror::VideoSink> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn daemon_is_default_and_old_subcommand_is_rejected() {
+        assert!(starts_daemon(&[]));
+        assert!(starts_daemon(&["--port".into(), "7123".into()]));
+        for value in [
+            "serve",
+            "send",
+            "status",
+            "version",
+            "help",
+            "--help",
+            "-h",
+            "--version",
+            "-V",
+        ] {
+            assert!(!starts_daemon(&[value.into()]));
+        }
+        assert!(parse_serve(&["serve".into()]).is_err());
+        assert_eq!(
+            parse_serve(&["--port".into(), "7123".into()]).unwrap().port,
+            7123
+        );
+    }
 
     #[cfg(not(feature = "mirroring"))]
     #[test]
