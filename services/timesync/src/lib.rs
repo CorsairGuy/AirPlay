@@ -12,6 +12,7 @@ pub mod media;
 #[cfg(target_os = "linux")]
 pub mod nqptp_reader;
 pub mod ntp;
+pub mod peer_interests;
 #[cfg(target_os = "linux")]
 pub mod raw_correlation;
 pub mod sender;
