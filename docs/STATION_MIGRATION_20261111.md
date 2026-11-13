@@ -163,3 +163,15 @@ requirement and does not create a daemon, PTP listener or device backend.
 Remaining composition: installed-daemon attestation/exclusive authority, source
 acquisition, renderer readiness/guard and frontend/package activation.
 Validation: 112 audio-only core application tests and scoped Clippy passed offline on Pi, including acquisition stop/failure and command-owner loss revocation. No device install.
+
+### 2026-11-13 — source-only PCM process host
+
+`source_process::Capture` provides explicit capture-child ownership, an AsyncRead
+PCM pipe, nonzero-exit detection at EOF and bounded stop/reap before replacement.
+It starts no decoder/device by default and performs no routing or attenuation.
+The Station adapter maps native/AirPlay/BT to their existing source-only rings,
+passes /dev/null for remote duck, and composes capture with the existing core
+renderer/Card/group pipeline through RendererProfile::run_tap. Hardware tap
+installation, source selection/control events and guard readiness are still
+host responsibilities. The default legacy backend is unchanged.
+Validation: 114 core audio-only application tests and scoped Clippy passed offline, including failed capture EOF and stop/reap. No installed capture/routes changed.
