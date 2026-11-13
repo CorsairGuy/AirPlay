@@ -81,218 +81,6 @@ pub struct Engine {
     physical_sample: Option<(u64, u64)>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use clock::{domain::LocalClock, ptp_sender::Master};
-    fn local() -> LocalClock {
-        LocalClock::new(1).unwrap()
-    }
-    fn own(ns: u64) -> Reading {
-        Domain::new(100, 1).unwrap().reading(ns + 10_000_000_000)
-    }
-    fn peer() -> IpAddr {
-        "192.0.2.1".parse().unwrap()
-    }
-    fn engine() -> Engine {
-        Engine::new(
-            Domain::new(100, 1).unwrap(),
-            local().at(0),
-            &[peer()],
-            role::Config {
-                policy: role::Policy::Elect,
-                settle_ns: 10,
-                announce_lease_ns: 10_000_000_000,
-                min_announces: 2,
-            },
-            follower::Config {
-                pairing_lease_ns: 100_000_000,
-                mapping_lease_ns: 2_000_000_000,
-                warmup_samples: 2,
-                step_threshold_ns: 50_000_000,
-            },
-        )
-        .unwrap()
-    }
-    #[test]
-    fn membership_updates_preserve_master_epoch_and_reject_invalid_input() {
-        let mut e = engine();
-        e.tick(local().at(10), own(10)).unwrap();
-        let selected = e.snapshot().selection;
-        assert_eq!(selected.role, Role::Master);
-        let next: IpAddr = "192.0.2.2".parse().unwrap();
-        e.set_peers(&[next], local().at(11), own(11)).unwrap();
-        assert_eq!(e.snapshot().selection, selected);
-        let batch = e.tick(local().at(12), own(12)).unwrap();
-        assert!(!batch.is_empty());
-        assert!(batch.iter().all(|packet| packet.datagram.peer == next));
-        assert!(
-            e.set_peers(&["224.0.0.1".parse().unwrap()], local().at(13), own(13))
-                .is_err()
-        );
-        assert_eq!(e.peers, vec![next]);
-        assert_eq!(e.snapshot().selection, selected);
-        e.set_peers(&[], local().at(14), own(14)).unwrap();
-        assert_eq!(e.snapshot().selection, selected);
-        assert!(e.tick(local().at(15), own(15)).unwrap().is_empty());
-    }
-    fn remote() -> Master {
-        let mut m = Master::new(Domain::new(50, 1).unwrap()).unwrap();
-        m.set_peers(&[peer()]).unwrap();
-        m
-    }
-    fn deliver(e: &mut Engine, m: &mut Master, n: u64, at: u64) {
-        for d in m.poll(n * 1_000_000_000).unwrap() {
-            e.receive(peer(), &d.bytes, local().at(at), own(at))
-                .unwrap();
-            if let Some(token) = d.completion {
-                let f = m
-                    .complete_send(
-                        &token,
-                        Domain::new(50, 1).unwrap().reading(at + 20_000_000_000),
-                    )
-                    .unwrap();
-                e.receive(peer(), &f.bytes, local().at(at + 10), own(at + 10))
-                    .unwrap();
-            }
-        }
-    }
-    #[test]
-    fn one_engine_yields_revokes_pending_master_and_reacquires_a_new_epoch() {
-        let mut e = engine();
-        let mut m = remote();
-        let batch = e.tick(local().at(10), own(10)).unwrap();
-        let old = batch
-            .into_iter()
-            .find(|d| d.datagram.completion.is_some())
-            .unwrap();
-        let first = e.snapshot().selection.domain.unwrap();
-        deliver(&mut e, &mut m, 0, 1_000_000_000);
-        deliver(&mut e, &mut m, 1, 2_000_000_000);
-        deliver(&mut e, &mut m, 2, 3_000_000_000);
-        let s = e.snapshot();
-        assert_eq!(s.selection.role, Role::Follower(peer()));
-        assert_eq!(s.quality, Some(Quality::OneWay));
-        assert!(s.mapping.is_some());
-        assert_ne!(s.selection.domain, Some(first));
-        assert!(
-            e.complete(&old, local().at(3_000_000_100), own(3_000_000_100))
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            e.tick(local().at(3_000_000_101), own(3_000_000_101))
-                .unwrap()
-                .is_empty()
-        );
-        e.tick(local().at(5_000_000_000), own(5_000_000_000))
-            .unwrap(); // Exact lease boundary.
-        e.tick(local().at(5_000_000_001), own(5_000_000_001))
-            .unwrap();
-        assert_eq!(e.snapshot().selection.role, Role::Follower(peer()));
-        assert!(e.snapshot().mapping.is_none());
-        assert_ne!(e.snapshot().selection.domain, s.selection.domain);
-        assert!(
-            e.tick(local().at(6_000_000_000), own(6_000_000_000))
-                .unwrap()
-                .is_empty()
-        );
-        e.tick(local().at(13_000_000_001), own(13_000_000_001))
-            .unwrap();
-        assert_eq!(e.snapshot().selection.role, Role::Master);
-        assert!(e.snapshot().selection.domain.unwrap().epoch() > first.epoch());
-    }
-    #[test]
-    fn opt_in_probe_measures_neighbor_without_promoting_one_way_mapping() {
-        let mut e = engine();
-        e.enable_probe(probe::Config {
-            interval_ns: 125_000_000,
-            timeout_ns: 100_000_000,
-            measurement: measurement::Config {
-                max_roundtrip_ns: 100_000_000,
-                rate_window_ns: 1_000_000_000,
-                valid_for_ns: 2_000_000_000,
-                timestamp_error_ns: 0,
-            },
-        })
-        .unwrap();
-        let mut m = remote();
-        deliver(&mut e, &mut m, 0, 1_000_000_000);
-        deliver(&mut e, &mut m, 1, 2_000_000_000);
-        deliver(&mut e, &mut m, 2, 3_000_000_000);
-        let at = 3_010_000_000;
-        let batch = e.tick(local().at(at), own(at)).unwrap();
-        assert_eq!(batch.len(), 1);
-        let request = &batch[0];
-        assert!(request.needs_completion());
-        e.complete(request, local().at(at), own(at)).unwrap();
-        let domain = Domain::new(50, 1).unwrap();
-        let response = m
-            .receive(
-                peer(),
-                &request.datagram.bytes,
-                domain.reading(at + 20_002_000_000),
-            )
-            .unwrap();
-        let follow = m
-            .complete_send(
-                response.completion.as_ref().unwrap(),
-                domain.reading(at + 20_003_000_000),
-            )
-            .unwrap();
-        e.receive(
-            peer(),
-            &response.bytes,
-            local().at(at + 5_000_000),
-            own(at + 5_000_000),
-        )
-        .unwrap();
-        e.receive(
-            peer(),
-            &follow.bytes,
-            local().at(at + 5_000_010),
-            own(at + 5_000_010),
-        )
-        .unwrap();
-        let s = e.snapshot();
-        assert_eq!(s.link.unwrap().mean_path_ns, 2_000_000);
-        assert_eq!(s.link.unwrap().neighbor.id(), 50);
-        assert_eq!(s.quality, Some(Quality::OneWay));
-        e.tick(local().at(13_000_000_001), own(13_000_000_001))
-            .unwrap();
-        assert!(e.snapshot().link.is_none());
-        assert!(
-            e.complete(request, local().at(13_000_000_002), own(13_000_000_002))
-                .unwrap()
-                .is_none()
-        );
-    }
-    #[test]
-    fn changing_physical_epoch_revokes_snapshot_and_engine_cannot_resume_old_domain() {
-        let mut e = engine();
-        e.tick(local().at(10), own(10)).unwrap();
-        assert!(
-            e.tick(local().at(11), Domain::new(100, 2).unwrap().reading(0))
-                .is_err()
-        );
-        assert!(e.snapshot().mapping.is_none());
-        assert!(e.tick(local().at(12), own(12)).is_err());
-    }
-    #[test]
-    fn unreported_physical_step_is_also_a_fault_without_relabeling_old_time() {
-        let mut e = engine();
-        e.tick(local().at(10), own(10)).unwrap();
-        assert!(
-            e.tick(
-                local().at(11),
-                Domain::new(100, 1).unwrap().reading(20_000_000_000)
-            )
-            .is_err()
-        );
-        assert!(e.snapshot().mapping.is_none());
-        assert!(e.tick(local().at(12), own(12)).is_err());
-    }
-}
 impl Engine {
     /// Update the common service's aggregate peer set without rebuilding its
     /// physical clock or local-master epoch. Removing a selected foreign master
@@ -627,5 +415,218 @@ impl Engine {
         }
         self.probe_config = Some(config);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clock::{domain::LocalClock, ptp_sender::Master};
+    fn local() -> LocalClock {
+        LocalClock::new(1).unwrap()
+    }
+    fn own(ns: u64) -> Reading {
+        Domain::new(100, 1).unwrap().reading(ns + 10_000_000_000)
+    }
+    fn peer() -> IpAddr {
+        "192.0.2.1".parse().unwrap()
+    }
+    fn engine() -> Engine {
+        Engine::new(
+            Domain::new(100, 1).unwrap(),
+            local().at(0),
+            &[peer()],
+            role::Config {
+                policy: role::Policy::Elect,
+                settle_ns: 10,
+                announce_lease_ns: 10_000_000_000,
+                min_announces: 2,
+            },
+            follower::Config {
+                pairing_lease_ns: 100_000_000,
+                mapping_lease_ns: 2_000_000_000,
+                warmup_samples: 2,
+                step_threshold_ns: 50_000_000,
+            },
+        )
+        .unwrap()
+    }
+    #[test]
+    fn membership_updates_preserve_master_epoch_and_reject_invalid_input() {
+        let mut e = engine();
+        e.tick(local().at(10), own(10)).unwrap();
+        let selected = e.snapshot().selection;
+        assert_eq!(selected.role, Role::Master);
+        let next: IpAddr = "192.0.2.2".parse().unwrap();
+        e.set_peers(&[next], local().at(11), own(11)).unwrap();
+        assert_eq!(e.snapshot().selection, selected);
+        let batch = e.tick(local().at(12), own(12)).unwrap();
+        assert!(!batch.is_empty());
+        assert!(batch.iter().all(|packet| packet.datagram.peer == next));
+        assert!(
+            e.set_peers(&["224.0.0.1".parse().unwrap()], local().at(13), own(13))
+                .is_err()
+        );
+        assert_eq!(e.peers, vec![next]);
+        assert_eq!(e.snapshot().selection, selected);
+        e.set_peers(&[], local().at(14), own(14)).unwrap();
+        assert_eq!(e.snapshot().selection, selected);
+        assert!(e.tick(local().at(15), own(15)).unwrap().is_empty());
+    }
+    fn remote() -> Master {
+        let mut m = Master::new(Domain::new(50, 1).unwrap()).unwrap();
+        m.set_peers(&[peer()]).unwrap();
+        m
+    }
+    fn deliver(e: &mut Engine, m: &mut Master, n: u64, at: u64) {
+        for d in m.poll(n * 1_000_000_000).unwrap() {
+            e.receive(peer(), &d.bytes, local().at(at), own(at))
+                .unwrap();
+            if let Some(token) = d.completion {
+                let f = m
+                    .complete_send(
+                        &token,
+                        Domain::new(50, 1).unwrap().reading(at + 20_000_000_000),
+                    )
+                    .unwrap();
+                e.receive(peer(), &f.bytes, local().at(at + 10), own(at + 10))
+                    .unwrap();
+            }
+        }
+    }
+    #[test]
+    fn one_engine_yields_revokes_pending_master_and_reacquires_a_new_epoch() {
+        let mut e = engine();
+        let mut m = remote();
+        let batch = e.tick(local().at(10), own(10)).unwrap();
+        let old = batch
+            .into_iter()
+            .find(|d| d.datagram.completion.is_some())
+            .unwrap();
+        let first = e.snapshot().selection.domain.unwrap();
+        deliver(&mut e, &mut m, 0, 1_000_000_000);
+        deliver(&mut e, &mut m, 1, 2_000_000_000);
+        deliver(&mut e, &mut m, 2, 3_000_000_000);
+        let s = e.snapshot();
+        assert_eq!(s.selection.role, Role::Follower(peer()));
+        assert_eq!(s.quality, Some(Quality::OneWay));
+        assert!(s.mapping.is_some());
+        assert_ne!(s.selection.domain, Some(first));
+        assert!(
+            e.complete(&old, local().at(3_000_000_100), own(3_000_000_100))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            e.tick(local().at(3_000_000_101), own(3_000_000_101))
+                .unwrap()
+                .is_empty()
+        );
+        e.tick(local().at(5_000_000_000), own(5_000_000_000))
+            .unwrap(); // Exact lease boundary.
+        e.tick(local().at(5_000_000_001), own(5_000_000_001))
+            .unwrap();
+        assert_eq!(e.snapshot().selection.role, Role::Follower(peer()));
+        assert!(e.snapshot().mapping.is_none());
+        assert_ne!(e.snapshot().selection.domain, s.selection.domain);
+        assert!(
+            e.tick(local().at(6_000_000_000), own(6_000_000_000))
+                .unwrap()
+                .is_empty()
+        );
+        e.tick(local().at(13_000_000_001), own(13_000_000_001))
+            .unwrap();
+        assert_eq!(e.snapshot().selection.role, Role::Master);
+        assert!(e.snapshot().selection.domain.unwrap().epoch() > first.epoch());
+    }
+    #[test]
+    fn opt_in_probe_measures_neighbor_without_promoting_one_way_mapping() {
+        let mut e = engine();
+        e.enable_probe(probe::Config {
+            interval_ns: 125_000_000,
+            timeout_ns: 100_000_000,
+            measurement: measurement::Config {
+                max_roundtrip_ns: 100_000_000,
+                rate_window_ns: 1_000_000_000,
+                valid_for_ns: 2_000_000_000,
+                timestamp_error_ns: 0,
+            },
+        })
+        .unwrap();
+        let mut m = remote();
+        deliver(&mut e, &mut m, 0, 1_000_000_000);
+        deliver(&mut e, &mut m, 1, 2_000_000_000);
+        deliver(&mut e, &mut m, 2, 3_000_000_000);
+        let at = 3_010_000_000;
+        let batch = e.tick(local().at(at), own(at)).unwrap();
+        assert_eq!(batch.len(), 1);
+        let request = &batch[0];
+        assert!(request.needs_completion());
+        e.complete(request, local().at(at), own(at)).unwrap();
+        let domain = Domain::new(50, 1).unwrap();
+        let response = m
+            .receive(
+                peer(),
+                &request.datagram.bytes,
+                domain.reading(at + 20_002_000_000),
+            )
+            .unwrap();
+        let follow = m
+            .complete_send(
+                response.completion.as_ref().unwrap(),
+                domain.reading(at + 20_003_000_000),
+            )
+            .unwrap();
+        e.receive(
+            peer(),
+            &response.bytes,
+            local().at(at + 5_000_000),
+            own(at + 5_000_000),
+        )
+        .unwrap();
+        e.receive(
+            peer(),
+            &follow.bytes,
+            local().at(at + 5_000_010),
+            own(at + 5_000_010),
+        )
+        .unwrap();
+        let s = e.snapshot();
+        assert_eq!(s.link.unwrap().mean_path_ns, 2_000_000);
+        assert_eq!(s.link.unwrap().neighbor.id(), 50);
+        assert_eq!(s.quality, Some(Quality::OneWay));
+        e.tick(local().at(13_000_000_001), own(13_000_000_001))
+            .unwrap();
+        assert!(e.snapshot().link.is_none());
+        assert!(
+            e.complete(request, local().at(13_000_000_002), own(13_000_000_002))
+                .unwrap()
+                .is_none()
+        );
+    }
+    #[test]
+    fn changing_physical_epoch_revokes_snapshot_and_engine_cannot_resume_old_domain() {
+        let mut e = engine();
+        e.tick(local().at(10), own(10)).unwrap();
+        assert!(
+            e.tick(local().at(11), Domain::new(100, 2).unwrap().reading(0))
+                .is_err()
+        );
+        assert!(e.snapshot().mapping.is_none());
+        assert!(e.tick(local().at(12), own(12)).is_err());
+    }
+    #[test]
+    fn unreported_physical_step_is_also_a_fault_without_relabeling_old_time() {
+        let mut e = engine();
+        e.tick(local().at(10), own(10)).unwrap();
+        assert!(
+            e.tick(
+                local().at(11),
+                Domain::new(100, 1).unwrap().reading(20_000_000_000)
+            )
+            .is_err()
+        );
+        assert!(e.snapshot().mapping.is_none());
+        assert!(e.tick(local().at(12), own(12)).is_err());
     }
 }

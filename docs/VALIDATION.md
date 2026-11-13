@@ -161,3 +161,22 @@ Logs: outputs/EXTERNAL-ACQUISITION-CHECK-20261113.log and
 outputs/EXTERNAL-ACQUISITION-FINAL-CHECK-20261113.log in the local workspace.
 These are fixture/regression tests, not live NQPTP daemon attestation or physical
 synchronization measurements. No Station adapter pin/backend changed.
+
+## CI portability corrections — 2026-11-13
+
+Core1388569 reports realtime receiver latencyMin=0: its existing renderer already
+uses anchors as output deadlines and accounts for sink queue delay, without an
+additional fixed AP2 render interval. Previously omission made our sender assume
+250ms extra render delay, producing late/silent PCM on Windows. Remote HomePod
+latency negotiation/fallback remains unchanged. Original short48-packet fixture
+and exact S16BE assertion retained; a SETUP response regression test was added.
+
+CI a3f0980 passed Linux, Windows, macOS, audio-only, both ARM checks and pyatv
+interop. Its lint/ffmpeg stopped at engine test-module ordering; the follow-up
+only moves that module after implementation. Offline Pi Rust1.99 Clippy workspace
+all-targets with -D warnings passes on the resulting source. CI stable/FFmpeg
+result is tracked in GitHub Actions. No failed test was ignored or removed.
+Other portability fixes: short private Unix-socket fixture paths, explicit macOS
+loopback alias for the distinct-peer union fixture, a representable pre-origin
+Instant test delta, and answering fresh PTP probes instead of only a possibly
+expired first request. None is a physical clock/sound acceptance test.

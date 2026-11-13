@@ -93,3 +93,19 @@ platform error bounds and actual evidence, and await first publication before
 creating an external PtpGroup. No tasks, PTP sockets, peer control or activation
 are started. Remaining: real daemon evidence/peer-control owner, Station frontend,
 existing renderer guard handoff and acceptance. This is not installed on Station.
+
+Continuation2026-11-13: Station adapter main23b7412 pins core5c21292 and connects
+external acquisition to PtpGroup without a new timing implementation/listener.
+11 adapter tests and10 package preflight fixtures passed; no device activation.
+Remaining: actual attested daemon/role provider and acquisition scheduler, owner-safe
+peer control, source/control/discovery frontend wiring, confirmed descriptor/Card
+publication and existing guard/readiness integration. Do not replace recovery.
+
+CI repair also found generic RX omission of render interval: realtime reply now
+explicitly reports latencyMin=0 (1388569). HomePod TX fallback/calibration unchanged.
+Linux/Windows/macOS plus audio-only/interop/ARM checks pass on a3f0980. Local
+all-target Clippy passes after moving engine tests below implementation; see
+VALIDATION and current GitHub Actions for the final full matrix.
+Names agreed: timesync for both component and package; media::rx, media::tx,
+media::output; common codec. Remove ap_ from library/target package names only
+at the later coordinated rename, not now.
