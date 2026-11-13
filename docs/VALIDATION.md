@@ -69,3 +69,15 @@ The raw-PCM host test uses 250ms source lead and asserts local write deadlines a
 packet.produced_at()+375ms; EOF drain and malformed-tail Drop cleanup remain checked.
 No real remote, NQPTP bridge, ALSA timing, Station installation or acoustic synchronization
 was tested. Log: coordinator outputs/CORE-CALIBRATED-HOST-CHECK-20261113.log.
+
+
+## Confirmed output projection — 2026-11-13
+
+Source ec1a90a:99 audio-only application library tests passed on Pi/Linux offline
+(`cargo test -p airplay --lib --no-default-features --locked --offline`). Four new
+output_card tests check canonical stable UID/order, missing/duplicate descriptors,
+volume updates and alias rejection in verified descriptors. Existing95 tests reran
+because a new module was added. Caller must supply independently verified descriptors;
+Snapshot/catalog alone do not establish topology/adoption or observed volume.
+No production observer, device UI fix or native grouping is claimed.
+Log: coordinator outputs/CORE-OUTPUT-CARD-CHECK-20261113.log.

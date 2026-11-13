@@ -31,3 +31,19 @@
 адаптерных функций и автономные проверки. Установки/реальные тесты — только с согласием.
 Будущие фазы v12 пока ограничены исследованиями и подготовкой независимых тестов.
 Параллельные аудиты 2026-11-13 — статический анализ, не запущенные тесты и не готовые исправления.
+
+
+## Migration slice — 2026-11-13
+
+- Core91fa31c separates raw-source/network lead from calibrated local lead; original API retained.
+- Coreec1a90a adds pure output_card projection; not a production Snapshot→Card observer.
+- Station main add976a contains explicit RendererProfile::run composition, pure legacy
+  identity/key ImportPlan and opt-in package preflight. Default backend unchanged.
+- Canonical remaining inventory lives in Station docs/CORE_MIGRATION_INVENTORY.md;
+  clock seam in docs/CLOCK_MIGRATION.md. Preserve patched NQPTP sole319/320 owner while
+  Shairport remains receiver; qualified external bridge and measured clock correlation
+  are not implemented. No hidden RAW→Instant relabel or second listener.
+- Next integration: external clock qualification/timeline seam, identity-preserving store
+  transaction/import, live source/control/discovery, confirmed outputs+observed descriptors
+  to Card, existing stats/guard handoff and executable packaging. No recovery rewrite.
+- No device install/connect/audio test in this slice. Future v12 features remain secondary.
