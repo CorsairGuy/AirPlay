@@ -30,3 +30,13 @@ External daemon profile: publish qualified cached observations through
 raw-PCM/local pipeline. Owner supplies attested role/daemon instance, scheduled
 reader/correlation updates and timing-peer control. No synthetic local Service
 snapshot or second319/320 listener. Adapter default/frontend remain unchanged.
+
+External peer ownership (2026-11-13): PtpGroup::with_external_peer_control connects
+an already-owned external daemon controller to the same QualifiedPreparer active/
+finish lifecycle as the built-in Service. Updates include pinned Domain and fresh
+nonzero owner token; external binding cannot relabel a local clock group or
+replace an existing binding. Calls are bounded to1s. Cleanup submits an empty
+interest for that owner, not daemon shutdown. The supplied controller MUST reject
+stale domains, preserve other owners' interests and serialize withdrawal after
+partially applied/cancelled updates. This interface does not implement/attest a
+legacy NQPTP control controller; no command/socket is automatically started.

@@ -83,32 +83,69 @@ pub struct GroupOutputs<P> {
     pub preparer: P,
     pub updates: watch::Sender<output_worker::Snapshot>,
 }
+/// Host-owned, serialized peer control for an external physical-clock daemon.
+/// The controller must keep per-owner interests, reject stale domains, and
+/// serialize withdrawal after any partially applied/cancelled replacement.
+/// Dropping a group never grants permission to stop the daemon or other owners.
+pub type PeerControlUpdate<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>>;
+pub trait ExternalPeerControl: Send + Sync {
+    fn replace(
+        &self,
+        domain: clock::domain::Domain,
+        owner: u128,
+        peers: Vec<std::net::IpAddr>,
+    ) -> PeerControlUpdate<'_>;
+}
 #[derive(Clone)]
-struct ClockPeers {
-    service: Weak<timesync::service::Service>,
-    owner: u128,
-    ports: timesync::sender::Ports,
+enum ClockPeers {
+    Service {
+        service: Weak<timesync::service::Service>,
+        owner: u128,
+        ports: timesync::sender::Ports,
+    },
+    External {
+        control: Arc<dyn ExternalPeerControl>,
+        owner: u128,
+        domain: clock::domain::Domain,
+    },
 }
 impl ClockPeers {
     async fn apply(&self, ips: &[std::net::IpAddr]) -> Result<()> {
-        let Some(service) = self.service.upgrade() else {
-            if ips.is_empty() {
-                return Ok(());
+        match self {
+            Self::Service {
+                service,
+                owner,
+                ports,
+            } => {
+                let Some(service) = service.upgrade() else {
+                    if ips.is_empty() {
+                        return Ok(());
+                    }
+                    bail!("shared clock service ended");
+                };
+                let peers = ips
+                    .iter()
+                    .map(|&ip| timesync::sender::Peer { ip, ports: *ports })
+                    .collect();
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    service.set_group_peers(*owner, peers),
+                )
+                .await??;
             }
-            bail!("shared clock service ended");
-        };
-        let peers = ips
-            .iter()
-            .map(|&ip| timesync::sender::Peer {
-                ip,
-                ports: self.ports,
-            })
-            .collect();
-        tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            service.set_group_peers(self.owner, peers),
-        )
-        .await??;
+            Self::External {
+                control,
+                owner,
+                domain,
+            } => {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    control.replace(*domain, *owner, ips.to_vec()),
+                )
+                .await??;
+            }
+        }
         Ok(())
     }
 }
@@ -165,10 +202,31 @@ impl PtpGroup {
         {
             bail!("invalid timing ownership/ports or another clock service");
         }
-        self.clock_peers = Some(ClockPeers {
+        self.clock_peers = Some(ClockPeers::Service {
             service: Arc::downgrade(service),
             owner,
             ports,
+        });
+        Ok(self)
+    }
+    /// Supply the existing external daemon's owner. It must implement the
+    /// serialized per-owner contract above; no direct SHM/control-port inference.
+    pub fn with_external_peer_control(
+        mut self,
+        owner: u128,
+        control: Arc<dyn ExternalPeerControl>,
+    ) -> Result<Self> {
+        if owner == 0
+            || self.clock_peers.is_some()
+            || !matches!(&*self.timeline, GroupTimeline::External(_))
+        {
+            bail!("external peer owner requires an unbound external clock group");
+        }
+        self.timeline.reading_at(std::time::Instant::now())?;
+        self.clock_peers = Some(ClockPeers::External {
+            control,
+            owner,
+            domain: self.timeline.domain(),
         });
         Ok(self)
     }
@@ -549,6 +607,31 @@ mod tests {
             origin,
         )
     }
+    type PeerCalls = Vec<(Domain, u128, Vec<std::net::IpAddr>)>;
+    #[derive(Default)]
+    struct PeerRecorder(std::sync::Mutex<PeerCalls>);
+    impl ExternalPeerControl for PeerRecorder {
+        fn replace(
+            &self,
+            domain: Domain,
+            owner: u128,
+            peers: Vec<std::net::IpAddr>,
+        ) -> PeerControlUpdate<'_> {
+            Box::pin(async move {
+                self.0.lock().unwrap().push((domain, owner, peers));
+                Ok(())
+            })
+        }
+    }
+    #[tokio::test]
+    async fn local_clock_cannot_be_relabelled_as_external_peer_control() {
+        let (_updates, _user, group, _) = fixture();
+        assert!(
+            group
+                .with_external_peer_control(99, Arc::new(PeerRecorder::default()))
+                .is_err()
+        );
+    }
     #[tokio::test]
     async fn producer_uses_pinned_clock_and_rejects_epoch_loss_and_owner_drop() {
         let (updates, _user, group, origin) = fixture();
@@ -643,7 +726,21 @@ mod tests {
         let (_user, upstream) = watch::channel(false);
         assert!(PtpGroup::new_external(timeline.clone(), 77, upstream.clone()).is_err());
         owner.update(selection, sample, correlation).unwrap();
-        let group = PtpGroup::new_external(timeline.clone(), 77, upstream).unwrap();
+        let recorder = Arc::new(PeerRecorder::default());
+        assert!(
+            PtpGroup::new_external(timeline.clone(), 77, upstream.clone())
+                .unwrap()
+                .with_external_peer_control(0, recorder.clone())
+                .is_err()
+        );
+        let group = PtpGroup::new_external(timeline.clone(), 77, upstream)
+            .unwrap()
+            .with_external_peer_control(701, recorder.clone())
+            .unwrap();
+        let binding = group.clock_peers.clone().unwrap();
+        let peer = "127.0.0.1".parse().unwrap();
+        binding.apply(&[peer]).await.unwrap();
+
         let producer = group.producer(MediaClock::at(origin, 0));
         let pcm = vec![7; sender::PACKET_BYTES];
         let packet = producer.packet(0, &pcm).unwrap();
@@ -653,6 +750,24 @@ mod tests {
             selection.domain.reading(1_000_000_137)
         );
         assert_eq!(packet.produced_at(), origin);
+        let mut preparer = QualifiedPreparer {
+            inner: Blocked {
+                entered: Arc::new(AtomicBool::new(false)),
+                dropped: Arc::new(AtomicBool::new(false)),
+            },
+            timeline: group.timeline.clone(),
+            group: 77,
+            clock_peers: Some(binding),
+            last_members: None,
+        };
+        preparer.finish().await.unwrap();
+        assert_eq!(
+            *recorder.0.lock().unwrap(),
+            vec![
+                (selection.domain, 701, vec![peer]),
+                (selection.domain, 701, vec![])
+            ]
+        );
         let mut stop = group.stop();
         drop(owner);
         assert!(producer.packet(1, &pcm).is_err());
