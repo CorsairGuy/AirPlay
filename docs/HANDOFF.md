@@ -78,3 +78,8 @@ remote replaces the proposed control name; identity owns persistent trust/state,
 not a second pairing implementation.
 Do not implement a second protocol or independent coordinator. Move/reuse existing
 code, preserve profile-specific state and test parity before removing legacy.
+
+
+CLI a8b32e9: airplay without subcommand now starts daemon; serve is removed without
+alias. Help/version/send etc remain explicit commands. No binary split/airplayd.
+Optional systemd unit would ExecStart=/path/airplay; none installed on Station.

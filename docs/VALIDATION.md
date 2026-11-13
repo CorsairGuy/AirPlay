@@ -139,3 +139,14 @@ NTP timing issue. No device audio/SHM or native group adoption was tested.
 
 Architecture inventory is static source/manifests/call-site analysis, not runtime
 service enumeration on the installed Station and not proof every source line is correct.
+
+
+## CLI daemon default — 2026-11-13
+
+Source a8b32e9:2 audio-only binary tests passed on Pi/Linux offline
+(cargo test -p airplay --bin airplay --no-default-features --locked --offline).
+Checks: empty args/daemon flags route to daemon parsing; help/version/management
+commands do not; removed serve is rejected. Existing audio-only option rejection
+also passes. No daemon, socket or audio output was started by tests. Default-feature
+CLI build and full GitHub CI were not rerun. Examples and CI interop launch updated.
+Log: coordinator outputs/CLI-DEFAULT-DAEMON-CHECK-20261113.log.
