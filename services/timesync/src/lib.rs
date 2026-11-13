@@ -6,7 +6,11 @@
 
 pub mod engine;
 pub mod media;
+#[cfg(target_os = "linux")]
+pub mod nqptp_reader;
 pub mod ntp;
+#[cfg(target_os = "linux")]
+pub mod raw_correlation;
 pub mod sender;
 pub mod service;
 

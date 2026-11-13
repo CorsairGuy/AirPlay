@@ -24,13 +24,22 @@ impl std::fmt::Display for Error {
 }
 impl std::error::Error for Error {}
 
+/// Meaning of the daemon's start marker must be established for its exact patch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StartMarker {
+    StableEpoch,
+    RefreshedPublication,
+}
 /// Pinned selection, established independently by the daemon/control owner.
 /// The codec alone cannot establish sender-master role or daemon instance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Selection {
     pub daemon_instance: u128,
     pub domain: Domain,
+    /// Owner-attested lower bound of this selection epoch, not an automatically
+    /// copied SHM marker. Patched sender-master refreshes that marker on keepalive.
     pub master_start_raw_ns: u64,
+    pub start_marker: StartMarker,
     pub clock_change_offset: Option<u64>,
     pub sender_master_verified: bool,
 }
@@ -89,6 +98,7 @@ pub struct Qualifier {
     last_raw: Option<u64>,
     last_published: Option<u64>,
     last_offset: Option<u64>,
+    last_start_marker: Option<u64>,
     last_correlation: Option<Correlation>,
     revoked: bool,
 }
@@ -118,6 +128,7 @@ impl Qualifier {
             last_raw: None,
             last_published: None,
             last_offset: None,
+            last_start_marker: None,
             last_correlation: None,
             revoked: false,
         })
@@ -152,7 +163,8 @@ impl Qualifier {
     ) -> Result<Reading, Error> {
         if selection != self.selection
             || sample.clock_id != selection.domain.id()
-            || sample.master_start_time != selection.master_start_raw_ns
+            || (selection.start_marker == StartMarker::StableEpoch
+                && sample.master_start_time != selection.master_start_raw_ns)
             || sample.clock_change_offset != selection.clock_change_offset
         {
             return Err(Error::EpochChanged);
@@ -182,7 +194,11 @@ impl Qualifier {
         if age > self.max_age_ns {
             return Err(Error::Stale);
         }
-        if sample.master_start_time > sample.local_time
+        if sample.master_start_time < selection.master_start_raw_ns
+            || self
+                .last_start_marker
+                .is_some_and(|old| sample.master_start_time < old)
+            || sample.master_start_time > sample.local_time
             || self.last_raw.is_some_and(|old| raw_now < old)
             || self
                 .last_published
@@ -199,6 +215,7 @@ impl Qualifier {
         }) {
             return Err(Error::EpochChanged);
         }
+        self.last_start_marker = Some(sample.master_start_time);
         self.last_correlation = Some(correlation);
         self.last_offset = Some(sample.offset);
         self.last_raw = Some(raw_now);
@@ -215,6 +232,7 @@ mod tests {
             daemon_instance: 7,
             domain: Domain::new(9, 1).unwrap(),
             master_start_raw_ns: 100,
+            start_marker: StartMarker::StableEpoch,
             clock_change_offset: None,
             sender_master_verified: true,
         };
@@ -363,6 +381,30 @@ mod tests {
         assert_eq!(
             qualifier(s).observe(s, p, c, at, c.at),
             Err(Error::Reversed)
+        );
+    }
+    #[test]
+    fn attested_refresh_marker_is_not_a_new_epoch_on_keepalive() {
+        let (s, p, c) = fixture();
+        let s = Selection {
+            start_marker: StartMarker::RefreshedPublication,
+            ..s
+        };
+        let mut q = qualifier(s);
+        q.observe(s, p, c, c.at, c.at).unwrap();
+        let refreshed = Snapshot {
+            master_start_time: p.local_time,
+            ..p
+        };
+        assert!(q.observe(s, refreshed, c, c.at, c.at).is_ok());
+        assert_eq!(q.observe(s, p, c, c.at, c.at), Err(Error::Reversed));
+        let stable = Selection {
+            start_marker: StartMarker::StableEpoch,
+            ..s
+        };
+        assert_eq!(
+            qualifier(stable).observe(stable, refreshed, c, c.at, c.at),
+            Err(Error::EpochChanged)
         );
     }
     #[test]
