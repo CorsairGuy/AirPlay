@@ -357,6 +357,10 @@ impl PtpGroup {
     /// Local EOF drains before stopping the group; local failure cancels it
     /// immediately. Both futures are awaited, including pool teardown. The
     /// platform adapter alone restores direct routing after this returns.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Preserve existing host API; new composition uses GroupOutputs"
+    )]
     pub async fn run_with_local(
         self,
         pool: SessionPool,

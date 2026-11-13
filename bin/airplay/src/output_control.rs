@@ -44,29 +44,6 @@ impl OutputRequest {
         let _ = self.reply.send(code);
     }
 }
-#[cfg(test)]
-pub(crate) mod testing {
-    #[derive(Default)]
-    pub struct Backend(pub std::sync::Mutex<Vec<Vec<(String, sender::Volume)>>>);
-    impl super::VolumeBackend for Backend {
-        fn set_routes(
-            &self,
-            _: &sender::outputs::OutputCatalog,
-            levels: &[(String, sender::Volume)],
-        ) -> anyhow::Result<()> {
-            self.0.lock().unwrap().push(levels.to_vec());
-            Ok(())
-        }
-    }
-    pub fn execute(mut request: super::OutputRequest, backend: &Backend) {
-        let operation = request.operation.take().unwrap();
-        let code = operation(
-            backend,
-            &sender::outputs::OutputCatalog::new(vec![]).unwrap(),
-        );
-        request.finish(code);
-    }
-}
 impl OutputControl {
     pub fn channel(capacity: usize) -> (Self, mpsc::Receiver<OutputRequest>) {
         let (tx, rx) = mpsc::channel(capacity.clamp(1, 64));
@@ -148,5 +125,29 @@ impl OutputControl {
             })
             .map_err(|_| ())?;
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod testing {
+    #[derive(Default)]
+    pub struct Backend(pub std::sync::Mutex<Vec<Vec<(String, sender::Volume)>>>);
+    impl super::VolumeBackend for Backend {
+        fn set_routes(
+            &self,
+            _: &sender::outputs::OutputCatalog,
+            levels: &[(String, sender::Volume)],
+        ) -> anyhow::Result<()> {
+            self.0.lock().unwrap().push(levels.to_vec());
+            Ok(())
+        }
+    }
+    pub fn execute(mut request: super::OutputRequest, backend: &Backend) {
+        let operation = request.operation.take().unwrap();
+        let code = operation(
+            backend,
+            &sender::outputs::OutputCatalog::new(vec![]).unwrap(),
+        );
+        request.finish(code);
     }
 }

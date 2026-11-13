@@ -141,6 +141,37 @@ impl Server {
     }
 }
 
+impl Drop for Server {
+    fn drop(&mut self) {
+        if std::fs::symlink_metadata(&self.path)
+            .is_ok_and(|m| m.dev() == self.device && m.ino() == self.inode)
+        {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+struct Task(tokio::task::JoinHandle<Result<()>>);
+impl Drop for Task {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+pub(crate) async fn run<R: tokio::io::AsyncRead + Unpin>(
+    options: crate::send::Options,
+    input: R,
+    stop: watch::Receiver<bool>,
+    path: PathBuf,
+) -> Result<()> {
+    let control = RelayControl::default();
+    let server = Server::bind(&path, control.clone())?;
+    let mut serving = Task(tokio::spawn(server.run(stop.clone())));
+    tokio::select! {
+        result=crate::send::run_controlled(options,input,stop,control)=>result,
+        result=&mut serving.0=>{result.context("relay IPC task failed")??;bail!("relay IPC stopped before sender")}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,35 +266,5 @@ mod tests {
         std::fs::remove_file(path).unwrap();
         std::fs::remove_file(moved).unwrap();
         std::fs::remove_dir(dir).unwrap();
-    }
-}
-impl Drop for Server {
-    fn drop(&mut self) {
-        if std::fs::symlink_metadata(&self.path)
-            .is_ok_and(|m| m.dev() == self.device && m.ino() == self.inode)
-        {
-            let _ = std::fs::remove_file(&self.path);
-        }
-    }
-}
-
-struct Task(tokio::task::JoinHandle<Result<()>>);
-impl Drop for Task {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
-pub(crate) async fn run<R: tokio::io::AsyncRead + Unpin>(
-    options: crate::send::Options,
-    input: R,
-    stop: watch::Receiver<bool>,
-    path: PathBuf,
-) -> Result<()> {
-    let control = RelayControl::default();
-    let server = Server::bind(&path, control.clone())?;
-    let mut serving = Task(tokio::spawn(server.run(stop.clone())));
-    tokio::select! {
-        result=crate::send::run_controlled(options,input,stop,control)=>result,
-        result=&mut serving.0=>{result.context("relay IPC task failed")??;bail!("relay IPC stopped before sender")}
     }
 }

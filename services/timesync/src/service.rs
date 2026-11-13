@@ -272,28 +272,37 @@ mod tests {
             emit(&mut remote, n, &event, &general, addresses).await;
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        let mut buffer = [0u8; 1024];
-        let (size, addr) = timeout(Duration::from_secs(1), event.recv_from(&mut buffer))
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(buffer[0] & 15, 2);
-        let response = remote
-            .receive(
-                addr.ip(),
-                &buffer[..size],
-                domain.reading(clock::now_ns() + 20_000_000_000),
-            )
-            .unwrap();
-        event.send_to(&response.bytes, addresses.0).await.unwrap();
-        let follow = remote
-            .complete_send(
-                response.completion.as_ref().unwrap(),
-                domain.reading(clock::now_ns() + 20_000_000_000),
-            )
-            .unwrap();
-        general.send_to(&follow.bytes, addresses.1).await.unwrap();
+        // A queued request may expire while the fixture emits warmup traffic.
+        // Serve subsequent probes too; never assume the first datagram is live.
+        let (stop, mut stopped) = oneshot::channel();
+        let responding = tokio::spawn(async move {
+            let mut buffer = [0u8; 1024];
+            loop {
+                let (size, addr) = tokio::select! {
+                    _ = &mut stopped => break,
+                    got = event.recv_from(&mut buffer) => got.unwrap(),
+                };
+                assert_eq!(buffer[0] & 15, 2);
+                let response = remote
+                    .receive(
+                        addr.ip(),
+                        &buffer[..size],
+                        domain.reading(clock::now_ns() + 20_000_000_000),
+                    )
+                    .unwrap();
+                event.send_to(&response.bytes, addresses.0).await.unwrap();
+                let follow = remote
+                    .complete_send(
+                        response.completion.as_ref().unwrap(),
+                        domain.reading(clock::now_ns() + 20_000_000_000),
+                    )
+                    .unwrap();
+                general.send_to(&follow.bytes, addresses.1).await.unwrap();
+            }
+        });
         let measured = wait_for(&mut status, |s| s.link.is_some() && s.mapping.is_some()).await;
+        let _ = stop.send(());
+        responding.await.unwrap();
         assert_eq!(measured.link.unwrap().neighbor.id(), 50);
         assert_eq!(measured.quality, Some(Quality::OneWay));
         service.shutdown().await.unwrap();

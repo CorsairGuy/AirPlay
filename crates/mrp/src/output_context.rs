@@ -105,7 +105,7 @@ mod tests {
         let mut body = Node::default();
         body.int(1, 1);
         for tag in 2..=7 {
-            body.text(tag, &format!("uid{tag}"));
+            body.text(tag, format!("uid{tag}"));
         }
         let request = Request::parse(&Node::parse(&body.encode()).unwrap()).unwrap();
         assert_eq!(

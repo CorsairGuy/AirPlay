@@ -628,7 +628,8 @@ mod tests {
             local: None,
             control_socket: None,
         };
-        struct LocalCapture(Arc<Mutex<Vec<(Arc<AudioPacket>, std::time::Instant)>>>);
+        type CapturedLocal = Arc<Mutex<Vec<(Arc<AudioPacket>, std::time::Instant)>>>;
+        struct LocalCapture(CapturedLocal);
         impl sender::LocalSink for LocalCapture {
             async fn write(
                 &mut self,

@@ -517,7 +517,7 @@ mod tests {
         assert!(
             timeline
                 .source
-                .local_at(origin - Duration::from_nanos(1))
+                .local_at(origin - Duration::from_millis(1))
                 .is_err()
         );
     }

@@ -345,7 +345,7 @@ impl Media {
             .and_then(|p| uint(p, "mrPlaybackState"));
         match state {
             Some(1) => self.player.report_state(self.id, true),
-            Some(2 | 3 | 4) => self.player.report_state(self.id, false),
+            Some(2..=4) => self.player.report_state(self.id, false),
             _ => return,
         }
         debug!(?state, "sender playback state");

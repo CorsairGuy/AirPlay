@@ -178,7 +178,7 @@ mod tests {
         let a = descriptor("row0", Some(0.2));
         let b = descriptor("row0", Some(0.4));
         assert!(
-            project(&catalog, &snapshot(&[]), &[a.clone()])
+            project(&catalog, &snapshot(&[]), std::slice::from_ref(&a))
                 .unwrap()
                 .is_empty()
         );

@@ -23,7 +23,7 @@ struct Target {
 enum Gain {
     #[cfg(test)]
     Watch(watch::Sender<Volume>),
-    Session(sender::pool::SessionHandle),
+    Session(Box<sender::pool::SessionHandle>),
 }
 impl Gain {
     fn requested(&self) -> Volume {
@@ -174,7 +174,7 @@ impl RelayControl {
         self.0.lock().unwrap().targets.insert(
             endpoint,
             Target {
-                volume: Gain::Session(handle),
+                volume: Gain::Session(Box::new(handle)),
                 media,
             },
         );

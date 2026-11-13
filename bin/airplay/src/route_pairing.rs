@@ -11,6 +11,9 @@ use sender::{PairingCredentials, PinPairing};
 use std::{net::SocketAddr, time::Duration};
 use tokio::sync::{mpsc, watch};
 
+type ActiveAuthorization =
+    std::sync::Arc<std::sync::Mutex<Option<(uuid::Uuid, mpsc::Sender<Node>)>>>;
+
 pub struct Request {
     pub endpoint: SocketAddr,
     pub controller: pair::Identity,
@@ -28,12 +31,12 @@ fn cancelled(stop: &watch::Receiver<bool>) -> bool {
 /// forwarding outgoing messages while the selection worker awaits pairing.
 pub struct ControllerAuthorization {
     outgoing: mpsc::Sender<Node>,
-    active: std::sync::Arc<std::sync::Mutex<Option<(uuid::Uuid, mpsc::Sender<Node>)>>>,
+    active: ActiveAuthorization,
     stop: watch::Sender<bool>,
 }
 pub struct AuthorizationScope {
     token: uuid::Uuid,
-    active: std::sync::Arc<std::sync::Mutex<Option<(uuid::Uuid, mpsc::Sender<Node>)>>>,
+    active: ActiveAuthorization,
     outgoing: mpsc::Sender<Node>,
     incoming: Option<mpsc::Receiver<Node>>,
     stop: watch::Receiver<bool>,
@@ -43,7 +46,7 @@ pub struct AuthorizationScope {
 #[derive(Clone)]
 pub struct AuthorizationContext {
     outgoing: mpsc::Sender<Node>,
-    active: std::sync::Arc<std::sync::Mutex<Option<(uuid::Uuid, mpsc::Sender<Node>)>>>,
+    active: ActiveAuthorization,
     stop: watch::Receiver<bool>,
 }
 impl ControllerAuthorization {
