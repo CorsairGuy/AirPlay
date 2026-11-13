@@ -40,7 +40,7 @@ reference/ — архив, не активные workspace members; чужие �
 |---|---|---|---|
 | discovery | ap_discovery | объявления, browsing, device registry, interface scope | отдельный daemon для каждого mDNS service type/BLE маячка |
 | sessions | ap_sessions | listeners, pairing dispatch, RX/TX session lifecycle и выбранный профиль | по процессу на AP1/AP2/RTSP/HTTP |
-| timing | ap_timing | общий physical clock, PTP/NTP sockets/roles/maps, consumers/leases | по clock-service на группу/получателя |
+| timesync | timesync | общий physical clock, PTP/NTP sockets/roles/maps, consumers/leases | по clock-service на группу/получателя |
 | media | ap_media | pipeline supervision, decode/capture/render scheduling, backend factories | Apple-подобный mediaserverd только ради имени |
 | remote | ap_remote | MRP/Companion/DACP endpoints, metadata/views и translation в команды | отдельный mediaremote daemon и Companion daemon по умолчанию |
 | coordinator | ap_coordinator | источники, desired/confirmed membership, group volume, serialized intent/state | второй coordinator поверх уже существующего Coordinator/worker |
@@ -63,7 +63,7 @@ reference/ — архив, не активные workspace members; чужие �
 | RAOP | аудио-профиль/совместимость, не имя daemon | общие ap_rtsp/ap_rtp + session profile; AP1 ещё не завершён |
 | RTSP / используемый HTTP | сообщения/сессионное управление | ap_rtsp уже общий RX/TX codec; не писать ещё parser под Companion/casting |
 | RTP / retransmit / anchors | медиапакеты | ap_rtp; RX/TX state machines отдельны, wire primitives общие |
-| PTP / NTP | разные timing protocols | ap_clock — pure protocol/math; ap_timing — один runtime owner; не смешивать wire semantics |
+| PTP / NTP | разные timing protocols | ap_clock — pure protocol/math; timesync — один runtime owner; не смешивать wire semantics |
 | HAP pairing / SRP / TLV8 | authentication profiles/primitives | ap_pair + ap_crypto; Companion не получает второй SRP/HKDF/AEAD engine |
 | FairPlay | профиль negotiation/crypto | ap_fairplay, общий для поддержанных RX/video profiles |
 | MRP | Media Remote Protocol | ap_mrp — один framing/protobuf/schema; remote::mrp — один server/client runtime |
@@ -103,8 +103,8 @@ pair::hap обеих сторон использует единый crypto::srp 
 - Protocol/data libraries — `ap_<protocol/domain>`: уже имеющиеся ap_rtsp/ap_rtp/ap_mrp/
   ap_companion/ap_crypto/ap_pair/ap_clock и т.д. Имена протоколов в сети не переименовываются.
 - Runtime packages — `ap_<role>` в services/<role>; seven target roles приведены выше.
-  Существующий timesync переводится в timing через package/import compatibility alias,
-  а не копированием каталога. Все переименования — move/reexport, затем снятие alias.
+  Существующий timesync сохраняет имя пакета и логического компонента;
+  переименование в timing не требуется. Другие переименования — move/reexport, затем снятие alias.
 - mediaserver/mediaremote — исторические Apple-подобные названия, а не обоснование
   новых процессов. Empty mediaserver не должен стать параллельным media engine.
 - ap_base пока пуст: не создавать ещё один общий base рядом. Общие IDs/commands/state
@@ -171,7 +171,7 @@ pair::hap обеих сторон использует единый crypto::srp 
 
 ## Согласованное уточнение — 2026-11-13
 
-Пользователь согласовал семь компонентов: discovery, sessions, timing, media,
+Пользователь согласовал семь компонентов: discovery, sessions, timesync, media,
 remote, coordinator, identity. Это актуальная целевая схема вместо предыдущих шести.
 remote — внешний пульт/карточка, coordinator — согласование действий и групп;
 identity — долгоживущее состояние и trust/access policy. Sessions проверяет доступ
@@ -197,3 +197,7 @@ Cargo-зависимости не менять. Отдельный sender не �
 приём симметрично sessions::rx/media::rx. RTSP/RTP/pairing/crypto/timing общие
 для направлений. Coordinator согласует ретрансляцию и группы. Это будущие
 границы владения, не требование немедленно создавать отдельные crates.
+
+
+Уточнение пользователя2026-11-13: timesync — единое имя пакета и логического
+компонента вместо timing. Границы ответственности и единый владелец часов прежние.
