@@ -15,6 +15,7 @@ pub mod local_process;
 pub mod media;
 #[cfg(test)]
 mod mrp_path_tests;
+pub mod output_card;
 pub mod output_control;
 pub mod output_worker;
 pub mod ptp_group;
