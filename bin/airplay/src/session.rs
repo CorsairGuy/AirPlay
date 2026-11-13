@@ -572,6 +572,37 @@ mod tests {
         frames
     }
 
+    #[tokio::test]
+    async fn realtime_reply_reports_no_extra_fixed_render_interval() {
+        let mut client = Client::new(ctx());
+        let mut stream = plist::Dictionary::new();
+        stream.insert("type".into(), 96u64.into());
+        stream.insert("ct".into(), 1u64.into());
+        stream.insert("sr".into(), 44_100u64.into());
+        stream.insert("spf".into(), 352u64.into());
+        stream.insert("latencyMin".into(), 11_025u64.into());
+        stream.insert("shk".into(), plist::Value::Data(vec![7; 32]));
+        let mut body = plist::Dictionary::new();
+        body.insert("streams".into(), plist::Value::Array(vec![stream.into()]));
+        let mut bytes = Vec::new();
+        plist::Value::Dictionary(body)
+            .to_writer_binary(&mut bytes)
+            .unwrap();
+        let response = client.call("SETUP", "rtsp://x/1", &[], bytes);
+        assert_eq!(response.status, 200);
+        let reply = plist::from_bytes::<plist::Value>(&response.body).unwrap();
+        let stream = &reply.as_dictionary().unwrap()["streams"]
+            .as_array()
+            .unwrap()[0];
+        assert_eq!(
+            stream.as_dictionary().unwrap()["latencyMin"].as_unsigned_integer(),
+            Some(0)
+        );
+        assert_eq!(
+            client.call("TEARDOWN", "rtsp://x/1", &[], vec![]).status,
+            200
+        );
+    }
     #[cfg(not(feature = "mirroring"))]
     #[tokio::test]
     async fn audio_build_rejects_video_setup_without_opening_a_stream() {

@@ -616,6 +616,10 @@ impl Media {
                         info!("буферизованный поток (AAC)");
                         Stream::buffered(self.player.audio.clone(), &shk, self.player.time_source())
                     } else {
+                        // This renderer schedules the anchor as the DAC deadline;
+                        // sink.delay_frames accounts for its output queue. There is
+                        // no additional fixed AP2 render interval to subtract at TX.
+                        r.insert("latencyMin".into(), Value::Integer(0u64.into()));
                         let format = realtime_format(s)?;
                         info!(?format, "realtime-поток");
                         Stream::realtime(

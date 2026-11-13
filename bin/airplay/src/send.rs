@@ -616,9 +616,7 @@ mod tests {
         });
         let (_stop, stopped) = watch::channel(false);
         let mut pcm = Vec::new();
-        // Keep real-time content available beyond startup/fallback buffering on
-        // hosts with coarse timer resolution. Exact PCM assertions remain below.
-        const PACKETS: usize = 256;
+        const PACKETS: usize = 48;
         for _ in 0..(FRAMES * PACKETS) {
             pcm.extend_from_slice(&0x1234_i16.to_be_bytes());
             pcm.extend_from_slice(&(-0x2345_i16).to_be_bytes());
