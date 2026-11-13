@@ -157,7 +157,7 @@ mod tests {
     }
     #[tokio::test]
     async fn private_socket_reports_media_and_changes_only_selected_volume() {
-        let dir = std::env::temp_dir().join(format!("relay-ipc-{}", uuid::Uuid::new_v4()));
+        let dir = Path::new("/tmp").join(format!("relay-ipc-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
         let path = dir.join("control.sock");
@@ -217,7 +217,7 @@ mod tests {
     }
     #[test]
     fn cleanup_does_not_delete_a_replacement_file() {
-        let dir = std::env::temp_dir().join(format!("relay-ipc-{}", uuid::Uuid::new_v4()));
+        let dir = Path::new("/tmp").join(format!("relay-ipc-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&dir).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
         let path = dir.join("control.sock");

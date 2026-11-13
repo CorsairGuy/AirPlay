@@ -1066,8 +1066,8 @@ mod tests {
         let timeline =
             Arc::new(MasterTimeline::new(source, status, Duration::from_millis(100)).unwrap());
         let (_user, upstream) = watch::channel(false);
-        let event = tokio::net::UdpSocket::bind("127.0.0.2:0").await.unwrap();
-        let general = tokio::net::UdpSocket::bind("127.0.0.2:0").await.unwrap();
+        let event = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let general = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let ports = Ports {
             event: event.local_addr().unwrap().port(),
             general: general.local_addr().unwrap().port(),

@@ -8,8 +8,8 @@
 
 use std::sync::Arc;
 
-use mrp::messages::Device;
 pub use crate::mrp_service::model::Profile as CardProfile;
+use mrp::messages::Device;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::watch;

@@ -288,10 +288,10 @@ mod tests {
     }
     #[tokio::test]
     async fn loopback_peer_delay_signaling_and_shutdown_release_both_ports() {
-        let event = UdpSocket::bind("127.0.0.2:0").await.unwrap();
-        let general = UdpSocket::bind("127.0.0.2:0").await.unwrap();
+        let event = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let general = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let peer = Peer {
-            ip: "127.0.0.2".parse().unwrap(),
+            ip: "127.0.0.1".parse().unwrap(),
             ports: Ports {
                 event: event.local_addr().unwrap().port(),
                 general: general.local_addr().unwrap().port(),
@@ -316,10 +316,10 @@ mod tests {
     }
     #[tokio::test]
     async fn changing_clock_epoch_stops_service_instead_of_relabeling_time() {
-        let event = UdpSocket::bind("127.0.0.2:0").await.unwrap();
-        let general = UdpSocket::bind("127.0.0.2:0").await.unwrap();
+        let event = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let general = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let peer = Peer {
-            ip: "127.0.0.2".parse().unwrap(),
+            ip: "127.0.0.1".parse().unwrap(),
             ports: Ports {
                 event: event.local_addr().unwrap().port(),
                 general: general.local_addr().unwrap().port(),
@@ -343,7 +343,7 @@ mod tests {
     async fn occupied_port_is_an_error_and_never_reuses_another_service_socket() {
         let occupied = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let mut cfg = config(Peer {
-            ip: "127.0.0.2".parse().unwrap(),
+            ip: "127.0.0.1".parse().unwrap(),
             ports: Ports {
                 event: 12345,
                 general: 12346,

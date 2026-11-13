@@ -257,12 +257,19 @@ async fn forward<B: AsyncRead + AsyncWrite + Unpin>(
 }
 
 fn take_mrp_frame(bytes: &mut Vec<u8>) -> std::io::Result<Option<Vec<u8>>> {
-    if bytes.len() < 4 { return Ok(None); }
-    let len = u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize;
-    if !(32..=4*1024*1024).contains(&len) {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,"invalid MRP output frame length"));
+    if bytes.len() < 4 {
+        return Ok(None);
     }
-    if bytes.len() < len { return Ok(None); }
+    let len = u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize;
+    if !(32..=4 * 1024 * 1024).contains(&len) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid MRP output frame length",
+        ));
+    }
+    if bytes.len() < len {
+        return Ok(None);
+    }
     let rest = bytes.split_off(len);
     Ok(Some(std::mem::replace(bytes, rest)))
 }
@@ -277,11 +284,12 @@ mod tests {
         let b = mrp::frame::reply(2);
         let mut bytes = a[..7].to_vec();
         assert!(take_mrp_frame(&mut bytes).unwrap().is_none());
-        bytes.extend_from_slice(&a[7..]); bytes.extend_from_slice(&b);
-        assert_eq!(take_mrp_frame(&mut bytes).unwrap(),Some(a));
-        assert_eq!(take_mrp_frame(&mut bytes).unwrap(),Some(b));
+        bytes.extend_from_slice(&a[7..]);
+        bytes.extend_from_slice(&b);
+        assert_eq!(take_mrp_frame(&mut bytes).unwrap(), Some(a));
+        assert_eq!(take_mrp_frame(&mut bytes).unwrap(), Some(b));
         assert!(bytes.is_empty());
-        assert!(take_mrp_frame(&mut vec![0,0,0,1]).is_err());
+        assert!(take_mrp_frame(&mut vec![0, 0, 0, 1]).is_err());
     }
 
     #[test]

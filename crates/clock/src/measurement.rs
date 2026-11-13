@@ -109,7 +109,7 @@ impl Estimate {
             .checked_sub(self.reference_local.ns())?
             .checked_add(lease)?;
         // Ceiling avoids understating even a fractional nanosecond of drift.
-        let drift = (u128::from(horizon) * u128::from(rate_error) + 999_999_999) / 1_000_000_000;
+        let drift = (u128::from(horizon) * u128::from(rate_error)).div_ceil(1_000_000_000);
         let uncertainty = self
             .offset_uncertainty_ns
             .checked_add(u64::try_from(drift).ok()?)?;

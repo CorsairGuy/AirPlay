@@ -6,11 +6,11 @@ use chacha20poly1305::{ChaCha20Poly1305, Nonce, Tag};
 
 mod packetizer;
 mod ptp;
-pub use ptp::ptp_sync_packet;
 pub use packetizer::{
     MAX_PCM_FRAMES, PacketizeError, Packetized, PcmPacketizer, RETRANSMIT_CACHE_PACKETS,
     RetransmitRequest, sync_packet,
 };
+pub use ptp::ptp_sync_packet;
 
 pub const HEADER_LEN: usize = 12;
 const TAG_LEN: usize = 16;

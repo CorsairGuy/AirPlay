@@ -612,7 +612,10 @@ mod tests {
         });
         let (_stop, stopped) = watch::channel(false);
         let mut pcm = Vec::new();
-        for _ in 0..(FRAMES * 48) {
+        // Keep real-time content available beyond startup/fallback buffering on
+        // hosts with coarse timer resolution. Exact PCM assertions remain below.
+        const PACKETS: usize = 256;
+        for _ in 0..(FRAMES * PACKETS) {
             pcm.extend_from_slice(&0x1234_i16.to_be_bytes());
             pcm.extend_from_slice(&(-0x2345_i16).to_be_bytes());
         }
@@ -724,7 +727,7 @@ mod tests {
         );
         if with_local {
             let records = local_seen.lock().unwrap();
-            assert_eq!(records.len(), 48);
+            assert_eq!(records.len(), PACKETS);
             for (i, (packet, at)) in records.iter().enumerate() {
                 assert_eq!(packet.frame_index(), i as u64 * FRAMES as u64);
                 assert_eq!(*at, packet.play_at(Duration::from_millis(250)).unwrap());

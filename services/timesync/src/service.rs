@@ -195,10 +195,10 @@ mod tests {
     }
     #[tokio::test]
     async fn loopback_master_follower_master_uses_same_sockets_and_revokes_old_map() {
-        let event = UdpSocket::bind("127.0.0.2:0").await.unwrap();
-        let general = UdpSocket::bind("127.0.0.2:0").await.unwrap();
+        let event = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let general = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let peer = Peer {
-            ip: "127.0.0.2".parse().unwrap(),
+            ip: "127.0.0.1".parse().unwrap(),
             ports: Ports {
                 event: event.local_addr().unwrap().port(),
                 general: general.local_addr().unwrap().port(),
@@ -239,10 +239,10 @@ mod tests {
     }
     #[tokio::test]
     async fn opt_in_probe_completes_over_loopback_without_changing_mapping_quality() {
-        let event = UdpSocket::bind("127.0.0.2:0").await.unwrap();
-        let general = UdpSocket::bind("127.0.0.2:0").await.unwrap();
+        let event = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let general = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let peer = Peer {
-            ip: "127.0.0.2".parse().unwrap(),
+            ip: "127.0.0.1".parse().unwrap(),
             ports: Ports {
                 event: event.local_addr().unwrap().port(),
                 general: general.local_addr().unwrap().port(),
@@ -300,10 +300,10 @@ mod tests {
     }
     #[tokio::test]
     async fn follow_only_without_evidence_never_creates_a_master() {
-        let event = UdpSocket::bind("127.0.0.2:0").await.unwrap();
-        let general = UdpSocket::bind("127.0.0.2:0").await.unwrap();
+        let event = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let general = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let peer = Peer {
-            ip: "127.0.0.2".parse().unwrap(),
+            ip: "127.0.0.1".parse().unwrap(),
             ports: Ports {
                 event: event.local_addr().unwrap().port(),
                 general: general.local_addr().unwrap().port(),
@@ -340,7 +340,7 @@ mod peer_update_tests {
     fn shared_peers_survive_one_owner_removal_and_conflicts_are_atomic() {
         let bind = "127.0.0.1".parse().unwrap();
         let peer = Peer {
-            ip: "127.0.0.2".parse().unwrap(),
+            ip: "127.0.0.1".parse().unwrap(),
             ports: Ports {
                 event: 10001,
                 general: 10002,
@@ -367,8 +367,8 @@ mod peer_update_tests {
     }
     #[tokio::test]
     async fn live_peer_changes_reuse_sockets_source_and_master_epoch() {
-        let event = UdpSocket::bind("127.0.0.2:0").await.unwrap();
-        let general = UdpSocket::bind("127.0.0.2:0").await.unwrap();
+        let event = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let general = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let peer = Peer {
             ip: event.local_addr().unwrap().ip(),
             ports: Ports {

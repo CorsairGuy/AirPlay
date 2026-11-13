@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
     Int(u64),
