@@ -236,3 +236,17 @@ A changed nonempty membership while armed currently requires a fresh session;
 clearing selection restores direct playback. Host reconfiguration orchestration
 must handle that limitation before activation. Wire sends/stats are not acoustic
 synchronization or native group-adoption proof. No tests/build/device changes.
+
+### 2026-11-14 — serial source/output reconfiguration
+
+source_runtime::run_reconfigured now owns desired configuration, shutdown and
+one current session. A changed key stops/awaits the old session before starting
+the newest desired configuration; identical notifications retain the session.
+None removes outputs. Closed inputs/shutdown stop and await the current owner.
+A completed session is not automatically retried with the same key; failures
+propagate after cleanup rather than creating a restart loop. Generation enables
+explicit retry. Shared clock/identity/discovery ownership remains outside.
+Station run_selected uses a canonical validated source/generation/output key
+and an explicit fresh-session factory. UI/control wiring to desired selection,
+installed-daemon evidence, factory/package entry and consolidated validation are
+still required. No tests/build/device changes for this slice per instruction.
