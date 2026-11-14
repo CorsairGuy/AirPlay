@@ -267,3 +267,19 @@ Station publish_desired combines source observations with intent revision;
 metadata/volume refreshes do not advance the source configuration key.
 Remaining: actual factory/binding publication, bootstrap/evidence and package
 entry. This library bridge is not an installed backend. No tests/build run.
+
+### 2026-11-14 — binding publication and retirement ownership
+
+ActiveBinding scopes a session's published output queue by an independent token;
+old-owner Drop cannot clear its successor, and stale revisions cannot replace
+newer publications. The reconfiguration owner calls its idle hook only before
+any session or after awaited cleanup. publish_retired rejects active queues and
+nonempty intent, and is separate from mere channel loss. Station run_selected
+publishes PreparedSession.output_control before media/PIN preparation, removes
+it after session completion, and publishes empty-selection retirement from the
+owner's idle hook. The factory must pair that control with outputs.requests.
+Existing Station recovery now exposes stop_checked alongside the unchanged
+best-effort legacy stop entrypoint. The new handoff adapter propagates failed
+mixer restore/retained ownership, so it cannot report successful retirement.
+No alternate recovery, tests/build or device changes. Bootstrap factory/evidence,
+confirmed topology, executable package and consolidated validation remain.

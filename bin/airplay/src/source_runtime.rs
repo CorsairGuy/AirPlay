@@ -64,6 +64,7 @@ pub async fn run_reconfigured<C, F, S>(
     mut desired: watch::Receiver<Option<C>>,
     mut shutdown: watch::Receiver<bool>,
     mut start: F,
+    mut idle: impl FnMut() -> Result<()>,
 ) -> Result<()>
 where
     C: Clone + PartialEq,
@@ -78,6 +79,8 @@ where
         let wanted = desired.borrow_and_update().clone();
         if wanted.is_none() {
             completed = None;
+            // Reached only before any session, or after its awaited cleanup.
+            idle()?;
         }
         let selected = match wanted {
             Some(value) if completed.as_ref() != Some(&value) => value,

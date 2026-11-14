@@ -21,6 +21,98 @@ pub struct Binding {
     /// the host has awaited old-session cleanup. Publish a live queue before
     /// receiver preparation, so the original request carries its PIN context.
     pub control: Option<OutputControl>,
+    token: Arc<()>,
+}
+/// Scoped publication; an old session cannot clear its successor's binding.
+pub struct ActiveBinding {
+    slot: watch::Sender<Option<Binding>>,
+    token: Arc<()>,
+}
+impl ActiveBinding {
+    pub fn publish(
+        slot: watch::Sender<Option<Binding>>,
+        revision: u64,
+        control: OutputControl,
+    ) -> Result<Self> {
+        anyhow::ensure!(revision != 0, "invalid output binding revision");
+        let token = Arc::new(());
+        let mut accepted = false;
+        slot.send_if_modified(|current| {
+            if current
+                .as_ref()
+                .is_some_and(|binding| binding.revision > revision)
+            {
+                return false;
+            }
+            if current
+                .as_ref()
+                .is_some_and(|binding| binding.control.is_some())
+            {
+                return false;
+            }
+            *current = Some(Binding {
+                revision,
+                control: Some(control),
+                token: token.clone(),
+            });
+            accepted = true;
+            true
+        });
+        anyhow::ensure!(accepted, "previous output binding still active");
+        Ok(Self { slot, token })
+    }
+}
+impl Drop for ActiveBinding {
+    fn drop(&mut self) {
+        self.slot.send_if_modified(|current| {
+            if current
+                .as_ref()
+                .is_some_and(|binding| Arc::ptr_eq(&binding.token, &self.token))
+            {
+                *current = None;
+                true
+            } else {
+                false
+            }
+        });
+    }
+}
+/// Call only from the session owner's idle/awaited-cleanup path. Loss of a
+/// queue alone is not retirement proof. Never retire a nonempty new intent.
+pub fn publish_retired(slot: &watch::Sender<Option<Binding>>, intent: &Intent) -> Result<()> {
+    if intent.revision == 0 || !intent.outputs.is_empty() {
+        return Ok(());
+    }
+    let mut accepted = true;
+    slot.send_if_modified(|current| {
+        if current
+            .as_ref()
+            .is_some_and(|binding| binding.revision > intent.revision)
+        {
+            return false;
+        }
+        if current
+            .as_ref()
+            .is_some_and(|binding| binding.control.is_some())
+        {
+            accepted = false;
+            return false;
+        }
+        if current
+            .as_ref()
+            .is_some_and(|binding| binding.revision == intent.revision)
+        {
+            return false;
+        }
+        *current = Some(Binding {
+            revision: intent.revision,
+            control: None,
+            token: Arc::new(()),
+        });
+        true
+    });
+    anyhow::ensure!(accepted, "cannot retire an active output binding");
+    Ok(())
 }
 
 pub async fn run(
