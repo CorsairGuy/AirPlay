@@ -1,10 +1,11 @@
 //! Explicit shared-clock host seam; no daemon or automatic startup.
 pub use crate::ptp_group::{ExternalPeerControl, PeerControlUpdate};
 use anyhow::Result;
-use clock::external::Selection;
+pub use clock::external::Selection;
 use std::{io, path::Path, sync::Arc, time::Duration};
+pub use timesync::external_acquisition::Progress;
 use timesync::{
-    external_acquisition::{Acquisition, Policy, Progress},
+    external_acquisition::{Acquisition, Policy},
     external_media::Timeline,
     nqptp_reader::Reader,
 };
@@ -14,6 +15,7 @@ use timesync::{
 pub struct ExternalClock {
     owner: Acquisition,
     timeline: Arc<Timeline>,
+    selection: Selection,
 }
 /// Cloneable group factory; acquisition remains owned by one independent task.
 /// Keeping this handle does not keep revoked clock observations valid.
@@ -37,6 +39,9 @@ impl ExternalClockHandle {
     }
 }
 impl ExternalClock {
+    pub fn selection(&self) -> Selection {
+        self.selection
+    }
     pub fn handle(&self) -> ExternalClockHandle {
         ExternalClockHandle {
             timeline: self.timeline.clone(),
@@ -57,7 +62,11 @@ impl ExternalClock {
         let reader = Reader::open(path, uid)?;
         let (timeline, publisher) = Timeline::new(selection, max_age, max_uncertainty, max_ahead)?;
         let owner = Acquisition::new(reader, publisher, selection, policy)?;
-        Ok(Self { owner, timeline })
+        Ok(Self {
+            owner,
+            timeline,
+            selection,
+        })
     }
     /// Invoke from the host acquisition scheduler, never an audio callback.
     pub fn poll(&mut self, evidence: impl FnMut() -> io::Result<Selection>) -> Result<Progress> {

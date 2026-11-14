@@ -68,6 +68,10 @@ impl Drop for NqptpWorker {
     }
 }
 impl NqptpWorker {
+    /// Pinned contract only, not fresh role/daemon evidence.
+    pub fn selection(&self) -> Selection {
+        self.selection
+    }
     pub fn new(
         socket: UdpSocket,
         destination: SocketAddr,

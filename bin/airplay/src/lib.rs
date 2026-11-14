@@ -9,6 +9,8 @@
 pub mod card;
 pub mod card_transport;
 pub mod continuous_control;
+#[cfg(target_os = "linux")]
+pub mod daemon_identity;
 pub mod discovery_catalog;
 pub mod discovery_feed;
 pub mod events;

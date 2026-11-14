@@ -314,3 +314,21 @@ limits are explicit config, no default device port or service is started here.
 The external clock acquisition/control bootstrap and executable config/package
 entry still remain; confirmed native group presentation is separate. No tests,
 build or installed service changes for this slice per user instruction.
+
+### 2026-11-14 — existing-daemon attestation and bootstrap supervision
+
+Linux DaemonIdentity verifies an explicit PID/start-time, process/executable UID,
+non-writable executable metadata and trusted SHA256 once, then checks the pinned
+process/executable on each observation. A boot/PID/start-derived instance token
+is independent of SHM. This does NOT prove role, exclusive command authority,
+port ownership or an exec of the identical inode; those require the independent
+role/epoch provider. No process or configuration is started/modified.
+Station Bootstrap::run checks matching clock/control/daemon contracts, applies
+an explicit timing-only startup peer interest and waits for measured publication
+before serving Card/media. Acquisition/control loss stops the supervised host.
+The existing NQPTP daemon is never stopped or rebound; only loopback control is
+used. Startup peer interest/owner and deadlines are explicit, not guessed.
+An already independently attested role provider is still REQUIRED; this does
+not autonomously select a new daemon role or turn SHM into role proof. Executable
+configuration/profile wiring, package and consolidated validation remain.
+No tests/build or device changes for this slice per user instruction.
