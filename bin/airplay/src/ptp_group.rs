@@ -511,7 +511,6 @@ struct QualifiedPreparer<P> {
 impl<P: SessionPreparer> SessionPreparer for QualifiedPreparer<P> {
     async fn active(&mut self, pool: &SessionPool) -> Result<()> {
         self.timeline.reading_at(std::time::Instant::now())?;
-        self.inner.active(pool).await?;
         let members = pool.sync_ptp_members()?;
         if self.last_members.as_ref() != Some(&members) {
             if let Some(clock) = &self.clock_peers {
@@ -519,6 +518,11 @@ impl<P: SessionPreparer> SessionPreparer for QualifiedPreparer<P> {
             }
             self.last_members = Some(members);
         }
+        // Host handoff hooks may change a hardware route. Apply clock peers
+        // first and recheck the lease after awaiting that external operation.
+        self.timeline.reading_at(std::time::Instant::now())?;
+        self.inner.active(pool).await?;
+        self.timeline.reading_at(std::time::Instant::now())?;
         Ok(())
     }
     async fn finish(&mut self) -> Result<()> {

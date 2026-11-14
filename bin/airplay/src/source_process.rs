@@ -41,6 +41,11 @@ pub struct Capture {
     stdout: ChildStdout,
 }
 impl Capture {
+    /// Owned capture process only; a device guard must never target the shared
+    /// host daemon PID as its per-session termination target.
+    pub fn id(&self) -> Result<u32> {
+        self.child.id().context("PCM acquisition has exited")
+    }
     pub fn spawn(options: Options) -> Result<Self> {
         options.validate()?;
         let mut child = Command::new(options.program)

@@ -140,6 +140,17 @@ impl SessionPool {
     pub fn len(&self) -> usize {
         self.entries.len()
     }
+    /// Physical workers currently owned by this pool. Task membership alone
+    /// is not media progress, acoustic readiness or native group adoption.
+    pub fn members(&self) -> Vec<crate::outputs::ReceiverEndpoint> {
+        self.entries
+            .iter()
+            .map(|(uid, entry)| crate::outputs::ReceiverEndpoint {
+                uid: uid.clone(),
+                address: entry.endpoint,
+            })
+            .collect()
+    }
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -237,15 +248,7 @@ impl SessionPool {
         catalog: &crate::outputs::OutputCatalog,
         selected: &[String],
     ) -> Result<crate::outputs::SelectionPlan> {
-        use crate::outputs::ReceiverEndpoint;
-        let current: Vec<_> = self
-            .entries
-            .iter()
-            .map(|(uid, entry)| ReceiverEndpoint {
-                uid: uid.clone(),
-                address: entry.endpoint,
-            })
-            .collect();
+        let current = self.members();
         let mut plan = catalog.plan(&current, selected)?;
         let mut retained = Vec::new();
         for receiver in plan.retained {

@@ -219,3 +219,20 @@ This is explicit library composition, not a runnable installed replacement.
 Remaining: independent daemon/authority evidence, guard readiness, discovery/
 confirmed Card topology, automatic next-session orchestration and package entry.
 Per user instruction, no tests/build were run for this slice; validation pending.
+
+### 2026-11-14 — existing route guard integration
+
+Capture exposes its owned child PID; SessionPool exposes exact physical members
+using the same membership snapshot as selection planning. QualifiedPreparer now
+applies peer interests and rechecks the clock lease before host handoff hooks,
+then rechecks again after the hook. No route/mixer implementation moved into core.
+Station HandoffPreparer delegates authentication/preparation to the existing
+preparer, waits for exact physical membership plus running workers/first media
+sends, then uses the existing Plan::arm/Guard::stop. Existing renderer readiness
+and verified-route checks remain in the deployed guard. Its termination target
+is the per-session capture child, NEVER the shared core daemon. Plan source and
+renderer stats/gate must match. None keeps handoff disabled and direct audio on.
+A changed nonempty membership while armed currently requires a fresh session;
+clearing selection restores direct playback. Host reconfiguration orchestration
+must handle that limitation before activation. Wire sends/stats are not acoustic
+synchronization or native group-adoption proof. No tests/build/device changes.
