@@ -42,6 +42,52 @@ fn hash(bytes: &[u8]) -> String {
 }
 
 impl Card {
+    /// Explicit host playback observations use the same Card/SourceControl
+    /// machinery as receiver events. Keep identity, profile, output topology
+    /// and routes under their existing owners. No queue-acceptance is invented.
+    pub fn observe_host(&self, observed: &Feed) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !observed.source.is_empty()
+                && observed.source.len() <= 256
+                && observed.content_id.len() <= 1024
+                && [&observed.title, &observed.artist, &observed.album]
+                    .iter()
+                    .all(|v| v.len() <= 4096)
+                && observed.position.is_finite()
+                && observed.position >= 0.0
+                && observed.duration.is_none_or(|v| v.is_finite() && v >= 0.0)
+                && observed.volume.is_finite()
+                && (0.0..=1.0).contains(&observed.volume)
+                && observed
+                    .cover
+                    .as_ref()
+                    .is_none_or(|v| v.data.len() <= 2 * 1024 * 1024),
+            "invalid host playback observation"
+        );
+        self.update(|feed| {
+            let changed_source =
+                feed.source != observed.source || feed.content_id != observed.content_id;
+            feed.source.clone_from(&observed.source);
+            feed.title.clone_from(&observed.title);
+            feed.artist.clone_from(&observed.artist);
+            feed.album.clone_from(&observed.album);
+            feed.content_id.clone_from(&observed.content_id);
+            // Repeated identical observations must not move the sample anchor.
+            if changed_source
+                || feed.position != observed.position
+                || feed.playing != observed.playing
+            {
+                feed.position_sampled = std::time::Instant::now();
+            }
+            feed.position = observed.position;
+            feed.duration = observed.duration;
+            feed.playing = observed.playing;
+            feed.volume = observed.volume;
+            feed.control_available = observed.control_available;
+            feed.cover.clone_from(&observed.cover);
+        });
+        Ok(())
+    }
     /// Publish output-owner verified descriptors. Running audio alone does not
     /// prove receiver group adoption. Preserve reported group/cluster IDs; never
     /// manufacture membership from a requested selection. Advertise only volume

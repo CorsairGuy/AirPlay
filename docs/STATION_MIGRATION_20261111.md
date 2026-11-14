@@ -188,3 +188,19 @@ The Station tap profile delegates selection to this owner. Frontend source
 observations/control routing and guard integration remain to compose.
 Per user instruction, no new tests/build were run for this slice; validation
 is deferred to the next agreed consolidated verification. No device changes.
+
+### 2026-11-14 — host playback and command bridge
+
+Card::observe_host ingests explicit playback observations while preserving
+identity/profile/routes/output topology and existing incremental artwork logic.
+Repeated identical positions do not reset the timeline anchor. Remote::bind_host
+adds a bounded host command queue to the same Card control path; a full queue
+rejects commands, and queued commands from a superseded binding are discarded.
+Binding identity is independent of reused numeric owner IDs. Wire attach/detach
+remains separate, and dropping an old host cannot detach its successor.
+Station playback adapter maps Feed/Cover without private content URLs/keys,
+and delegates commands to existing Station control with an explicit source guard.
+Source transitions end its observer; the host still must compose/await observer,
+command worker and media lifetime before enabling the default backend.
+No tests/build were run for this slice per user instruction. Validation pending;
+no claim of installed functionality or resolution of historical device regressions.

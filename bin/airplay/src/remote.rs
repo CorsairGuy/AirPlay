@@ -108,7 +108,54 @@ pub struct Remote {
 
 struct Active {
     owner: u64,
-    tx: mpsc::UnboundedSender<Command>,
+    tx: Commands,
+}
+enum Commands {
+    Wire(mpsc::UnboundedSender<Command>),
+    Host(mpsc::Sender<Command>, Arc<()>),
+}
+impl Commands {
+    fn send(&self, command: Command) -> bool {
+        match self {
+            Self::Wire(tx) => tx.send(command).is_ok(),
+            Self::Host(tx, _) => tx.try_send(command).is_ok(),
+        }
+    }
+    fn is_closed(&self) -> bool {
+        match self {
+            Self::Wire(tx) => tx.is_closed(),
+            Self::Host(tx, _) => tx.is_closed(),
+        }
+    }
+}
+/// Explicit host command queue for a selected local/external media source.
+/// Drop detaches only this host binding, never a later wire session.
+pub struct HostCommands {
+    remote: Remote,
+    commands: mpsc::Receiver<Command>,
+    token: Arc<()>,
+}
+impl HostCommands {
+    pub async fn recv(&mut self) -> Option<Command> {
+        let command = self.commands.recv().await?;
+        let active = self.remote.active.lock().unwrap_or_else(|e| e.into_inner());
+        active
+            .as_ref()
+            .filter(
+                |a| matches!(&a.tx, Commands::Host(_, token) if Arc::ptr_eq(token, &self.token)),
+            )
+            .map(|_| command)
+    }
+}
+impl Drop for HostCommands {
+    fn drop(&mut self) {
+        let mut active = self.remote.active.lock().unwrap_or_else(|e| e.into_inner());
+        if active.as_ref().is_some_and(
+            |a| matches!(&a.tx, Commands::Host(_, token) if Arc::ptr_eq(token, &self.token)),
+        ) {
+            *active = None;
+        }
+    }
 }
 
 impl Remote {
@@ -120,7 +167,7 @@ impl Remote {
     pub fn send(&self, command: Command) -> bool {
         let active = self.active.lock().unwrap_or_else(|e| e.into_inner());
         match active.as_ref() {
-            Some(a) => a.tx.send(command).is_ok(),
+            Some(a) => a.tx.send(command),
             None => false,
         }
     }
@@ -133,17 +180,48 @@ impl Remote {
             .as_ref()
             .is_some_and(|a| !a.tx.is_closed())
     }
+    /// Bind an explicit host source without replacing a live receiver session.
+    /// Queue acceptance is not execution acknowledgement. Full queues reject
+    /// synchronously, preserving the existing Card command acceptance contract.
+    pub fn bind_host(&self, owner: u64, capacity: usize) -> anyhow::Result<HostCommands> {
+        anyhow::ensure!(
+            owner != 0 && (1..=64).contains(&capacity),
+            "invalid host command queue"
+        );
+        let mut active = self.active.lock().unwrap_or_else(|e| e.into_inner());
+        anyhow::ensure!(
+            active.as_ref().is_none_or(|a| a.tx.is_closed()),
+            "source command owner already active"
+        );
+        let (tx, commands) = mpsc::channel(capacity);
+        let token = Arc::new(());
+        *active = Some(Active {
+            owner,
+            tx: Commands::Host(tx, token.clone()),
+        });
+        Ok(HostCommands {
+            remote: self.clone(),
+            commands,
+            token,
+        })
+    }
 
     /// Канал событий соединения `owner` открыт: команды теперь идут туда.
     pub(crate) fn attach(&self, owner: u64) -> mpsc::UnboundedReceiver<Command> {
         let (tx, rx) = mpsc::unbounded_channel();
-        *self.active.lock().unwrap_or_else(|e| e.into_inner()) = Some(Active { owner, tx });
+        *self.active.lock().unwrap_or_else(|e| e.into_inner()) = Some(Active {
+            owner,
+            tx: Commands::Wire(tx),
+        });
         rx
     }
 
     pub(crate) fn detach(&self, owner: u64) {
         let mut active = self.active.lock().unwrap_or_else(|e| e.into_inner());
-        if active.as_ref().is_some_and(|a| a.owner == owner) {
+        if active
+            .as_ref()
+            .is_some_and(|a| a.owner == owner && matches!(&a.tx, Commands::Wire(_)))
+        {
             *active = None;
         }
     }
