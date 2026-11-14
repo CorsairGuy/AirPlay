@@ -204,3 +204,18 @@ Source transitions end its observer; the host still must compose/await observer,
 command worker and media lifetime before enabling the default backend.
 No tests/build were run for this slice per user instruction. Validation pending;
 no claim of installed functionality or resolution of historical device regressions.
+
+### 2026-11-14 — selected-source session supervision
+
+source_runtime::run_source now awaits media, source observations and host command
+forwarding as one lifetime. First completion broadcasts the session stop and
+awaits remaining branches; cancellation also broadcasts stop. An already-stopped
+session does not poll/spawn media. Shared external clock ownership stays outside
+the source session; no daemon shutdown or hardware route operations occur here.
+The Station runtime::Session composes the selected tap, Card observation bridge,
+source-bound commands, qualified group and local renderer through this owner.
+A changed source ends the observer normally and retires the old pipeline.
+This is explicit library composition, not a runnable installed replacement.
+Remaining: independent daemon/authority evidence, guard readiness, discovery/
+confirmed Card topology, automatic next-session orchestration and package entry.
+Per user instruction, no tests/build were run for this slice; validation pending.

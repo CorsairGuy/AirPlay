@@ -34,6 +34,7 @@ pub mod serve;
 pub mod session;
 pub mod session_preparer;
 pub mod source_process;
+pub mod source_runtime;
 pub mod state;
 #[macro_use]
 pub mod mrp_service;
