@@ -283,3 +283,19 @@ best-effort legacy stop entrypoint. The new handoff adapter propagates failed
 mixer restore/retained ownership, so it cannot report successful retirement.
 No alternate recovery, tests/build or device changes. Bootstrap factory/evidence,
 confirmed topology, executable package and consolidated validation remain.
+
+### 2026-11-14 — concrete candidate host construction
+
+ExternalClockHandle now permits fresh qualified group creation while the sole
+acquisition owner runs independently; revocation still invalidates every handle.
+The Station Factory builds actual StoredSessionPreparer/PTP group, command
+binding, unique route Plan/renderer, source tap and output queue from explicit
+Config, imported store and live catalog. No external session-builder placeholder
+is needed. Factory::run composes the persistent Card router, desired-source
+publisher and serial session loop. Explicit configuration preserves transport
+identity, pairing policy, receiver volume and local calibration. Plan::configured
+validates existing proof/helpers and allocates unique session paths; it never
+prepares or alters the device routes. No implicit identity generation or daemon.
+This is a concrete library host entry, not yet an executable package. Actual
+installed-daemon attestation/control bootstrap, Card transport wiring, confirmed
+topology and package/rollback entry remain. No tests/build/device changes.

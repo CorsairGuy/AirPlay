@@ -15,7 +15,33 @@ pub struct ExternalClock {
     owner: Acquisition,
     timeline: Arc<Timeline>,
 }
+/// Cloneable group factory; acquisition remains owned by one independent task.
+/// Keeping this handle does not keep revoked clock observations valid.
+#[derive(Clone)]
+pub struct ExternalClockHandle {
+    timeline: Arc<Timeline>,
+}
+impl ExternalClockHandle {
+    pub fn domain(&self) -> clock::domain::Domain {
+        self.timeline.domain()
+    }
+    pub fn group(
+        &self,
+        id: u128,
+        owner: u128,
+        control: Arc<dyn ExternalPeerControl>,
+        stop: tokio::sync::watch::Receiver<bool>,
+    ) -> Result<crate::ptp_group::PtpGroup> {
+        crate::ptp_group::PtpGroup::new_external(self.timeline.clone(), id, stop)?
+            .with_external_peer_control(owner, control)
+    }
+}
 impl ExternalClock {
+    pub fn handle(&self) -> ExternalClockHandle {
+        ExternalClockHandle {
+            timeline: self.timeline.clone(),
+        }
+    }
     /// The caller attests the installed daemon/patch and selected master role.
     /// Supplying SHM-derived IDs alone is insufficient. Construction reads only
     /// the explicit file metadata; it neither publishes nor binds PTP ports.
@@ -99,8 +125,7 @@ impl ExternalClock {
         control: Arc<dyn ExternalPeerControl>,
         stop: tokio::sync::watch::Receiver<bool>,
     ) -> Result<crate::ptp_group::PtpGroup> {
-        crate::ptp_group::PtpGroup::new_external(self.timeline.clone(), id, stop)?
-            .with_external_peer_control(owner, control)
+        self.handle().group(id, owner, control, stop)
     }
 }
 #[cfg(test)]
