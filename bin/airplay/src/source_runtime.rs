@@ -135,3 +135,37 @@ where
         }
     }
 }
+
+/// Explicit application tasks, owned and awaited as one host lifetime.
+pub type HostTask = std::pin::Pin<Box<dyn Future<Output = Result<()>> + Send + 'static>>;
+/// First completion/error signals the supplied shared stop, then awaits every
+/// task. Callers must make tasks observe that stop and bound their own I/O.
+/// Cancellation broadcasts stop; callers should await shutdown rather than abort.
+pub async fn run_host(tasks: Vec<HostTask>, stop: watch::Sender<bool>) -> Result<()> {
+    anyhow::ensure!(
+        !tasks.is_empty() && tasks.len() <= 64,
+        "invalid host task count"
+    );
+    let stop = StopOnDrop(stop);
+    if *stop.0.borrow() {
+        return Ok(());
+    }
+    let mut running = tokio::task::JoinSet::new();
+    for task in tasks {
+        running.spawn(task);
+    }
+    let mut failure = None;
+    while let Some(result) = running.join_next().await {
+        stop.0.send_replace(true);
+        let result = result
+            .map_err(anyhow::Error::from)
+            .and_then(|result| result);
+        if failure.is_none() {
+            failure = result.err();
+        }
+    }
+    match failure {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}

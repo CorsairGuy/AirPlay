@@ -76,7 +76,10 @@ impl ExternalClock {
         let mut loss = control.loss();
         let lost = async {
             loop {
-                if *loss.borrow() || loss.changed().await.is_err() {
+                if *loss.borrow() {
+                    return;
+                }
+                if loss.changed().await.is_err() {
                     return;
                 }
             }

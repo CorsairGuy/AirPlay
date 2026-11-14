@@ -299,3 +299,18 @@ prepares or alters the device routes. No implicit identity generation or daemon.
 This is a concrete library host entry, not yet an executable package. Actual
 installed-daemon attestation/control bootstrap, Card transport wiring, confirmed
 topology and package/rollback entry remain. No tests/build/device changes.
+
+### 2026-11-14 — local Card transport and root host supervision
+
+card_transport::serve exposes the existing Card::serve on an explicitly supplied
+loopback listener, behind the authenticated receiver bridge. It bounds concurrent
+connections, owns every connection task and signals/awaits them on shutdown or
+listener failure. This is not another MRP/RTSP/pairing implementation or LAN port.
+source_runtime::run_host supervises an explicit bounded set of application tasks;
+first completion/error signals shared stop and awaits all branches. Station
+Factory::run now composes four real branches: Card transport, persistent output
+router, source observations and concrete serial sessions. Listener/connection
+limits are explicit config, no default device port or service is started here.
+The external clock acquisition/control bootstrap and executable config/package
+entry still remain; confirmed native group presentation is separate. No tests,
+build or installed service changes for this slice per user instruction.
