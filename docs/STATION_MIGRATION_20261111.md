@@ -175,3 +175,16 @@ renderer/Card/group pipeline through RendererProfile::run_tap. Hardware tap
 installation, source selection/control events and guard readiness are still
 host responsibilities. The default legacy backend is unchanged.
 Validation: 114 core audio-only application tests and scoped Clippy passed offline, including failed capture EOF and stop/reap. No installed capture/routes changed.
+
+### 2026-11-14 — selected capture ownership
+
+SelectedCapture now serializes source replacement in the core. It validates
+before stopping working capture, reuses an unchanged live source and awaits
+old-child exit before starting the replacement. A cancelled stop retains the
+child handle, so the next selection must complete cleanup before spawning.
+The reader's mutable borrow prevents concurrent selection; the host must
+cancel/await its old media pipeline first. No implicit source priority/fallback.
+The Station tap profile delegates selection to this owner. Frontend source
+observations/control routing and guard integration remain to compose.
+Per user instruction, no new tests/build were run for this slice; validation
+is deferred to the next agreed consolidated verification. No device changes.

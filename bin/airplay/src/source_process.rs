@@ -14,6 +14,7 @@ use tokio::{
     time::timeout,
 };
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Options {
     pub program: PathBuf,
     pub args: Vec<String>,
@@ -67,12 +68,53 @@ impl Capture {
         Ok(())
     }
     pub async fn stop(mut self) -> Result<()> {
+        self.stop_in_place().await
+    }
+    async fn stop_in_place(&mut self) -> Result<()> {
         if self.child.try_wait()?.is_none() {
             self.child.start_kill()?;
         }
         timeout(Duration::from_secs(1), self.child.wait())
             .await
             .context("PCM acquisition stop deadline")??;
+        Ok(())
+    }
+}
+/// Serial owner of one selected media tap. Borrowing the reader prevents a
+/// concurrent source change; the caller first cancels/awaits its old pipeline.
+/// No source priority, fallback, device identifier or playback command is
+/// inferred here. Those decisions remain with the host coordinator.
+#[derive(Default)]
+pub struct SelectedCapture {
+    active: Option<(Options, Capture)>,
+}
+impl SelectedCapture {
+    /// Returns false for the same still-running source. Validate first so a
+    /// malformed request cannot stop working audio. A failed spawn leaves no
+    /// selected source, rather than silently resuming an unrelated source.
+    pub async fn select(&mut self, options: Options) -> Result<bool> {
+        options.validate()?;
+        if let Some((current, capture)) = &mut self.active {
+            if *current == options && capture.child.try_wait()?.is_none() {
+                return Ok(false);
+            }
+        }
+        self.stop().await?;
+        let capture = Capture::spawn(options.clone())?;
+        self.active = Some((options, capture));
+        Ok(true)
+    }
+    pub fn reader(&mut self) -> Result<&mut Capture> {
+        Ok(&mut self.active.as_mut().context("no selected PCM source")?.1)
+    }
+    /// Keep the child in the slot while awaiting its exit. Cancellation of
+    /// this future retains the handle, so a later select must reap it before
+    /// starting another child. Never take/drop it before the awaited stop.
+    pub async fn stop(&mut self) -> Result<()> {
+        if let Some((_, capture)) = &mut self.active {
+            capture.stop_in_place().await?;
+        }
+        self.active.take();
         Ok(())
     }
 }
