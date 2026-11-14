@@ -250,3 +250,20 @@ Station run_selected uses a canonical validated source/generation/output key
 and an explicit fresh-session factory. UI/control wiring to desired selection,
 installed-daemon evidence, factory/package entry and consolidated validation are
 still required. No tests/build/device changes for this slice per instruction.
+
+### 2026-11-14 — persistent Card request router
+
+output_router routes a persistent Card OutputControl queue to the currently
+published session binding. Existing relay_selection validates intent; the
+original request, authorization context, reply and state callback are forwarded
+unchanged to output_worker. Intent revision is separate from confirmed topology.
+Failed/cancelled/dropped requests roll back only their still-current intent;
+OutputRequest completion now runs on normal finish or unhandled drop, and the
+existing worker uses that completion consistently. No new pairing/wire stack.
+A host must publish the new queue before receiver preparation (the original
+request supplies PIN context). Empty selection needs an explicit retirement
+binding only AFTER old-session cleanup, not an optimistic success response.
+Station publish_desired combines source observations with intent revision;
+metadata/volume refreshes do not advance the source configuration key.
+Remaining: actual factory/binding publication, bootstrap/evidence and package
+entry. This library bridge is not an installed backend. No tests/build run.

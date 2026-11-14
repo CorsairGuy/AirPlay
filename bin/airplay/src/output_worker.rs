@@ -149,6 +149,7 @@ pub async fn run_discovered(
             }
         };
         if request.reply.is_closed() {
+            request.finish(100);
             continue;
         }
         if let Some(operation) = request.operation.take() {
@@ -165,7 +166,7 @@ pub async fn run_discovered(
                 Ok(()) => 0,
                 Err(_) => 39,
             };
-            let _ = request.reply.send(code);
+            request.finish(code);
             continue;
         }
         if let Some((uid, value)) = request.volume.take() {
@@ -183,7 +184,7 @@ pub async fn run_discovered(
         let next = match selection {
             Ok(next) => next,
             Err(_) => {
-                let _ = request.reply.send(39);
+                request.finish(39);
                 last_error = Some(39);
                 continue;
             }
@@ -191,7 +192,7 @@ pub async fn run_discovered(
         let plan = match pool.plan_selection(&catalog, &next) {
             Ok(plan) => plan,
             Err(_) => {
-                let _ = request.reply.send(39);
+                request.finish(39);
                 last_error = Some(39);
                 continue;
             }
@@ -200,7 +201,7 @@ pub async fn run_discovered(
             .receivers(&next)
             .and_then(|receivers| preparer.selection(&receivers));
         if selection_ready.is_err() {
-            let _ = request.reply.send(100);
+            request.finish(100);
             last_error = Some(100);
             continue;
         }
@@ -220,8 +221,12 @@ pub async fn run_discovered(
         let prepared = tokio::select! {
             biased;
             _ = stopped(&mut stop) => break,
-            _ = request.reply.closed() => continue,
-            result = prepare => result,
+            _ = request.reply.closed() => None,
+            result = prepare => Some(result),
+        };
+        let Some(prepared) = prepared else {
+            request.finish(100);
+            continue;
         };
         // Authentication may have taken seconds. Do not start a receiver at a
         // stale/reassigned address or apply an alias that now means another row.
@@ -238,7 +243,7 @@ pub async fn run_discovered(
                 catalog = Arc::new(fresh);
             }
             if !still_matches {
-                let _ = request.reply.send(100);
+                request.finish(100);
                 last_error = Some(100);
                 continue;
             }
@@ -268,7 +273,7 @@ pub async fn run_discovered(
             result = preparer.active(&pool) => result,
         };
         if reconciled.is_err() {
-            let _ = request.reply.send(100);
+            request.finish(100);
             last_error = Some(100);
             break;
         }
@@ -280,7 +285,7 @@ pub async fn run_discovered(
                 last_error,
             },
         );
-        let _ = request.reply.send(code);
+        request.finish(code);
     }
     pool.shutdown().await;
     if preparer.finish().await.is_err() {

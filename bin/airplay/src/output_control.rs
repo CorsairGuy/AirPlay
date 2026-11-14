@@ -23,28 +23,61 @@ impl VolumeBackend for sender::pool::SessionPool {
 }
 pub(crate) type VolumeOperation =
     Box<dyn FnOnce(&dyn VolumeBackend, &sender::outputs::OutputCatalog) -> u64 + Send>;
+struct Completion(Option<Box<dyn FnOnce(u64) + Send>>);
+impl Completion {
+    fn new(callback: Box<dyn FnOnce(u64) + Send>) -> Self {
+        Self(Some(callback))
+    }
+    fn finish(mut self, code: u64) {
+        if let Some(callback) = self.0.take() {
+            callback(code);
+        }
+    }
+}
+impl Drop for Completion {
+    fn drop(&mut self) {
+        if let Some(callback) = self.0.take() {
+            callback(100);
+        }
+    }
+}
 pub struct OutputRequest {
     pub body: Node,
     pub authorization: Option<crate::route_pairing::AuthorizationContext>,
     pub volume: Option<(String, f32)>,
     pub batch: Option<Vec<(String, f32)>>,
     pub(crate) operation: Option<VolumeOperation>,
-    after: Option<Box<dyn FnOnce(u64) + Send>>,
+    after: Option<Completion>,
     /// Reply with the actual MRP error code after applying the operation.
     /// Check is_closed()/closed() to cancel pending pairing on controller loss.
     pub reply: oneshot::Sender<u64>,
 }
 impl OutputRequest {
+    pub(crate) fn after_result(&mut self, callback: impl FnOnce(u64) + Send + 'static) {
+        let previous = self.after.take();
+        self.after = Some(Completion::new(Box::new(move |code| {
+            if let Some(previous) = previous {
+                previous.finish(code);
+            }
+            callback(code);
+        })));
+    }
     /// Run the accepted-state callback before acknowledging, so the next queued
     /// operation sees fresh levels even if its controller's writer is delayed.
     pub fn finish(mut self, code: u64) {
         if let Some(after) = self.after.take() {
-            after(code);
+            after.finish(code);
         }
         let _ = self.reply.send(code);
     }
 }
 impl OutputControl {
+    /// Preserve the original reply, authorization and accepted-state callback.
+    pub fn forward(&self, request: OutputRequest) -> Result<(), Box<OutputRequest>> {
+        self.0
+            .try_send(request)
+            .map_err(|error| Box::new(error.into_inner()))
+    }
     pub fn channel(capacity: usize) -> (Self, mpsc::Receiver<OutputRequest>) {
         let (tx, rx) = mpsc::channel(capacity.clamp(1, 64));
         (Self(tx), rx)
@@ -102,7 +135,7 @@ impl OutputControl {
                 volume: Some((uid, value)),
                 batch: None,
                 operation: None,
-                after,
+                after: after.map(Completion::new),
                 reply,
             })
             .map_err(|_| ())?;

@@ -763,7 +763,7 @@ mod tests {
             replies.try_recv().is_err(),
             "do not acknowledge before backend result"
         );
-        request.reply.send(39).unwrap();
+        request.finish(39);
         let Output::Messages(messages) = replies.recv().await.unwrap() else {
             panic!("wrong output")
         };
