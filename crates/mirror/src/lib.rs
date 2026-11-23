@@ -1,7 +1,8 @@
-//! Зеркалирование экрана (тип 110): H.264/H.265 поверх TCP, AES-CTR, SPS/PPS.
+//! Зеркалирование экрана (тип 110): H.264/H.265 поверх TCP, SPS/PPS.
 //!
 //! Схема — как в UxPlay и shairplay-rust: ключ потока выводится из ключа
-//! FairPlay (`ekey` из SETUP), каждый пакет — 128 байт заголовка и тело.
+//! FairPlay (`ekey` из SETUP) для AES-CTR либо из HAP для ChaCha20-Poly1305;
+//! каждый пакет содержит 128 байт заголовка и тело.
 //! Видео отдаётся наружу в [`VideoSink`] без декодирования; декодер — в
 //! `ap_video`, показ зависит от железа и живёт в программе, которая
 //! встраивает приёмник.
@@ -10,7 +11,7 @@ mod receiver;
 
 use sha2::{Digest, Sha512};
 
-pub use receiver::{HEADER_LEN, Header, PacketKind, receive};
+pub use receiver::{HEADER_LEN, Header, PacketKind, receive, receive_authenticated};
 
 use std::fmt;
 use std::sync::Arc;

@@ -1,4 +1,4 @@
-//! Explicit Linux MONOTONIC_RAW / Rust Instant correlation acquisition.
+//! Explicit external monotonic / Rust Instant correlation acquisition.
 //! No daemon, socket, sleep, servo or role qualification. Two observations are
 //! required: a zero-rate mapping is never invented from one sample. Error bounds
 //! are caller policy plus bracket/resolution measurements, not hardware accuracy.
@@ -66,6 +66,29 @@ impl Bracket {
     pub fn uncertainty_ns(self) -> u64 {
         self.uncertainty_ns
     }
+}
+
+/// Bracket an injected monotonic-clock sample. The caller must independently
+/// establish which clock the producer uses and supply measured bounds.
+pub fn capture_with(
+    sample: impl FnOnce() -> io::Result<u64>,
+    raw_resolution_ns: u64,
+    instant_resolution_ns: u64,
+    capture_uncertainty_ns: u64,
+    max_bracket: Duration,
+) -> io::Result<Bracket> {
+    let before = Instant::now();
+    let raw_ns = sample()?;
+    let after = Instant::now();
+    Bracket::from_observation(
+        before,
+        after,
+        raw_ns,
+        raw_resolution_ns,
+        instant_resolution_ns,
+        capture_uncertainty_ns,
+        max_bracket,
+    )
 }
 
 /// Convert a checked timespec without signed-to-unsigned wrap or truncation.
@@ -191,6 +214,21 @@ pub fn estimate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn injected_clock_sample_is_bracketed_and_errors_propagate() {
+        let sample = capture_with(|| Ok(123), 100, 100, 100, Duration::from_millis(100)).unwrap();
+        assert!(sample.uncertainty_ns() >= 300);
+        let error = capture_with(
+            || Err(io::Error::other("clock unavailable")),
+            100,
+            100,
+            100,
+            Duration::from_millis(100),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+    }
     fn bracket(at: Instant, raw: u64, width: u64) -> Bracket {
         Bracket::from_observation(
             at,

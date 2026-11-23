@@ -157,7 +157,15 @@ impl Session {
             let Some(req) = rtsp::decode_request(&mut self.plain)? else {
                 return Ok(());
             };
+            let request_clock=self.ctx.player.time.selected_reading();
+            let request_local=clock::now_ns();
             let (mut resp, keys) = self.handle(&req);
+            if let Some(reading)=request_clock
+                && self.ctx.player.time.selected_reading().is_some_and(|end|end.domain()==reading.domain())
+            {
+                resp.headers.insert("X-Apple-RequestReceivedTimestamp",(reading.ns()/1_000_000).to_string());
+                resp.headers.insert("X-Apple-ProcessingTime",(clock::now_ns().saturating_sub(request_local)/1_000_000).to_string());
+            }
             resp.headers.insert(
                 "Server",
                 format!("AirTunes/{}", self.ctx.device.source_version),
@@ -351,6 +359,7 @@ mod tests {
                 name: "Тест".into(),
                 device_id: "02:00:00:00:00:01".into(),
                 model: "AirPlay".into(),
+            accessory_type: None,
                 features: Features::AUDIO_RECEIVER,
                 status_flags: 4,
                 pairing_id: identity.pairing_id.clone(),
@@ -381,6 +390,49 @@ mod tests {
                 timesync::TimeSync::idle(1),
             )),
         })
+    }
+
+    #[cfg(target_os = "windows")]
+    #[tokio::test]
+    #[ignore = "requires NQPTP, local PTP master and MSYS2 clock test helper"]
+    async fn live_ptp_setup_uses_nqptp_and_teardown_releases_it() {
+        use std::{io::{BufRead, BufReader, Write}, process::{Command, Stdio}, time::{Duration, Instant}};
+        let peer: IpAddr=std::env::var("AIRPLAY_NQPTP_TEST_PEER").unwrap().parse().unwrap();
+        let path=std::env::var_os("AIRPLAY_NQPTP_TEST_FILE").unwrap();
+        let mut child=Command::new(std::env::var_os("AIRPLAY_NQPTP_TEST_PERL").unwrap())
+            .args(["-I","C:/msys64/usr/lib/perl5/core_perl","-I","C:/msys64/usr/share/perl5/core_perl"])
+            .arg(std::env::var_os("AIRPLAY_NQPTP_TEST_WORKER").unwrap())
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+        let mut input=child.stdin.take().unwrap();
+        let mut output=BufReader::new(child.stdout.take().unwrap());
+        let mut sampler=move || -> std::io::Result<u64> {
+            input.write_all(b"\n")?;input.flush()?;
+            let mut line=String::new();output.read_line(&mut line)?;
+            let seconds:f64=line.trim().parse().map_err(std::io::Error::other)?;
+            Ok((seconds*1_000_000_000.0) as u64)
+        };
+        sampler().unwrap();
+        let control=timesync::nqptp_windows::Control::new("127.0.0.1:9000".parse().unwrap(),"/codex-session-check").unwrap();
+        let time=timesync::TimeSync::start_nqptp(9,path.into(),control,sampler).unwrap();
+        let mut context=ctx();
+        Arc::get_mut(&mut context).unwrap().player=Arc::new(Player::new(audio_stream::Config {device:"null".into(),..Default::default()},time.clone()));
+        let mut c=Client::new(context);
+        let mut info=plist::Dictionary::new();
+        info.insert("Addresses".into(),plist::Value::Array(vec![peer.to_string().into()]));
+        let mut body=plist::Dictionary::new();
+        body.insert("timingProtocol".into(),"PTP".into());
+        body.insert("timingPeerInfo".into(),info.into());
+        let mut bytes=Vec::new();plist::Value::Dictionary(body).to_writer_binary(&mut bytes).unwrap();
+        assert_eq!(c.call("SETUP","rtsp://x/1",&[],bytes).status,200);
+        let deadline=Instant::now()+Duration::from_secs(10);
+        loop {if time.selected_reading().is_some(){break;} assert!(Instant::now()<deadline,"no PTP clock");tokio::time::sleep(Duration::from_millis(100)).await;}
+        let reading=time.selected_reading().unwrap();
+        assert_eq!(reading.domain().id(),0x1020304050607080);
+        let reply=c.call("OPTIONS","rtsp://x/1",&[],vec![]);
+        assert!(reply.headers.get("X-Apple-RequestReceivedTimestamp").is_some());
+        assert_eq!(c.call("TEARDOWN","rtsp://x/1",&[],vec![]).status,200);
+        assert!(time.selected_reading().is_none());
+        drop(c);drop(time);let _=child.wait();
     }
 
     /// Минимальный клиент поверх сессии: отправляет запрос, читает ответ.

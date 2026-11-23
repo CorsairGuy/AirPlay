@@ -584,6 +584,7 @@ mod tests {
                 name: "Loopback null receiver".into(),
                 device_id: "02:00:00:00:00:23".into(),
                 model: "AirPlay".into(),
+            accessory_type: None,
                 features: Features::AUDIO_RECEIVER,
                 status_flags: 4,
                 pairing_id: identity.pairing_id.clone(),

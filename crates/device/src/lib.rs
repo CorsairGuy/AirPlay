@@ -70,6 +70,8 @@ pub struct DeviceInfo {
     /// Идентификатор в виде MAC-адреса `AA:BB:CC:DD:EE:FF`.
     pub device_id: String,
     pub model: String,
+    /// Optional AirPlay accessory type, advertised in TXT and /info.
+    pub accessory_type: Option<u64>,
     pub features: Features,
     pub status_flags: u32,
     /// UUID устройства: `pi`, он же идентификатор для сопряжения.
@@ -172,6 +174,9 @@ impl DeviceInfo {
     /// То же с `senderAddress` — адресом спрашивающего, как у shairport-sync.
     pub fn info_plist_for(&self, sender: Option<&str>) -> Vec<u8> {
         let mut d = Dictionary::new();
+        if let Some(accessory_type) = self.accessory_type {
+            d.insert("accessoryType".into(), Value::Integer(accessory_type.into()));
+        }
         d.insert("canRecordScreenStream".into(), false.into());
         if let Some(color) = &self.enclosure_color {
             d.insert("deviceEnclosureColor".into(), color.clone().into());
@@ -266,7 +271,7 @@ impl DeviceInfo {
     /// TXT-записи службы `_airplay._tcp`.
     pub fn airplay_txt(&self) -> Vec<(String, String)> {
         let pk = hex::encode(self.public_key);
-        [
+        let mut records: Vec<(String, String)> = [
             ("acl", "0".to_string()),
             ("deviceid", self.device_id.clone()),
             ("fex", self.fex()),
@@ -287,7 +292,11 @@ impl DeviceInfo {
         ]
         .into_iter()
         .map(|(k, v)| (k.to_string(), v))
-        .collect()
+        .collect();
+        if let Some(accessory_type) = self.accessory_type {
+            records.push(("at".into(), format!("0x{accessory_type:X}")));
+        }
+        records
     }
 
     /// Имя экземпляра `_raop._tcp`: `AABBCCDDEEFF@Имя`.
@@ -326,6 +335,7 @@ mod tests {
             name: "Кухня".into(),
             device_id: "02:11:22:33:44:55".into(),
             model: "AirPlay".into(),
+            accessory_type: None,
             features: Features::AUDIO_RECEIVER,
             status_flags: 0x4,
             pairing_id: "b6a2c8d0-0000-4000-8000-000000000001".into(),
@@ -337,6 +347,21 @@ mod tests {
             group: None,
             pgid: "00000000-0000-4000-8000-000000000000".into(),
         }
+    }
+
+    #[test]
+    fn configurable_accessory_and_features_are_consistent() {
+        let mut dev = info();
+        assert!(!dev.airplay_txt().iter().any(|(key, _)| key == "at"));
+        dev.accessory_type = Some(1);
+        dev.features = Features(0x8300527FFEE6);
+        let txt = dev.airplay_txt();
+        assert!(txt.contains(&("at".into(), "0x1".into())));
+        assert!(txt.contains(&("features".into(), "0x527FFEE6,0x8300".into())));
+        let value = Value::from_reader(std::io::Cursor::new(dev.info_plist())).unwrap();
+        let d = value.as_dictionary().unwrap();
+        assert_eq!(d["accessoryType"].as_unsigned_integer(), Some(1));
+        assert_eq!(d["features"].as_unsigned_integer(), Some(dev.features.0));
     }
 
     #[test]

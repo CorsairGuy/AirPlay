@@ -129,6 +129,41 @@ mod tests {
             }
         }
     }
+
+    #[tokio::test]
+    async fn master_answers_unicast_delay_and_grant() {
+        let event=UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let general=UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let peer=Peer { ip:"127.0.0.1".parse().unwrap(), ports:Ports {event:event.local_addr().unwrap().port(),general:general.local_addr().unwrap().port()} };
+        let mut initial=config(peer.clone(),Policy::Elect);
+        initial.network.peers.clear();
+        let service=Service::bind(initial,Arc::new(TestClock)).await.unwrap();
+        let mut status=service.subscribe();
+        wait_for(&mut status,|s|s.selection.role==Role::Master && s.mapping.is_some()).await;
+        service.set_peers(vec![peer]).await.unwrap();
+        let addresses=service.addresses();
+        let mut request=vec![0u8;44];
+        request[0]=0x11;request[1]=2;request[2..4].copy_from_slice(&44u16.to_be_bytes());
+        request[20..28].copy_from_slice(&2u64.to_be_bytes());request[28..30].copy_from_slice(&1u16.to_be_bytes());request[30..32].copy_from_slice(&42u16.to_be_bytes());
+        event.send_to(&request,addresses.0).await.unwrap();
+        let mut signaling=request.clone();signaling.resize(54,0);signaling[0]=0x1c;signaling[2..4].copy_from_slice(&54u16.to_be_bytes());
+        signaling[44..54].copy_from_slice(&[0,4,0,6,0xb0,0,0,0,0,30]);
+        general.send_to(&signaling,addresses.1).await.unwrap();
+        let (delay,grant)=timeout(Duration::from_secs(2),async {
+            let mut buffer=[0u8;1024];let mut delay=false;let mut grant=false;
+            while !delay || !grant {
+                let (n,_)=general.recv_from(&mut buffer).await.unwrap();
+                match buffer[0]&15 {
+                    9 if n==54 => {assert_eq!(&buffer[44..54],&request[20..30]);delay=true;},
+                    12 if n>=56 => {assert_eq!(&buffer[44..50],&[0,5,0,8,0xb0,0]);grant=true;},
+                    _=>{}
+                }
+            }
+            (delay,grant)
+        }).await.unwrap();
+        assert!(delay && grant);
+        service.shutdown().await.unwrap();
+    }
     #[tokio::test]
     async fn loopback_master_follower_master_uses_same_sockets_and_revokes_old_map() {
         let event = UdpSocket::bind("127.0.0.1:0").await.unwrap();

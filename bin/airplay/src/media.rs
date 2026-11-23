@@ -30,6 +30,19 @@ use crate::session::{BPLIST, Context, OCTETS};
 /// 1 МиБ — около 30 с AAC 256 кбит/с.
 const AUDIO_BUFFER_SIZE: u64 = 1 << 20;
 
+#[cfg(feature = "mirroring")]
+fn video_stream_id(s: &Dictionary, authenticated: bool) -> Result<u64, String> {
+    let id = s.get("streamConnectionID").and_then(|v| {
+        v.as_unsigned_integer()
+            .or(v.as_signed_integer().map(|i| i as u64))
+    });
+    if authenticated {
+        id.ok_or_else(|| "authenticated video requires an integer streamConnectionID".into())
+    } else {
+        Ok(id.unwrap_or(0))
+    }
+}
+
 /// Звук играет один отправитель: новый поток вытесняет прежний.
 pub struct Player {
     pub audio: audio_stream::Config,
@@ -279,7 +292,7 @@ impl Media {
                 self.grouped = grouped;
                 self.player
                     .with(self.id, |s| s.playout().set_grouped(grouped));
-                self.player.time.set_peers(peers);
+                self.player.time.set_session_peers(self.id.into(),peers);
                 ok()
             }
             ("SET_PARAMETER", _) => {
@@ -306,6 +319,7 @@ impl Media {
                     self.player.events.playing(false);
                 }
                 if !streams_only {
+                    self.player.time.release_session_peers(self.id.into());
                     self.player.forget_reported_state(self.id);
                     if let Some(events) = self.events.take() {
                         events.abort();
@@ -358,7 +372,7 @@ impl Media {
         };
         let reply = match body.get("streams").and_then(Value::as_array) {
             Some(streams) => self.setup_streams(streams),
-            None => Ok(self.setup_session(ctx, &body)),
+            None => self.setup_session(ctx, &body),
         };
         match reply {
             Ok(d) => Response::to(req, 200).with_body(BPLIST, write_plist(d)),
@@ -370,7 +384,7 @@ impl Media {
     }
 
     /// Первый SETUP: часы и канал событий.
-    fn setup_session(&mut self, ctx: &Context, body: &Dictionary) -> Dictionary {
+    fn setup_session(&mut self, ctx: &Context, body: &Dictionary) -> Result<Dictionary, String> {
         let timing = body
             .get("timingProtocol")
             .and_then(Value::as_string)
@@ -412,12 +426,21 @@ impl Media {
                 // Адреса самого отправителя: в SETPEERS они не «другие приёмники».
                 self.sender_addrs = addresses(info);
                 self.sender_addrs.push(self.remote);
-                self.player.time.set_peers(addresses(info));
+                self.player.time.set_session_peers(self.id.into(),addresses(info));
             }
+            let master=self.sender_addrs.first().copied().unwrap_or(self.remote);
+            self.player.time.select_session_master(self.id.into(),master).map_err(|e|format!("NQPTP selection: {e}"))?;
             let ip = self.local.to_string();
             let mut peer = Dictionary::new();
             peer.insert("Addresses".into(), Value::Array(vec![ip.clone().into()]));
             peer.insert("ID".into(), ip.into());
+            if let Some(reading)=self.player.time.selected_reading() {
+                peer.insert("ClockID".into(),Value::Integer(reading.domain().id().into()));
+                peer.insert("ID".into(),ctx.device.pairing_id.clone().into());
+                peer.insert("DeviceType".into(),Value::Integer(0u64.into()));
+                peer.insert("SupportsClockPortMatchingOverride".into(),true.into());
+                info!(clock_id=reading.domain().id(),"PTP: selected timeline in SETUP");
+            }
             d.insert("timingPeerInfo".into(), peer.into());
         }
         let port = self.start_events(ctx).unwrap_or(0);
@@ -427,20 +450,21 @@ impl Media {
         if timing == "PTP" && !d.contains_key("timingPort") {
             d.insert("timingPort".into(), Value::Integer(0.into()));
         }
-        d
+        Ok(d)
     }
 
     fn stop_tasks(&mut self) {
         for t in self.tasks.drain(..) {
             t.abort();
         }
+        self.ntp = None;
     }
 
-    /// Часы отправителя для зеркалирования: NTP, если обмен метками начат.
+    /// Session NTP mapping when selected, otherwise the shared PTP service.
     fn time_source(&self) -> Arc<dyn TimeSource> {
         match &self.ntp {
             Some(clock) => Arc::new(clock.clone()),
-            None => Arc::new(clock::NoTime),
+            None => Arc::new(self.player.time.clone()),
         }
     }
 
@@ -451,28 +475,33 @@ impl Media {
             .mirror
             .clone()
             .ok_or("зеркалирование выключено (--mirror)")?;
-        let aes = self.aes_key.ok_or("нет ключа видео: SETUP без ekey")?;
-        let id = s
-            .get("streamConnectionID")
-            .and_then(|v| {
-                v.as_unsigned_integer()
-                    .or(v.as_signed_integer().map(|i| i as u64))
-            })
-            .unwrap_or(0);
-        let session = mirror::session_key(&aes, self.legacy_shared.as_ref());
-        let (key, iv) = mirror::stream_key_iv(&session, id);
+        let id = video_stream_id(s, self.aes_key.is_none())?;
+        let authenticated = if self.aes_key.is_none() {
+            let shared = self.shared.as_deref().ok_or("video requires ekey or HAP session")?;
+            Some(crypto::kdf::hkdf_sha512(
+                shared,
+                format!("DataStream-Salt{id}").as_bytes(),
+                b"DataStream-Output-Encryption-Key",
+            ))
+        } else {
+            None
+        };
         let listener = audio_stream::bind_tcp().map_err(|e| format!("видеосокет: {e}"))?;
         let port = listener.local_addr().map_err(|e| e.to_string())?.port();
         info!(id, port, "видеопоток");
         let info = mirror::StreamInfo {
             time: self.time_source(),
         };
-        self.tasks.push(tokio::spawn(mirror::receive(
-            listener,
-            key,
-            iv,
-            factory.open(&info),
-        )));
+        let sink = factory.open(&info);
+        if let Some(key) = authenticated {
+            info!("video cipher: HAP-derived ChaCha20-Poly1305");
+            self.tasks.push(tokio::spawn(mirror::receive_authenticated(listener, key, sink)));
+        } else {
+            let aes = self.aes_key.ok_or("missing legacy video key")?;
+            let session = mirror::session_key(&aes, self.legacy_shared.as_ref());
+            let (key, iv) = mirror::stream_key_iv(&session, id);
+            self.tasks.push(tokio::spawn(mirror::receive(listener, key, iv, sink)));
+        }
         r.insert("dataPort".into(), Value::Integer(port.into()));
         Ok(())
     }
@@ -774,6 +803,7 @@ impl Media {
 /// Соединение RTSP закрылось — его звук тоже заканчивается.
 impl Drop for Media {
     fn drop(&mut self) {
+        self.player.time.release_session_peers(self.id.into());
         self.player.release(self.id);
         self.player.forget_reported_state(self.id);
         self.stop_tasks();
@@ -894,6 +924,18 @@ fn parse_peers(body: &[u8]) -> Vec<IpAddr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "mirroring")]
+    #[test]
+    fn authenticated_video_requires_integer_id() {
+        let mut descriptor = Dictionary::new();
+        assert!(video_stream_id(&descriptor, true).is_err());
+        assert_eq!(video_stream_id(&descriptor, false).unwrap(), 0);
+        descriptor.insert("streamConnectionID".into(), "invalid".into());
+        assert!(video_stream_id(&descriptor, true).is_err());
+        descriptor.insert("streamConnectionID".into(), Value::Integer(7u64.into()));
+        assert_eq!(video_stream_id(&descriptor, true).unwrap(), 7);
+    }
 
     fn plist(v: Value) -> Vec<u8> {
         let mut out = Vec::new();

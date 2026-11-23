@@ -318,6 +318,7 @@ fn receiver_context(require_pin: bool) -> Arc<crate::session::Context> {
             name: "PIN loopback".into(),
             device_id: "02:00:00:00:00:37".into(),
             model: "AirPlay".into(),
+            accessory_type: None,
             features: device::Features::AUDIO_RECEIVER,
             status_flags: 4,
             pairing_id: identity.pairing_id.clone(),

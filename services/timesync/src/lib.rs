@@ -5,6 +5,9 @@
 //! работает вхолостую, и плеер играет по своим часам, без мультирума.
 
 pub mod engine;
+mod host;
+#[cfg(target_os = "windows")]
+pub mod nqptp_windows;
 #[cfg(target_os = "linux")]
 pub mod external_acquisition;
 pub mod external_media;
@@ -13,7 +16,7 @@ pub mod media;
 pub mod nqptp_reader;
 pub mod ntp;
 pub mod peer_interests;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 pub mod raw_correlation;
 pub mod sender;
 pub mod service;
@@ -32,6 +35,9 @@ pub struct TimeSync {
     ptp: Arc<Mutex<Ptp>>,
     general: Arc<Vec<Arc<UdpSocket>>>,
     listening: bool,
+    host: Option<Arc<host::Host>>,
+    #[cfg(target_os = "windows")]
+    nqptp: Option<Arc<nqptp_windows::Receiver>>,
 }
 
 impl TimeSync {
@@ -41,6 +47,9 @@ impl TimeSync {
             ptp: Arc::new(Mutex::new(Ptp::new(self_id))),
             general: Arc::new(Vec::new()),
             listening: false,
+            host: None,
+            #[cfg(target_os = "windows")]
+            nqptp: None,
         }
     }
 
@@ -89,17 +98,72 @@ impl TimeSync {
         self.listening
     }
 
+    /// Explicit interface and one socket pair for combined RX/TX clock roles.
+    pub async fn start_host(self_id:u64, ip:IpAddr) -> std::io::Result<Self> {
+        let host=host::Host::bind(self_id,ip).await?;
+        let mut this=Self::idle(self_id);
+        this.host=Some(Arc::new(host));
+        this.listening=true;
+        Ok(this)
+    }
+
+    pub fn selected_reading(&self) -> Option<clock::domain::Reading> {
+        #[cfg(target_os = "windows")]
+        if let Some(nqptp) = &self.nqptp { return nqptp.reading(); }
+        self.host.as_ref()?.reading()
+    }
+
+    /// Attach to an explicitly owned external NQPTP and its measured clock.
+    #[cfg(target_os = "windows")]
+    pub fn start_nqptp(self_id:u64, path:std::path::PathBuf, control:nqptp_windows::Control, sampler:impl FnMut() -> std::io::Result<u64> + Send + 'static) -> std::io::Result<Self> {
+        let mut this=Self::idle(self_id);
+        this.nqptp=Some(Arc::new(nqptp_windows::Receiver::start(path,control,sampler)?));
+        this.listening=true;
+        Ok(this)
+    }
+
+    pub fn select_session_master(&self, owner:u128, master:IpAddr) -> std::io::Result<()> {
+        #[cfg(target_os = "windows")]
+        if let Some(nqptp)=&self.nqptp { return nqptp.select(owner,master); }
+        let _=(owner,master);
+        Ok(())
+    }
+
+    pub fn set_session_peers(&self,owner:u128,peers:Vec<IpAddr>) {
+        #[cfg(target_os = "windows")]
+        if self.nqptp.is_some() { return; }
+        if let Some(host)=&self.host {host.set_peers(owner,peers);} else {self.set_peers(peers);}
+    }
+    pub fn release_session_peers(&self,owner:u128) {
+        #[cfg(target_os = "windows")]
+        if let Some(nqptp)=&self.nqptp { if let Err(e)=nqptp.release(owner) {warn!(%e,"NQPTP release failed");} return; }
+        if let Some(host)=&self.host {host.set_peers(owner,vec![]);}
+    }
+
     pub fn set_peers(&self, peers: Vec<IpAddr>) {
+        if let Some(host)=&self.host {host.set_peers(0,peers);return;}
         debug!(?peers, "PTP: участники");
         self.lock().set_peers(peers);
     }
 
     pub fn timeline(&self, clock_id: u64) -> Option<Timeline> {
+        if self.uses_selected_reading() {return self.latest().filter(|t|t.clock_id==clock_id);}
         self.lock().timeline(clock_id)
     }
 
     pub fn latest(&self) -> Option<Timeline> {
+        if self.uses_selected_reading() {
+            let reading=self.selected_reading()?;
+            let now=clock::now_ns();
+            return Some(Timeline {clock_id:reading.domain().id(),offset_ns:i64::try_from(i128::from(reading.ns())-i128::from(now)).ok()?,updated_ns:now});
+        }
         self.lock().latest()
+    }
+
+    fn uses_selected_reading(&self) -> bool {
+        #[cfg(target_os = "windows")]
+        if self.nqptp.is_some() { return true; }
+        self.host.is_some()
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Ptp> {
@@ -108,6 +172,7 @@ impl TimeSync {
 
     async fn receive(self, socket: Arc<UdpSocket>) {
         let mut buf = [0u8; 256];
+        let mut observed_timeline = None;
         loop {
             let (n, from) = match socket.recv_from(&mut buf).await {
                 Ok(r) => r,
@@ -120,6 +185,12 @@ impl TimeSync {
             let actions = self
                 .lock()
                 .on_packet(from.ip().to_canonical(), &buf[..n], local);
+            if let Some(timeline) = self.latest()
+                && observed_timeline != Some(timeline.clock_id)
+            {
+                observed_timeline = Some(timeline.clock_id);
+                info!(clock_id=timeline.clock_id, offset_ns=timeline.offset_ns, "PTP: sender timeline observed");
+            }
             for Action::Send { to, data, delay_ms } in actions {
                 let this = self.clone();
                 tokio::spawn(async move {

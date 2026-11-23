@@ -1,5 +1,49 @@
 # Зеркалирование вместе с AirPlay 2: исследование
 
+## Уточнение: FairPlay и задержка подключения, 23 ноября
+
+В наблюдаемом рабочем iPhone-сеансе receiver получил FairPlay M1 с mode 3
+и ответил на оба fp-setup после принятия TCP; затем видео 110 успешно пошло
+через HAP-derived ChaCha20-Poly1305. Это не объясняет ожидание до TCP и не
+доказывает совместимость других FairPlay-профилей. Указанный в плане D20
+fairplay-sap-core описывает сторону sender и mode 3; это не готовая замена
+receiver key-unwrapping и не подтверждённое средство ускорения discovery.
+Источник: objevovat/fairplay-sap-core-airplay2-sender-authentication-handshake,
+README; заявленная лицензия LGPL-3.0, код не заимствован.
+
+## Проверка гипотезы PTP-пробы, 24 ноября
+
+- На время опыта единственным владельцем UDP 319/320 был пассивный локальный
+  слушатель; NQPTP затем восстановлен. Контрольный источник на этом же ПК
+  подтвердил приём на обоих портах (16 и 18 пакетов). При выборе iPhone
+  на адрес Wi-Fi ПК не пришло ни одного пакета от телефона на 319/320;
+  последующий RTSP-сеанс выбрал NTP и показал видео. Это ограничено IPv4
+  выбранного интерфейса и не исключает AWDL, IPv6 или внутренние действия iPhone.
+- Затем в том же профиле, с тем же состоянием, именем, портом, моделью,
+  версией, `at` и status flags, временно снят только бит 41: верхнее слово
+  features изменилось с `0x18300` на `0x18100`. Bonjour проверен напрямую;
+  пользователь сообщил, что задержка осталась. Видео прошло по NTP. После
+  опыта исходный бит восстановлен и проверен в Bonjour.
+- Эти наблюдения не подтверждают гипотезу, что задержку вызывает неотвеченная
+  PTP-проба на адрес ПК или сам бит 41. Они не доказывают общую политику iOS.
+  Выбор PTP и воспроизведение с iPhone требуют отдельной проверки.
+- `music-assistant/airplay-cli` описывает отправитель и запросы от приёмников;
+  это полезный wire-референс, но не доказательство аналогичной пробы iPhone.
+  В существующем `clock::ptp_sender` уже есть GRANT, Sync/Follow_Up и
+  Delay_Resp; роли и единое владение портами остаются обязательными.
+  Provenance: music-assistant/airplay-cli, заявлена Apache-2.0; код не заимствован.
+- Отдельная локальная проверка NQPTP 1.2.9: пять уникастных Delay_Req дошли
+  до него (подтверждено его журналом), Delay_Resp не получен. Существующая
+  общая PTP-служба ядра в loopback-тесте ответила и Delay_Resp, и GRANT;
+  это не проверка на iPhone и не подтверждение ускорения старта.
+- Затем отдельно запущен существующий unified PTP-host ядра с единственным
+  владельцем 319/320, сохранённым битом 41 и заранее настроенным IPv4 телефона.
+  Журнал подтвердил отправку Sync и Follow_Up до выбора приёмника; запросов от
+  iPhone на этих сокетах не было. При зеркалировании выбран NTP, видео шло,
+  пользователь сообщил, что задержка прежняя. Это опыт только с указанным
+  IPv4-путём, не доказательство поведения AWDL/IPv6. Тестовую постоянную
+  рассылку остановили, NQPTP и предыдущий профиль восстановили.
+
 <!-- current-status-20261112 -->
 > Сверено12ноября2026. Текущий статус и ограничения — [STATUS](STATUS.md). Датированные замеры и этапы ниже сохранены как история, их слова «ещё не реализовано/не установлено» относятся к указанному этапу, а не автоматически к нынешнему main.
 
@@ -169,3 +213,13 @@ Apple manuals описывают screen mirroring и выбор HomePod/AirPlay 
 5. Если определённая комбинация не заработает, фиксировать конкретную стадию/ошибку. Не выводить необходимость Apple-only сертификата из отсутствия legacy `ekey` или нескольких неудачных masks.
 
 **Рабочая объединённая маска не найдена; невозможность не доказана. Найден более конкретный технический пробел и источник реализации для следующего контролируемого опыта.**
+
+## Windows mirror startup: diagnostic 2026-11-24
+
+The same receiver identity and TV TXT (`at=0x1`) were compared with two feature masks. With `0x527FFEE6,0x18300`, the user repeatedly observed an approximately 8 second startup. With `0x527FFEE6,0x300`, the user reported immediate video and the same TV icon. The mask retains buffered-audio bit 40 and PTP bit 41, and removes bits 47 and 48 together. It does not establish which removed bit caused the change. The observed mirror SETUP selected NTP; this result does not establish PTP operation or audio synchronization. Multiple connections reached H.264 video, with approximately 55–80 ms from /info to video-socket connection; no calibrated tap timestamp was captured.
+
+A test with `at` omitted was still reported slow by the user, and a test with upper feature word `0x18000` did not produce video. Isolated source versions 220.68 and the LG-observed 377.40.00 did not remove the delay. In the 377.40.00 capture, no IPv4 mDNS packet from this PC was observed between the last iPhone mDNS query and its TCP SYN; this limited observation does not establish AWDL visibility or rule out traffic outside the capture. Fast and TV records observed in one response used equal TTL/cache-flush for corresponding PTR, SRV and TXT records.
+
+The fast mask and `at` were selected in a temporary diagnostic receiver, not added as a Windows application profile to the kernel. The library already represents features in `DeviceInfo`; the application/profile boundary and a supported way to configure accessory type remain to be implemented and verified. Real LG advertises MFi-related capabilities, so copying its complete mask is not implied by this successful experiment.
+
+Follow-up: `0x527FFEE6,0x8300` (bit 47 retained, bit 48 cleared) produced immediate video; `0x527FFEE6,0x10300` (bit 48 retained, bit 47 cleared) restored the approximately eight-second delay. Two additional starts after an iPhone Wi-Fi reset were reported successful, with the TV icon. This isolates bit 48 as the trigger for the tested profile; it does not explain iPhone's internal waiting behavior.

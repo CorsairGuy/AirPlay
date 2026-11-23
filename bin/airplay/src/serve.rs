@@ -18,10 +18,14 @@ use crate::state;
 pub struct Options {
     pub name: String,
     pub port: u16,
+    pub ptp_bind: Option<std::net::IpAddr>,
     pub pin: Option<String>,
     pub state_dir: PathBuf,
     pub mdns: bool,
     pub model: String,
+    pub features: Option<Features>,
+    pub status_flags: Option<u32>,
+    pub accessory_type: Option<u64>,
     pub audio: audio_stream::Config,
     /// Только постоянное сопряжение по PIN.
     pub require_pin: bool,
@@ -91,14 +95,15 @@ pub async fn run(opts: Options) -> Result<()> {
         name: opts.name.clone(),
         device_id: device_id.clone(),
         model: opts.model,
-        features: if mirroring {
+        accessory_type: opts.accessory_type,
+        features: opts.features.unwrap_or_else(|| if mirroring {
             Features::MIRROR_RECEIVER
         } else {
             Features::AUDIO_RECEIVER
-        },
+        }),
         // Как у shairport на станции: «аудиокабель подключён» и доступ
         // по HomeKit (бит 10), 0x404.
-        status_flags: 0x404,
+        status_flags: opts.status_flags.unwrap_or(0x404),
         pairing_id: identity.pairing_id.clone(),
         public_key: identity.public_key(),
         source_version: opts.source_version,
@@ -123,12 +128,19 @@ pub async fn run(opts: Options) -> Result<()> {
     }
     info!(name = %opts.name, %device_id, port = opts.port, state = %opts.state_dir.display(), "приёмник запущен");
 
-    // Зеркалирование идёт по часам NTP, PTP ему не нужен (и не нужен root).
-    let time = if mirroring {
+    if mirroring {
         info!("режим зеркалирования экрана");
-        timesync::TimeSync::idle(clock_id(&device_id))
+    }
+    // Media direction does not select the clock protocol. A combined receiver
+    // owns the same PTP service for screen and audio sessions.
+    let time = if device.features.0 & Features::PTP != 0 {
+        if let Some(ip)=opts.ptp_bind {
+            timesync::TimeSync::start_host(clock_id(&device_id),ip).await.context("PTP host startup")?
+        } else {
+            timesync::TimeSync::start(clock_id(&device_id))
+        }
     } else {
-        timesync::TimeSync::start(clock_id(&device_id))
+        timesync::TimeSync::idle(clock_id(&device_id))
     };
     info!(device = %opts.audio.device, buffer_ms = opts.audio.output_latency.as_millis(), "вывод звука");
     let mut player = Player::new(opts.audio, time);

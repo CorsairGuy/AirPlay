@@ -37,6 +37,7 @@ const USAGE: &str = "\
   --state КАТАЛОГ где хранить ключи (по умолчанию ~/.local/state/airplay)
   --model МОДЕЛЬ  модель для iOS (по умолчанию AirPlay)
   --no-mdns       не объявлять себя в Bonjour
+  --ptp-bind IP   использовать интерфейс IP для общей службы PTP
   --require-pin   пускать только после сопряжения по PIN (без transient)
   --mrp           карточка «Сейчас играет» на iPhone: трек, обложка, пульт
                   и громкость текущего отправителя (MediaRemote, поток 130)
@@ -77,6 +78,9 @@ const USAGE: &str = "\
   --ignore-volume громкость не менять, только сообщать (её ведёт внешний микшер)
   --source-version В
                   версия AirPlay в /info и Bonjour (по умолчанию 366.0)
+  --features МАСКА маска возможностей (десятичная или 0x...)
+  --status-flags МАСКА флаги статуса (десятичные или 0x...)
+  --accessory-type N тип устройства для TXT и /info
   --enclosure-color Ц
                   цвет корпуса для значка в iOS: 1 — белый, 2 — чёрный
 
@@ -103,14 +107,27 @@ fn hostname() -> String {
         .unwrap_or_else(|| "AirPlay".into())
 }
 
+fn parse_unsigned(value: &str, flag: &str) -> Result<u64, String> {
+    let parsed = if let Some(hex) = value.strip_prefix("0x").or_else(|| value.strip_prefix("0X")) {
+        u64::from_str_radix(hex, 16)
+    } else {
+        value.parse()
+    };
+    parsed.map_err(|_| format!("{flag}: нужно неотрицательное целое число"))
+}
+
 fn parse_serve(args: &[String]) -> Result<serve::Options, String> {
     let mut opts = serve::Options {
         name: hostname(),
         port: 7000,
+        ptp_bind: None,
         pin: None,
         state_dir: state::default_dir(),
         mdns: true,
         model: "AirPlay".into(),
+        features: None,
+        status_flags: None,
+        accessory_type: None,
         audio: audio_stream::Config::default(),
         require_pin: false,
         #[cfg(feature = "mirroring")]
@@ -171,6 +188,9 @@ fn parse_serve(args: &[String]) -> Result<serve::Options, String> {
             "--no-mdns" => opts.mdns = false,
             "--require-pin" => opts.require_pin = true,
             "--source-version" => opts.source_version = value()?,
+            "--features" => opts.features = Some(device::Features(parse_unsigned(&value()?, "--features")?)),
+            "--status-flags" => opts.status_flags = Some(u32::try_from(parse_unsigned(&value()?, "--status-flags")?).map_err(|_| "--status-flags: значение превышает u32".to_string())?),
+            "--accessory-type" => opts.accessory_type = Some(parse_unsigned(&value()?, "--accessory-type")?),
             "--enclosure-color" => opts.enclosure_color = Some(value()?),
             "--volume-range" => {
                 opts.volume_range_db = value()?
@@ -187,6 +207,7 @@ fn parse_serve(args: &[String]) -> Result<serve::Options, String> {
                 opts.audio.group_latency_offset_ns =
                     Some(signed_ms(&value()?, "--group-latency-offset")?)
             }
+            "--ptp-bind" => opts.ptp_bind = Some(value()?.parse().map_err(|_|"--ptp-bind: expected a specific local IP address".to_string())?),
             "--mrp" => opts.mrp = serve::Mrp::Card,
             "--mrp-bridge" => {
                 opts.mrp = serve::Mrp::Bridge(value()?.parse().map_err(|_| {
@@ -409,6 +430,18 @@ fn dump_sink(path: &str) -> Box<dyn mirror::VideoSink> {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn parses_configurable_advertisement() {
+        let opts = super::parse_serve(&[
+            "--features".into(), "0x8300527FFEE6".into(),
+            "--status-flags".into(), "0x4".into(),
+            "--accessory-type".into(), "1".into(),
+        ]).unwrap();
+        assert_eq!(opts.features.unwrap().0, 0x8300527FFEE6);
+        assert_eq!(opts.status_flags, Some(4));
+        assert_eq!(opts.accessory_type, Some(1));
+        assert!(super::parse_serve(&["--features".into(), "0xno".into()]).is_err());
+    }
     use super::*;
     #[test]
     fn daemon_is_default_and_old_subcommand_is_rejected() {
