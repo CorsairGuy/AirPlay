@@ -1,0 +1,26 @@
+name: Windows TV package
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/windows-tv.yml'
+      - 'tools/windows/**'
+      - 'docs/WINDOWS-TV.md'
+permissions:
+  contents: read
+jobs:
+  package:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build audio receiver and TV launcher
+        shell: pwsh
+        run: ./tools/windows/Build-TV.ps1 -Destination "${{ runner.temp }}/windows-tv"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: airplay-windows-tv-x64
+          path: ${{ runner.temp }}/windows-tv/
+          if-no-files-found: error
+          retention-days: 14
