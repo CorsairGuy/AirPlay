@@ -96,3 +96,41 @@ Provenance: declared GPL-3.0-or-later. Used as architecture/behaviour reference;
 no external implementation code was copied. Its native HWND and orientation
 patches are not yet ported into this display launcher.
 
+
+
+## Timestamped fullscreen viewer
+
+Build locally with `Build-TV.ps1 -Fullscreen` using the installed MSYS2 UCRT64
+Rust/GCC/GStreamer development tools. This also produces `airplay-video.exe`.
+The GStreamer DLLs/plugins are still an external runtime dependency.
+
+The viewer now consumes a private MRV1 stream rather than an unframed fdsrc:
+20-byte header (`MRV1`, kind:u8, codec:u8, reserved:u16=0, payload_bytes:u32le,
+source_pts_ns:u64le), then at most 32 MiB payload. Kind1 carries Annex-B
+parameter sets (codec1 H264 / codec2 H265); kind2 carries one Annex-B frame.
+No pairing/network/audio protocol is implemented in this helper.
+
+Whole access units and sender PTS spacing are retained. GStreamer appsrc uses
+explicit PTS, do-timestamp=false, bounded non-leaky queues and clock-scheduled
+Direct3D11 output. An 80 ms startup margin absorbs some delivery jitter. QoS
+frame dropping is disabled; this is not a guarantee against decoder/GPU stalls
+or a claim of calibrated audio/video sync. Stats report received/rendered/dropped
+counts. Closing on disconnect remains owned by the Rust video session.
+
+This follows independently observed architecture in the Popyachsa reference;
+no foreign implementation code was copied. Rotation-byte separation in the
+receiver was corrected after comparing header handling with UxPlay source.
+Native fullscreen smoothness still requires a user check of this revision.
+
+## Native viewer observation, 23 November
+
+On the user's Windows machine, the revised timestamped viewer was reported as
+smooth. One session: 1154 received, 1143 rendered, 0 sink-reported dropped in
+22.8 seconds. Some frames were still queued when the session ended; this is
+not a measurement of end-to-end latency or proof that no frames were lost
+before the receiver. decodebin selected d3d12h264dec on that machine.
+
+The viewer requests a topmost fullscreen window and foreground activation on
+creation. Windows can deny foreground focus; behavior must be confirmed by
+the user. Timing retains source PTS spacing with an initial 80 ms target;
+actual buffering, sender latency and clock drift remain unmeasured.

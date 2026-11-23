@@ -50,6 +50,8 @@ const USAGE: &str = "\
                   (H.265: ffplay -f hevc -)
   --video-player ПУТЬ
                   запускать отдельный viewer на каждый видеопоток (Annex B stdin)
+  --video-player-framed
+                  передавать границы кадров и PTS в формате MRV1
   --video-player-arg ЗНАЧЕНИЕ
                   аргумент viewer; можно повторять, shell не используется
   --video-decoder ДЕКОДЕР
@@ -130,6 +132,7 @@ fn parse_serve(args: &[String]) -> Result<serve::Options, String> {
     let mut dump: Option<String> = None;
     let mut player: Option<String> = None;
     let mut player_args = Vec::new();
+    let mut framed_player = false;
     let mut decoder: Option<String> = None;
     let mut delay = None;
     let ms = |v: String, name: &str| {
@@ -149,6 +152,7 @@ fn parse_serve(args: &[String]) -> Result<serve::Options, String> {
                     | "--display"
                     | "--video-player"
                     | "--video-player-arg"
+                    | "--video-player-framed"
             )
         {
             return Err(format!("{arg}: build with --features mirroring"));
@@ -191,6 +195,7 @@ fn parse_serve(args: &[String]) -> Result<serve::Options, String> {
             }
             "--mirror" => mirror = true,
             "--video-dump" => dump = Some(value()?),
+            "--video-player-framed" => framed_player = true,
             "--video-player" => player = Some(value()?),
             "--video-player-arg" => player_args.push(value()?),
             "--video-decoder" => decoder = Some(value()?),
@@ -204,6 +209,9 @@ fn parse_serve(args: &[String]) -> Result<serve::Options, String> {
     }
     if player.is_some() && (!mirror || dump.is_some() || decoder.is_some() || delay.is_some()) {
         return Err("--video-player requires --mirror and excludes other video outputs".into());
+    }
+    if framed_player && player.is_none() {
+        return Err("--video-player-framed requires --video-player".into());
     }
     if !player_args.is_empty() && player.is_none() {
         return Err("--video-player-arg requires --video-player".into());
@@ -226,7 +234,7 @@ fn parse_serve(args: &[String]) -> Result<serve::Options, String> {
             opts.model = "AppleTV3,2".into();
         }
         opts.mirror = Some(if let Some(program) = player {
-            video_process::factory(program.into(), player_args)?
+            video_process::factory(program.into(), player_args, framed_player)?
         } else {
             match (dump, decoder) {
                 (Some(path), _) => mirror::VideoSinkFactory::new(move |_| dump_sink(&path)),

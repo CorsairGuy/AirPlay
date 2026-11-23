@@ -40,12 +40,12 @@ pub struct Header {
 impl Header {
     pub fn parse(h: &[u8; HEADER_LEN]) -> Header {
         let payload_len = u32::from_le_bytes(h[0..4].try_into().unwrap()) as usize;
-        let kind = match u16::from_le_bytes([h[4], h[5]]) {
-            0 | 0x1000 => PacketKind::Frame,
+        let kind = match h[4] {
+            0 => PacketKind::Frame,
             1 => PacketKind::Config,
             2 => PacketKind::Heartbeat,
             5 => PacketKind::Plist,
-            other => PacketKind::Other(other),
+            other => PacketKind::Other(u16::from(other)),
         };
         let ntp_time = u64::from_le_bytes(h[8..16].try_into().unwrap());
         Header {

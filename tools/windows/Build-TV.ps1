@@ -1,17 +1,26 @@
-param([string]$Destination)
+param([string]$Destination, [switch]$Fullscreen, [string]$ToolchainBin='C:\msys64\ucrt64\bin')
 $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
 if (!$Destination) { $Destination = Join-Path $root 'target\windows-tv' }
 $Destination = [IO.Path]::GetFullPath($Destination)
 if (Test-Path -LiteralPath $Destination) { throw "Destination already exists: $Destination. Choose a new folder." }
+$oldPath=$env:PATH
+if (Test-Path -LiteralPath $ToolchainBin) { $env:PATH=$ToolchainBin+';'+$env:PATH }
 Push-Location $root
 try {
     & cargo build --locked --release -p airplay
     if ($LASTEXITCODE -ne 0) { throw 'Windows receiver build failed.' }
     $exe = Join-Path $root 'target\release\airplay.exe'
     if (!(Test-Path -LiteralPath $exe)) { throw 'Build did not produce a Windows airplay.exe.' }
+    if ($Fullscreen) {
+        $flags=(& pkg-config --cflags --libs gstreamer-app-1.0) -split ' '
+        if ($LASTEXITCODE -ne 0) { throw 'GStreamer development files are required.' }
+        & gcc -O2 -Wall -Wextra (Join-Path $PSScriptRoot 'native\video-viewer.c') -o (Join-Path $root 'target\release\airplay-video.exe') @flags
+        if ($LASTEXITCODE -ne 0) { throw 'Fullscreen viewer build failed.' }
+    }
     [IO.Directory]::CreateDirectory($Destination) | Out-Null
     Copy-Item -LiteralPath $exe -Destination $Destination
+    if ($Fullscreen) { Copy-Item -LiteralPath (Join-Path $root 'target\release\airplay-video.exe') -Destination $Destination }
     foreach ($file in @('Start-TV.ps1','Start-TV.cmd','Start-Mirror.cmd','Fullscreen-TV.ps1')) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $file) -Destination $Destination
     }
@@ -22,5 +31,6 @@ try {
     ($hash.Hash.ToLowerInvariant() + '  airplay.exe') | Set-Content -Encoding ascii (Join-Path $Destination 'SHA256SUMS')
     if ($env:GITHUB_SHA) { $env:GITHUB_SHA | Set-Content -Encoding ascii (Join-Path $Destination 'COMMIT') }
     Write-Host "Windows package: $Destination"
-} finally { Pop-Location }
+} finally { Pop-Location; $env:PATH=$oldPath }
+
 
