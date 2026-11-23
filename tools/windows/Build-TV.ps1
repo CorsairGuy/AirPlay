@@ -12,7 +12,7 @@ try {
     if (!(Test-Path -LiteralPath $exe)) { throw 'Build did not produce a Windows airplay.exe.' }
     [IO.Directory]::CreateDirectory($Destination) | Out-Null
     Copy-Item -LiteralPath $exe -Destination $Destination
-    foreach ($file in @('Start-TV.ps1','Start-TV.cmd','Start-Mirror.cmd')) {
+    foreach ($file in @('Start-TV.ps1','Start-TV.cmd','Start-Mirror.cmd','Fullscreen-TV.ps1')) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $file) -Destination $Destination
     }
     Copy-Item -LiteralPath (Join-Path $root 'docs\WINDOWS-TV.md') -Destination (Join-Path $Destination 'README.md')
@@ -23,3 +23,4 @@ try {
     if ($env:GITHUB_SHA) { $env:GITHUB_SHA | Set-Content -Encoding ascii (Join-Path $Destination 'COMMIT') }
     Write-Host "Windows package: $Destination"
 } finally { Pop-Location }
+

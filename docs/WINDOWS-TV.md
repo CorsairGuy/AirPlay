@@ -68,3 +68,31 @@ separate `mirror` state subfolder, to distinguish it from the audio trial.
 It currently counts/discards frames: no display window, modern Telik path
 or combined AP2-audio/mirroring capability is claimed. This is a specific
 discovery experiment, not a completed video receiver application.
+
+## Fullscreen output on a host with GStreamer
+
+`Fullscreen-TV.ps1` connects the existing Annex-B video output to GStreamer
+through a binary pipe (no PowerShell text pipeline). It uses parsebin/decodebin
+and Direct3D11 fullscreen output, retaining aspect ratio. GStreamer selects an
+available decoder; hardware support depends on the host. No other AirPlay
+transport or UxPlay library is loaded.
+
+```powershell
+./Fullscreen-TV.ps1 -GStreamer C:\msys64\ucrt64\bin\gst-launch-1.0.exe
+```
+
+GStreamer runtime/plugins are required separately; not included in this package.
+The current launcher uses the confirmed AppleTV3,2 / 220.68 discovery profile,
+a silent audio output, and the existing legacy mirror receiver. A live image
+must still be confirmed on the actual sender. This does not add the Telik modern
+video cipher path. Alt+Enter toggles fullscreen. The viewer is owned by each video session; disconnection closes it while
+the receiver remains discoverable. creating `stop-fullscreen` in the state directory also stops both.
+It is a low-latency display path, not a calibrated audio/video synchronization
+claim. The bounded queue does not discard arbitrary compressed frames.
+
+Popyachsa reference read: Recluse/Popyachsa-AirPlay at
+5497138ed8b2fb5106df1532d325e30f63baf9ed, uxplay-patches README and full diff.
+Provenance: declared GPL-3.0-or-later. Used as architecture/behaviour reference;
+no external implementation code was copied. Its native HWND and orientation
+patches are not yet ported into this display launcher.
+

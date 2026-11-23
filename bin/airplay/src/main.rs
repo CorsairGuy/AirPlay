@@ -6,6 +6,9 @@
 use std::process::ExitCode;
 
 #[cfg(feature = "mirroring")]
+mod video_process;
+
+#[cfg(feature = "mirroring")]
 use airplay::mirror;
 #[cfg(all(feature = "mirroring", feature = "ffmpeg"))]
 use airplay::video;
@@ -45,6 +48,10 @@ const USAGE: &str = "\
                   писать видео зеркалирования в файл H.264 или H.265 (Annex B);
                   «-» — в stdout: airplay --mirror --video-dump - | ffplay -f h264 -
                   (H.265: ffplay -f hevc -)
+  --video-player ПУТЬ
+                  запускать отдельный viewer на каждый видеопоток (Annex B stdin)
+  --video-player-arg ЗНАЧЕНИЕ
+                  аргумент viewer; можно повторять, shell не используется
   --video-decoder ДЕКОДЕР
                   декодировать видео зеркалирования и писать в лог к/с и
                   время декодера: auto — встроенный декодер libavcodec,
@@ -121,6 +128,8 @@ fn parse_serve(args: &[String]) -> Result<serve::Options, String> {
     };
     let mut mirror = false;
     let mut dump: Option<String> = None;
+    let mut player: Option<String> = None;
+    let mut player_args = Vec::new();
     let mut decoder: Option<String> = None;
     let mut delay = None;
     let ms = |v: String, name: &str| {
@@ -133,7 +142,13 @@ fn parse_serve(args: &[String]) -> Result<serve::Options, String> {
         if !cfg!(feature = "mirroring")
             && matches!(
                 arg.as_str(),
-                "--mirror" | "--video-dump" | "--video-decoder" | "--video-delay" | "--display"
+                "--mirror"
+                    | "--video-dump"
+                    | "--video-decoder"
+                    | "--video-delay"
+                    | "--display"
+                    | "--video-player"
+                    | "--video-player-arg"
             )
         {
             return Err(format!("{arg}: build with --features mirroring"));
@@ -176,6 +191,8 @@ fn parse_serve(args: &[String]) -> Result<serve::Options, String> {
             }
             "--mirror" => mirror = true,
             "--video-dump" => dump = Some(value()?),
+            "--video-player" => player = Some(value()?),
+            "--video-player-arg" => player_args.push(value()?),
             "--video-decoder" => decoder = Some(value()?),
             "--video-delay" => delay = Some(ms(value()?, "--video-delay")?),
             "--display" => opts.display = parse_display(&value()?)?,
@@ -184,6 +201,12 @@ fn parse_serve(args: &[String]) -> Result<serve::Options, String> {
             "--latency" => opts.audio.fallback_latency = ms(value()?, "--latency")?,
             other => return Err(format!("неизвестный параметр {other}")),
         }
+    }
+    if player.is_some() && (!mirror || dump.is_some() || decoder.is_some() || delay.is_some()) {
+        return Err("--video-player requires --mirror and excludes other video outputs".into());
+    }
+    if !player_args.is_empty() && player.is_none() {
+        return Err("--video-player-arg requires --video-player".into());
     }
     if (dump.is_some() || decoder.is_some() || delay.is_some()) && !mirror {
         return Err(
@@ -202,10 +225,16 @@ fn parse_serve(args: &[String]) -> Result<serve::Options, String> {
             // Как у UxPlay: под этой моделью iOS предлагает «Повтор экрана».
             opts.model = "AppleTV3,2".into();
         }
-        opts.mirror = Some(match (dump, decoder) {
-            (Some(path), _) => mirror::VideoSinkFactory::new(move |_| dump_sink(&path)),
-            (None, Some(name)) => decode_factory(name, delay)?,
-            (None, None) => mirror::VideoSinkFactory::new(|_| Box::new(mirror::CountingSink(0))),
+        opts.mirror = Some(if let Some(program) = player {
+            video_process::factory(program.into(), player_args)?
+        } else {
+            match (dump, decoder) {
+                (Some(path), _) => mirror::VideoSinkFactory::new(move |_| dump_sink(&path)),
+                (None, Some(name)) => decode_factory(name, delay)?,
+                (None, None) => {
+                    mirror::VideoSinkFactory::new(|_| Box::new(mirror::CountingSink(0)))
+                }
+            }
         });
     }
     Ok(opts)
