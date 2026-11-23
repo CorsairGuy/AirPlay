@@ -3,18 +3,21 @@ param(
     [string]$Model = 'OLED55C4RLA.DRUQLJP',
     [ValidateRange(1,65535)][int]$Port = 7000,
     [switch]$Silent,
-    [switch]$NoCard
+    [switch]$NoCard,
+    [switch]$Mirror
 )
 $ErrorActionPreference = 'Stop'
 $exe = Join-Path $PSScriptRoot 'airplay.exe'
 if (!(Test-Path -LiteralPath $exe)) { throw "airplay.exe is missing beside this script." }
 if (!$env:LOCALAPPDATA) { throw 'LOCALAPPDATA is unavailable.' }
 $state = Join-Path $env:LOCALAPPDATA 'AirPlay\Windows-TV'
+if ($Mirror) { $state = Join-Path $state 'mirror' }
 $logs = Join-Path $state 'logs'
 [IO.Directory]::CreateDirectory($logs) | Out-Null
 $log = Join-Path $logs ((Get-Date -Format 'yyyyMMdd-HHmmss-fff') + '.log')
 $receiverArgs = @('--name',$Name,'--model',$Model,'--port',"$Port",'--state',$state)
 if (!$NoCard) { $receiverArgs += '--mrp' }
+if ($Mirror) { $receiverArgs += '--mirror' }
 if ($Silent) { $receiverArgs += @('--audio','null') }
 Write-Host "Receiver: $Name; model: $Model"
 Write-Host "State: $state"

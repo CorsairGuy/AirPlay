@@ -6,13 +6,13 @@ $Destination = [IO.Path]::GetFullPath($Destination)
 if (Test-Path -LiteralPath $Destination) { throw "Destination already exists: $Destination. Choose a new folder." }
 Push-Location $root
 try {
-    & cargo build --locked --release -p airplay --no-default-features
+    & cargo build --locked --release -p airplay
     if ($LASTEXITCODE -ne 0) { throw 'Windows receiver build failed.' }
     $exe = Join-Path $root 'target\release\airplay.exe'
     if (!(Test-Path -LiteralPath $exe)) { throw 'Build did not produce a Windows airplay.exe.' }
     [IO.Directory]::CreateDirectory($Destination) | Out-Null
     Copy-Item -LiteralPath $exe -Destination $Destination
-    foreach ($file in @('Start-TV.ps1','Start-TV.cmd')) {
+    foreach ($file in @('Start-TV.ps1','Start-TV.cmd','Start-Mirror.cmd')) {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $file) -Destination $Destination
     }
     Copy-Item -LiteralPath (Join-Path $root 'docs\WINDOWS-TV.md') -Destination (Join-Path $Destination 'README.md')

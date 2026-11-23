@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Build audio receiver and TV launcher
+      - name: Build receiver and TV discovery launchers
         shell: pwsh
         run: ./tools/windows/Build-TV.ps1 -Destination "${{ runner.temp }}/windows-tv"
       - uses: actions/upload-artifact@v4

@@ -8,8 +8,8 @@ Run `Start-TV.cmd`. It launches `airplay.exe` with the real LG model string
 a persistent state folder, the existing MRP card and default WASAPI audio output.
 This is a diagnostic presentation profile, not LG firmware or an MFi identity.
 No native LG feature mask, certificate, serial number or pairing key is copied.
-The receiver advertises its existing implemented audio capabilities. Video and
-mirroring are excluded from this build. A TV icon in iOS is a required manual
+The receiver advertises its existing implemented audio capabilities. The default build includes the existing legacy mirroring transport; the
+audio launcher does not enable it. A TV icon in iOS is a required manual
 acceptance check and has not yet been established for this software profile.
 
 ## Use
@@ -18,6 +18,8 @@ acceptance check and has not yet been established for this software profile.
 - `Start-TV.cmd -Silent`: decode without audible output for card/discovery checks.
 - `Start-TV.cmd -Name "Windows TV" -Port 7001`: change name/listener port.
 - `Start-TV.cmd -NoCard`: isolate ordinary audio reception from MRP presentation.
+- `Start-Mirror.cmd`: separate silent mirroring identity for icon/discovery checks;
+  receives and counts video frames, but does not show an image.
 - Ctrl+C stops the receiver. No service or startup entry is installed.
 
 State and pairing keys: `%LOCALAPPDATA%\AirPlay\Windows-TV`.
@@ -37,7 +39,7 @@ On Windows with Rust stable and MSVC C++ build tools:
 ./tools/windows/Build-TV.ps1
 ```
 
-The script performs one release build (`--no-default-features`), copies the exe,
+The script performs one release build (including the default mirroring feature), copies the exe,
 launcher, license and documentation to a new directory, and writes SHA256SUMS.
 It does not run tests, open listeners or start playback. The GitHub Actions
 `Windows TV package` workflow publishes the same files as an artifact.
@@ -53,3 +55,16 @@ It does not run tests, open listeners or start playback. The GitHub Actions
 If the icon differs, retain a screenshot and the actual emitted `/info`/TXT.
 Do not enable MFi, video or arbitrary feature bits merely to force an icon.
 This package does not yet supply a desktop video window or a native GUI.
+
+## Mirroring discovery experiment
+
+The original audio-only LG-model trial showed a speaker icon. Changing
+sourceVersion to 550.10 also showed a speaker. Model/sourceVersion alone
+therefore did not achieve TV presentation in these user checks.
+
+Start-Mirror.cmd activates the already implemented mirror profile, retaining
+the LG model instead of substituting AppleTV3,2. Its keys live under the
+separate `mirror` state subfolder, to distinguish it from the audio trial.
+It currently counts/discards frames: no display window, modern Telik path
+or combined AP2-audio/mirroring capability is claimed. This is a specific
+discovery experiment, not a completed video receiver application.
