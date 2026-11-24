@@ -26,9 +26,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
-use crate::events::{Events, Metadata, NoEvents, Progress};
 use crate::remote::{self, Command, Remote};
 use crate::sessions::session::{BPLIST, Context, OCTETS};
+use ::media::events::{Events, Metadata, NoEvents, Progress};
 
 /// Сколько байт отправитель может прислать вперёд в буферизованном потоке:
 /// 1 МиБ — около 30 с AAC 256 кбит/с.

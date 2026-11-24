@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Moved media events, local output process and source supervision from the binary crate into the media service. Existing public module paths are re-exported; receiver session and MRP orchestration remain in the binary library until their dependency cycle is removed.
+
 - Moved actual implementation into seven service packages: discovery, sessions, timesync, media, remote, coordinator and identity. Session preparation, identity and discovery have dedicated packages; part of receive-session and remote runtime wiring remains in the binary library.
 
 - Renamed the 20 `ap_` library packages to their unprefixed names. Compatibility re-export packages retain `ap_sender` and `ap_mrp`; the transport itself is `media::tx`. Other old Cargo package names change.

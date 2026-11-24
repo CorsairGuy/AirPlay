@@ -17,6 +17,8 @@ mod local_pipe;
 mod packet;
 pub mod pool;
 mod session;
+pub mod source_process;
+pub mod source_runtime;
 pub mod timing;
 mod transport;
 

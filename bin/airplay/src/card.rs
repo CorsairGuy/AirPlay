@@ -14,13 +14,13 @@ use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::watch;
 
-use crate::events::{Events, Metadata, Progress};
 use crate::remote::Remote;
 use crate::remote::mrp_service::{
     control::Control,
     model::{Cover, Feed, Identity, Profile, Route},
     server,
 };
+use ::media::events::{Events, Metadata, Progress};
 
 /// Источник в терминах станции: у неё «airplay» — входящий AirPlay.
 const SOURCE: &str = "airplay";
@@ -411,12 +411,12 @@ mod tests {
         let a = Card::new(
             device("one"),
             Remote::new(),
-            Arc::new(crate::events::NoEvents),
+            Arc::new(::media::events::NoEvents),
         );
         let b = Card::new(
             device("two"),
             Remote::new(),
-            Arc::new(crate::events::NoEvents),
+            Arc::new(::media::events::NoEvents),
         );
         let info = |card: &Card| {
             crate::remote::mrp_service::model::device_info(
@@ -457,7 +457,7 @@ mod tests {
         let compat = Card::new_with_profile(
             device("compat"),
             Remote::new(),
-            Arc::new(crate::events::NoEvents),
+            Arc::new(::media::events::NoEvents),
             None,
             profile,
         )
@@ -485,7 +485,7 @@ mod tests {
             Card::new_with_profile(
                 device("bad"),
                 Remote::new(),
-                Arc::new(crate::events::NoEvents),
+                Arc::new(::media::events::NoEvents),
                 None,
                 invalid
             )
@@ -505,7 +505,7 @@ mod tests {
                 system_app: "test".into(),
             },
             Remote::new(),
-            Arc::new(crate::events::NoEvents),
+            Arc::new(::media::events::NoEvents),
         );
         let remote = |volume: f32| {
             let mut n = mrp::wire::Node::default();
@@ -591,7 +591,7 @@ mod tests {
                 system_app: "x".into(),
             },
             Remote::new(),
-            Arc::new(crate::events::NoEvents),
+            Arc::new(::media::events::NoEvents),
         );
         let rx = card.feed.subscribe();
         card.metadata(&Metadata {
@@ -625,7 +625,7 @@ mod tests {
                 system_app: "test".into(),
             },
             Remote::new(),
-            Arc::new(crate::events::NoEvents),
+            Arc::new(::media::events::NoEvents),
         );
         card.metadata(&Metadata {
             title: Some("First".into()),

@@ -139,7 +139,7 @@ fn parse_serve(args: &[String]) -> Result<serve::Options, String> {
         mirror: None,
         remote: Default::default(),
         mrp: serve::Mrp::Off,
-        events: std::sync::Arc::new(airplay::events::NoEvents),
+        events: std::sync::Arc::new(media::events::NoEvents),
         volume_range_db: 30.0,
         apply_volume: true,
         source_version: "366.0".into(),

@@ -9,14 +9,14 @@
 pub mod card;
 pub mod card_transport;
 pub mod continuous_control;
+pub use ::media::events;
+pub use ::media::output::local_process;
 pub use discovery;
 pub use discovery::{catalog as discovery_catalog, feed as discovery_feed};
 pub use identity;
 #[cfg(target_os = "linux")]
 pub use identity::daemon_identity;
 pub use identity::{route_pairing, sender_store, state};
-pub mod events;
-pub mod local_process;
 pub mod media;
 #[cfg(test)]
 mod mrp_path_tests;
@@ -29,13 +29,12 @@ pub mod send_control;
 #[cfg(unix)]
 pub mod send_ipc;
 pub mod sessions;
-pub use sessions::{preparer as session_preparer, serve, session};
-pub mod source_process;
-pub mod source_runtime;
+pub use ::media::tx::{source_process, source_runtime};
 pub use ::remote::{mrp_log, station_log};
 /// Compatibility import for older adapters; new code uses mrp_service.
 pub use mrp_service as station_mrp;
 pub use remote::mrp_service;
+pub use sessions::{preparer as session_preparer, serve, session};
 /// Compatibility macro for older adapters.
 #[macro_export]
 macro_rules! station_elog {($($arg:tt)*)=>{{$crate::mrp_log!($($arg)*);}}}

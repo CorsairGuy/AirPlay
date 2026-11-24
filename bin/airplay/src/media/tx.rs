@@ -25,7 +25,7 @@ pub struct Options {
     pub targets: Vec<String>,
     pub volume_db: f32,
     pub latency_ms: u32,
-    pub local: Option<crate::local_process::Options>,
+    pub local: Option<::media::output::local_process::Options>,
     pub control_socket: Option<std::path::PathBuf>,
 }
 
@@ -73,7 +73,7 @@ impl Options {
             }
         }
         options.local = match local_program {
-            Some(program) => Some(crate::local_process::Options {
+            Some(program) => Some(::media::output::local_process::Options {
                 program,
                 args: local_args,
                 gain: local_gain,
@@ -300,9 +300,9 @@ async fn run_inner<R: AsyncRead + Unpin>(
         .map(|v| v.claim(options.targets.len()))
         .transpose()?;
     let local = if let Some(process) = options.local.take() {
-        Some(local_factory(crate::local_process::Renderer::spawn(
-            process,
-        )?))
+        Some(local_factory(
+            ::media::output::local_process::Renderer::spawn(process)?,
+        ))
     } else {
         local
     };

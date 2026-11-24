@@ -40,7 +40,7 @@ pub struct Options {
     /// Кто отвечает iPhone по MRP (поток 130).
     pub mrp: Mrp,
     /// Что приёмник сообщает наружу (громкость, метаданные, позиция).
-    pub events: Arc<dyn crate::events::Events>,
+    pub events: Arc<dyn ::media::events::Events>,
     /// Шкала громкости, дБ (по умолчанию 30, как ползунок iPhone).
     pub volume_range_db: f32,
     /// `false` — громкость не применять, только сообщать в `events`.

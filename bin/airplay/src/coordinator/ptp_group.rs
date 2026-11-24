@@ -686,7 +686,7 @@ mod tests {
                 system_app: "com.github.corsairguy.airplay".into(),
             },
             remote,
-            Arc::new(crate::events::NoEvents),
+            Arc::new(::media::events::NoEvents),
         )
     }
     #[tokio::test]
@@ -875,10 +875,8 @@ mod tests {
     }
     #[tokio::test]
     async fn card_mrp_pause_play_reaches_continuous_pcm_and_all_owners_end() {
-        use crate::{
-            events::Events,
-            remote::{Command, Remote},
-        };
+        use crate::remote::{Command, Remote};
+        use ::media::events::Events;
         use tokio::io::AsyncWriteExt;
         let (_clock, _user, group, origin) = fixture();
         let remote = Remote::new();

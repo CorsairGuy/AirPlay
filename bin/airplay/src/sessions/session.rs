@@ -925,7 +925,7 @@ mod tests {
             let card = crate::card::Card::new(
                 crate::card::Card::device(&c.device),
                 c.remote.clone(),
-                Arc::new(crate::events::NoEvents),
+                Arc::new(::media::events::NoEvents),
             );
             c.mrp = Some(crate::remote::MrpService::Card(card.clone()));
             card
@@ -1014,7 +1014,7 @@ mod tests {
         );
 
         // Трек от отправителя — карточка подписанному iPhone.
-        use crate::events::Events;
+        use ::media::events::Events;
         loop {
             let m = next().await;
             if m.iter()
@@ -1023,7 +1023,7 @@ mod tests {
                 break;
             }
         }
-        card.metadata(&crate::events::Metadata {
+        card.metadata(&::media::events::Metadata {
             title: Some("Песня".into()),
             ..Default::default()
         });
@@ -1038,14 +1038,14 @@ mod tests {
     #[derive(Default)]
     struct EventLog(std::sync::Mutex<Vec<String>>);
 
-    impl crate::events::Events for EventLog {
+    impl ::media::events::Events for EventLog {
         fn volume(&self, db: f32) {
             self.0.lock().unwrap().push(format!("volume {db}"));
         }
         fn playing(&self, playing: bool) {
             self.0.lock().unwrap().push(format!("playing {playing}"));
         }
-        fn metadata(&self, m: &crate::events::Metadata) {
+        fn metadata(&self, m: &::media::events::Metadata) {
             let title = m.title.clone().unwrap_or_default();
             self.0.lock().unwrap().push(format!("title {title}"));
         }
@@ -1055,7 +1055,7 @@ mod tests {
                 .unwrap()
                 .push(format!("artwork {mime} {}", data.len()));
         }
-        fn progress(&self, p: crate::events::Progress) {
+        fn progress(&self, p: ::media::events::Progress) {
             self.0.lock().unwrap().push(format!(
                 "progress {}/{}",
                 p.position.as_secs(),

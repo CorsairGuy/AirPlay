@@ -108,7 +108,7 @@ async fn same_card_device_info_survives_bridge_and_duplex_paths() {
             system_app: "mini2.native".into(),
         },
         Remote::new(),
-        Arc::new(crate::events::NoEvents),
+        Arc::new(::media::events::NoEvents),
     );
     for fragmented in [false, true] {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
