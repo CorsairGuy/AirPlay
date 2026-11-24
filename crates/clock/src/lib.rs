@@ -2,16 +2,13 @@
 //!
 //! Без ввода-вывода: служба `timesync` кормит [`Ptp`] пакетами с портов
 //! 319/320 и временем их приёма, а плееры спрашивают смещение часов
-//! отправителя. Поведение повторяет nqptp из shairport-sync: мы только
-//! слушаем Sync/Follow_Up мастера и сами в выборах не участвуем, кроме
-//! «будящего» Announce для замолчавших часов.
+//! отправителя. Протокольная математика не зависит от внешних демонов.
 
 pub mod domain;
 pub mod external;
 mod filter;
 pub mod follower;
 pub mod measurement;
-pub mod nqptp;
 pub mod probe;
 pub mod ptp;
 pub mod ptp_sender;

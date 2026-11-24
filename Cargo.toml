@@ -20,7 +20,8 @@ mdns = { path = "crates/mdns" }
 device = { path = "crates/device" }
 clock = { path = "crates/clock" }
 rtp = { path = "crates/rtp" }
-sender = { path = "crates/sender" }
+media_tx = { path = "crates/media_tx" }
+coordinator = { path = "crates/coordinator" }
 audio_stream = { path = "crates/audio_stream" }
 mirror = { path = "crates/mirror" }
 hls = { path = "crates/hls" }

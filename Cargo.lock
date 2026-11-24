@@ -42,6 +42,7 @@ dependencies = [
  "base",
  "clock",
  "codec",
+ "coordinator",
  "crypto",
  "device",
  "fairplay",
@@ -50,6 +51,7 @@ dependencies = [
  "ipc",
  "libc",
  "mdns",
+ "media_tx",
  "mediaremote",
  "mirror",
  "mrp",
@@ -58,7 +60,6 @@ dependencies = [
  "rand",
  "rtp",
  "rtsp",
- "sender",
  "sha2",
  "timesync",
  "tokio",
@@ -107,7 +108,8 @@ dependencies = [
 name = "ap_sender"
 version = "0.1.0"
 dependencies = [
- "sender",
+ "coordinator",
+ "media_tx",
 ]
 
 [[package]]
@@ -321,6 +323,14 @@ name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
+
+[[package]]
+name = "coordinator"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "rand",
+]
 
 [[package]]
 name = "coreaudio-rs"
@@ -886,6 +896,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "media_tx"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clock",
+ "coordinator",
+ "crypto",
+ "pair",
+ "plist",
+ "rand",
+ "rtp",
+ "rtsp",
+ "timesync",
+ "tokio",
+]
+
+[[package]]
 name = "mediaremote"
 version = "0.1.0"
 dependencies = [
@@ -1424,22 +1451,6 @@ name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
-
-[[package]]
-name = "sender"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clock",
- "crypto",
- "pair",
- "plist",
- "rand",
- "rtp",
- "rtsp",
- "timesync",
- "tokio",
-]
 
 [[package]]
 name = "serde"

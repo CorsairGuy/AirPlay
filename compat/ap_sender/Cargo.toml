@@ -8,7 +8,8 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-sender.workspace = true
+coordinator.workspace = true
+media_tx.workspace = true
 
 [lints]
 workspace = true

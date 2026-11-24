@@ -127,7 +127,7 @@ impl Server {
             }
             ["VOLUME", endpoint, db] => {
                 let parsed = (|| {
-                    Ok::<_, anyhow::Error>((endpoint.parse()?, sender::Volume::db(db.parse()?)?))
+                    Ok::<_, anyhow::Error>((endpoint.parse()?, media_tx::Volume::db(db.parse()?)?))
                 })();
                 match parsed
                     .and_then(|(endpoint, volume)| self.control.set_volume(endpoint, volume))
@@ -158,7 +158,7 @@ impl Drop for Task {
     }
 }
 pub(crate) async fn run<R: tokio::io::AsyncRead + Unpin>(
-    options: crate::send::Options,
+    options: crate::media::tx::Options,
     input: R,
     stop: watch::Receiver<bool>,
     path: PathBuf,
@@ -167,7 +167,7 @@ pub(crate) async fn run<R: tokio::io::AsyncRead + Unpin>(
     let server = Server::bind(&path, control.clone())?;
     let mut serving = Task(tokio::spawn(server.run(stop.clone())));
     tokio::select! {
-        result=crate::send::run_controlled(options,input,stop,control)=>result,
+        result=crate::media::tx::run_controlled(options,input,stop,control)=>result,
         result=&mut serving.0=>{result.context("relay IPC task failed")??;bail!("relay IPC stopped before sender")}
     }
 }
@@ -175,7 +175,7 @@ pub(crate) async fn run<R: tokio::io::AsyncRead + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sender::{MediaProgress, Volume};
+    use media_tx::{MediaProgress, Volume};
     async fn request(path: &Path, command: &str) -> String {
         let mut stream = UnixStream::connect(path).await.unwrap();
         stream.write_all(command.as_bytes()).await.unwrap();

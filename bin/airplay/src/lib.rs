@@ -9,41 +9,32 @@
 pub mod card;
 pub mod card_transport;
 pub mod continuous_control;
+pub mod identity;
 #[cfg(target_os = "linux")]
-pub mod daemon_identity;
-pub mod discovery_catalog;
-pub mod discovery_feed;
+pub use identity::daemon_identity;
+pub use identity::{route_pairing, sender_store, state};
+pub mod discovery;
+pub use discovery::{catalog as discovery_catalog, feed as discovery_feed};
 pub mod events;
-#[cfg(target_os = "linux")]
-pub mod external_clock;
 pub mod local_process;
 pub mod media;
 #[cfg(test)]
 mod mrp_path_tests;
-pub mod nqptp_control;
-pub mod output_card;
-pub mod output_control;
-pub mod output_router;
-pub mod output_worker;
-pub mod ptp_group;
-pub mod relay_selection;
+pub use media::output::card as output_card;
+pub mod coordinator;
+pub use coordinator::{output_control, output_router, output_worker, ptp_group, relay_selection};
 pub mod remote;
-pub mod route_pairing;
-pub mod send;
+pub use media::tx as send;
 pub mod send_control;
 #[cfg(unix)]
 pub mod send_ipc;
-pub mod sender_store;
-pub mod serve;
-pub mod session;
-pub mod session_preparer;
+pub mod sessions;
+pub use sessions::{preparer as session_preparer, serve, session};
 pub mod source_process;
 pub mod source_runtime;
-pub mod state;
-#[macro_use]
-pub mod mrp_service;
 /// Compatibility import for older adapters; new code uses mrp_service.
 pub use mrp_service as station_mrp;
+pub use remote::mrp_service;
 /// Compatibility macro for older adapters.
 #[macro_export]
 macro_rules! station_elog {($($arg:tt)*)=>{{$crate::mrp_log!($($arg)*);}}}
@@ -55,3 +46,5 @@ pub use device;
 pub use mirror;
 #[cfg(feature = "mirroring")]
 pub use video;
+
+pub use timesync;

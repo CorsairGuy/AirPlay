@@ -12,7 +12,9 @@ mod video_process;
 use airplay::mirror;
 #[cfg(all(feature = "mirroring", feature = "ffmpeg"))]
 use airplay::video;
-use airplay::{audio_stream, device, serve, state};
+use airplay::{audio_stream, device};
+use airplay::sessions::serve;
+use airplay::identity::state;
 
 use tracing_subscriber::EnvFilter;
 
@@ -318,7 +320,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Some("send") => {
-            let options = match airplay::send::Options::parse(&args[1..]) {
+            let options = match airplay::media::tx::Options::parse(&args[1..]) {
                 Ok(options) => options,
                 Err(error) => {
                     eprintln!("airplay send: {error:#}\n\n{USAGE}");
@@ -343,7 +345,7 @@ fn main() -> ExitCode {
                         stop.send_replace(true);
                     }
                 });
-                let result = airplay::send::run(options, tokio::io::stdin(), stopped).await;
+                let result = airplay::media::tx::run(options, tokio::io::stdin(), stopped).await;
                 interrupt.abort();
                 result
             });

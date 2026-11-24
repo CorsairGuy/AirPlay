@@ -1,0 +1,186 @@
+//! Bounded handoff from each MRP reader to the application's serialized output
+//! worker. The worker owns discovery, pairing, relay_selection and topology.
+use mrp::wire::Node;
+use tokio::sync::{mpsc, oneshot};
+
+#[derive(Clone)]
+pub struct OutputControl(mpsc::Sender<OutputRequest>);
+pub(crate) trait VolumeBackend {
+    fn set_routes(
+        &self,
+        catalog: &::coordinator::outputs::OutputCatalog,
+        levels: &[(String, media_tx::Volume)],
+    ) -> anyhow::Result<()>;
+}
+impl VolumeBackend for media_tx::pool::SessionPool {
+    fn set_routes(
+        &self,
+        catalog: &::coordinator::outputs::OutputCatalog,
+        levels: &[(String, media_tx::Volume)],
+    ) -> anyhow::Result<()> {
+        self.set_route_volumes(catalog, levels)
+    }
+}
+pub(crate) type VolumeOperation =
+    Box<dyn FnOnce(&dyn VolumeBackend, &::coordinator::outputs::OutputCatalog) -> u64 + Send>;
+struct Completion(Option<Box<dyn FnOnce(u64) + Send>>);
+impl Completion {
+    fn new(callback: Box<dyn FnOnce(u64) + Send>) -> Self {
+        Self(Some(callback))
+    }
+    fn finish(mut self, code: u64) {
+        if let Some(callback) = self.0.take() {
+            callback(code);
+        }
+    }
+}
+impl Drop for Completion {
+    fn drop(&mut self) {
+        if let Some(callback) = self.0.take() {
+            callback(100);
+        }
+    }
+}
+pub struct OutputRequest {
+    pub body: Node,
+    pub authorization: Option<crate::identity::route_pairing::AuthorizationContext>,
+    pub volume: Option<(String, f32)>,
+    pub batch: Option<Vec<(String, f32)>>,
+    pub(crate) operation: Option<VolumeOperation>,
+    after: Option<Completion>,
+    /// Reply with the actual MRP error code after applying the operation.
+    /// Check is_closed()/closed() to cancel pending pairing on controller loss.
+    pub reply: oneshot::Sender<u64>,
+}
+impl OutputRequest {
+    pub(crate) fn after_result(&mut self, callback: impl FnOnce(u64) + Send + 'static) {
+        let previous = self.after.take();
+        self.after = Some(Completion::new(Box::new(move |code| {
+            if let Some(previous) = previous {
+                previous.finish(code);
+            }
+            callback(code);
+        })));
+    }
+    /// Run the accepted-state callback before acknowledging, so the next queued
+    /// operation sees fresh levels even if its controller's writer is delayed.
+    pub fn finish(mut self, code: u64) {
+        if let Some(after) = self.after.take() {
+            after.finish(code);
+        }
+        let _ = self.reply.send(code);
+    }
+}
+impl OutputControl {
+    /// Preserve the original reply, authorization and accepted-state callback.
+    pub fn forward(&self, request: OutputRequest) -> Result<(), Box<OutputRequest>> {
+        self.0
+            .try_send(request)
+            .map_err(|error| Box::new(error.into_inner()))
+    }
+    pub fn channel(capacity: usize) -> (Self, mpsc::Receiver<OutputRequest>) {
+        let (tx, rx) = mpsc::channel(capacity.clamp(1, 64));
+        (Self(tx), rx)
+    }
+    #[cfg(test)]
+    pub(crate) fn submit(&self, body: Node) -> Result<oneshot::Receiver<u64>, ()> {
+        self.submit_authorized(body, None)
+    }
+    pub(crate) fn submit_authorized(
+        &self,
+        body: Node,
+        authorization: Option<crate::identity::route_pairing::AuthorizationContext>,
+    ) -> Result<oneshot::Receiver<u64>, ()> {
+        let (reply, result) = oneshot::channel();
+        self.0
+            .try_send(OutputRequest {
+                body,
+                authorization,
+                volume: None,
+                batch: None,
+                operation: None,
+                after: None,
+                reply,
+            })
+            .map_err(|_| ())?;
+        Ok(result)
+    }
+    pub(crate) fn submit_volume_after(
+        &self,
+        uid: String,
+        value: f32,
+        after: Box<dyn FnOnce(u64) + Send>,
+    ) -> Result<oneshot::Receiver<u64>, ()> {
+        self.enqueue_volume(uid, value, Some(after))
+    }
+    fn enqueue_volume(
+        &self,
+        uid: String,
+        value: f32,
+        after: Option<Box<dyn FnOnce(u64) + Send>>,
+    ) -> Result<oneshot::Receiver<u64>, ()> {
+        if uid.is_empty()
+            || uid.len() > 256
+            || uid.chars().any(char::is_control)
+            || !value.is_finite()
+            || !(0.0..=1.0).contains(&value)
+        {
+            return Err(());
+        }
+        let (reply, result) = oneshot::channel();
+        self.0
+            .try_send(OutputRequest {
+                body: Node::default(),
+                authorization: None,
+                volume: Some((uid, value)),
+                batch: None,
+                operation: None,
+                after: after.map(Completion::new),
+                reply,
+            })
+            .map_err(|_| ())?;
+        Ok(result)
+    }
+    pub(crate) fn submit_operation(
+        &self,
+        operation: VolumeOperation,
+    ) -> Result<oneshot::Receiver<u64>, ()> {
+        let (reply, result) = oneshot::channel();
+        self.0
+            .try_send(OutputRequest {
+                body: Node::default(),
+                authorization: None,
+                volume: None,
+                batch: None,
+                operation: Some(operation),
+                after: None,
+                reply,
+            })
+            .map_err(|_| ())?;
+        Ok(result)
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod testing {
+    #[derive(Default)]
+    pub struct Backend(pub std::sync::Mutex<Vec<Vec<(String, media_tx::Volume)>>>);
+    impl super::VolumeBackend for Backend {
+        fn set_routes(
+            &self,
+            _: &::coordinator::outputs::OutputCatalog,
+            levels: &[(String, media_tx::Volume)],
+        ) -> anyhow::Result<()> {
+            self.0.lock().unwrap().push(levels.to_vec());
+            Ok(())
+        }
+    }
+    pub fn execute(mut request: super::OutputRequest, backend: &Backend) {
+        let operation = request.operation.take().unwrap();
+        let code = operation(
+            backend,
+            &::coordinator::outputs::OutputCatalog::new(vec![]).unwrap(),
+        );
+        request.finish(code);
+    }
+}

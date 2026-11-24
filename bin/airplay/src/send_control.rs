@@ -1,6 +1,6 @@
 //! Application-facing relay handle. No files, device routes or protocol translation.
 use anyhow::{Result, bail};
-use sender::{MediaProgress, Volume};
+use media_tx::{MediaProgress, Volume};
 use std::{
     collections::HashMap,
     net::SocketAddr,
@@ -23,7 +23,7 @@ struct Target {
 enum Gain {
     #[cfg(test)]
     Watch(watch::Sender<Volume>),
-    Session(Box<sender::pool::SessionHandle>),
+    Session(Box<media_tx::pool::SessionHandle>),
 }
 impl Gain {
     fn requested(&self) -> Volume {
@@ -37,7 +37,7 @@ impl Gain {
         match self {
             #[cfg(test)]
             Self::Watch(v) => !v.is_closed(),
-            Self::Session(v) => *v.state.borrow() == sender::pool::SessionState::Running,
+            Self::Session(v) => *v.state.borrow() == media_tx::pool::SessionState::Running,
         }
     }
     fn request(&self, volume: Volume) -> Result<()> {
@@ -101,7 +101,7 @@ impl RelayControl {
     /// overall multiroom master-volume balance is a separate adapter policy.
     pub fn set_route_volume(
         &self,
-        catalog: &sender::outputs::OutputCatalog,
+        catalog: &::coordinator::outputs::OutputCatalog,
         uid: &str,
         volume: Volume,
     ) -> Result<()> {
@@ -124,7 +124,7 @@ impl RelayControl {
     }
     pub fn set_member_volume(
         &self,
-        catalog: &sender::outputs::OutputCatalog,
+        catalog: &::coordinator::outputs::OutputCatalog,
         uid: &str,
         volume: Volume,
     ) -> Result<()> {
@@ -168,7 +168,7 @@ impl RelayControl {
     pub(crate) fn register_session(
         &self,
         endpoint: SocketAddr,
-        handle: sender::pool::SessionHandle,
+        handle: media_tx::pool::SessionHandle,
     ) {
         let media = handle.progress.clone();
         self.0.lock().unwrap().targets.insert(
@@ -198,7 +198,7 @@ mod tests {
     use super::*;
     #[test]
     fn logical_row_volume_is_atomic_and_member_volume_remains_independent() {
-        use sender::outputs::{OutputCatalog, OutputRoute, ReceiverEndpoint};
+        use ::coordinator::outputs::{OutputCatalog, OutputRoute, ReceiverEndpoint};
         let a = "127.0.0.1:7001".parse().unwrap();
         let b = "127.0.0.1:7002".parse().unwrap();
         let catalog = OutputCatalog::new(vec![OutputRoute {

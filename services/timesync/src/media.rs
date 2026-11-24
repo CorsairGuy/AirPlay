@@ -1,6 +1,6 @@
 //! One injected Instant-backed physical source for the unified service and PCM
 //! producer. No sockets, clock election, daemon startup or wall-clock reads.
-//! External MONOTONIC_RAW/NQPTP sources need their own explicit domain bridge;
+//! External monotonic-clock sources need their own explicit domain bridge;
 //! do not label those counters as this Instant epoch.
 use crate::{
     engine::{Quality, Snapshot},

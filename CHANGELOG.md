@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Renamed the 20 `ap_` library packages to their unprefixed names. Compatibility re-export packages retain `ap_sender` and `ap_mrp`; the transport itself is `media_tx`. Other old Cargo package names change.
+- Removed NQPTP-specific ABI, reader and control adapters from the core. Existing Station integration is pinned to its earlier revision and must be adapted before updating; the in-core PTP engine is not yet validated as complete.
+- Moved existing application modules under discovery, sessions, identity, coordinator, remote and media rx/tx/output. Internal imports use the new boundaries; prior Rust module paths remain available for external compatibility. The group state, output selection and volume model live in the coordinator library; media_tx owns sender transport and session pool. This does not add processes or claim completion of MRP consolidation.
+- Native PTP peer interests are retained per session, so removing one session does not discard another session’s peers. The RTSP sender is retained as a timing peer even if timingPeerInfo is absent. PTP operation with real AirPlay devices still needs validation.
+
 - Added configurable AirPlay feature mask, status flags, and accessory type to the receiver. Device profiles are chosen by the caller, independently of any Windows application.
 - Investigated approximately 7.4–8.4 s between an observed mDNS query and RTSP startup. In the tested TV receiver, clearing feature bit 48 while retaining bits 40, 41, and 47 (`0x527FFEE6,0x8300`) produced immediate video with a TV icon; repeated connections after resetting iPhone Wi-Fi also succeeded. Restoring bit 48 while clearing bit 47 restored the delay. These observations identify a trigger in this profile, not the iPhone's internal mechanism.
 - A pre-RTSP PTP probe was not observed on the tested PC interface; toggling bit 41 did not remove the delay. Removing buffered-audio bit 40 made video fail, so it is not a viable fix. Changing source version (550.10, 220.68, 377.40.00) or omitting TXT `at` did not yield a reported speedup. In one capture, no PC mDNS reannouncement was observed in the pause and Fast/TV PTR, SRV, and TXT TTL and cache-flush settings matched. These network observations are limited to traffic visible to the PC; they do not establish AWDL behavior.

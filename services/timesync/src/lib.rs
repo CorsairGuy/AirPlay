@@ -6,14 +6,8 @@
 
 pub mod engine;
 mod host;
-#[cfg(target_os = "windows")]
-pub mod nqptp_windows;
-#[cfg(target_os = "linux")]
-pub mod external_acquisition;
 pub mod external_media;
 pub mod media;
-#[cfg(target_os = "linux")]
-pub mod nqptp_reader;
 pub mod ntp;
 pub mod peer_interests;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -21,6 +15,7 @@ pub mod raw_correlation;
 pub mod sender;
 pub mod service;
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -36,8 +31,7 @@ pub struct TimeSync {
     general: Arc<Vec<Arc<UdpSocket>>>,
     listening: bool,
     host: Option<Arc<host::Host>>,
-    #[cfg(target_os = "windows")]
-    nqptp: Option<Arc<nqptp_windows::Receiver>>,
+    interests: Arc<Mutex<BTreeMap<u128, Vec<IpAddr>>>>,
 }
 
 impl TimeSync {
@@ -48,8 +42,7 @@ impl TimeSync {
             general: Arc::new(Vec::new()),
             listening: false,
             host: None,
-            #[cfg(target_os = "windows")]
-            nqptp: None,
+            interests: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -108,40 +101,35 @@ impl TimeSync {
     }
 
     pub fn selected_reading(&self) -> Option<clock::domain::Reading> {
-        #[cfg(target_os = "windows")]
-        if let Some(nqptp) = &self.nqptp { return nqptp.reading(); }
         self.host.as_ref()?.reading()
     }
 
-    /// Attach to an explicitly owned external NQPTP and its measured clock.
-    #[cfg(target_os = "windows")]
-    pub fn start_nqptp(self_id:u64, path:std::path::PathBuf, control:nqptp_windows::Control, sampler:impl FnMut() -> std::io::Result<u64> + Send + 'static) -> std::io::Result<Self> {
-        let mut this=Self::idle(self_id);
-        this.nqptp=Some(Arc::new(nqptp_windows::Receiver::start(path,control,sampler)?));
-        this.listening=true;
-        Ok(this)
-    }
-
-    pub fn select_session_master(&self, owner:u128, master:IpAddr) -> std::io::Result<()> {
-        #[cfg(target_os = "windows")]
-        if let Some(nqptp)=&self.nqptp { return nqptp.select(owner,master); }
-        let _=(owner,master);
-        Ok(())
-    }
-
     pub fn set_session_peers(&self,owner:u128,peers:Vec<IpAddr>) {
-        #[cfg(target_os = "windows")]
-        if self.nqptp.is_some() { return; }
-        if let Some(host)=&self.host {host.set_peers(owner,peers);} else {self.set_peers(peers);}
+        if let Some(host)=&self.host {host.set_peers(owner,peers);} else {self.set_listener_peers(owner,peers);}
     }
     pub fn release_session_peers(&self,owner:u128) {
-        #[cfg(target_os = "windows")]
-        if let Some(nqptp)=&self.nqptp { if let Err(e)=nqptp.release(owner) {warn!(%e,"NQPTP release failed");} return; }
-        if let Some(host)=&self.host {host.set_peers(owner,vec![]);}
+        if let Some(host)=&self.host {host.set_peers(owner,vec![]);} else {self.set_listener_peers(owner,vec![]);}
     }
 
     pub fn set_peers(&self, peers: Vec<IpAddr>) {
         if let Some(host)=&self.host {host.set_peers(0,peers);return;}
+        self.set_listener_peers(0, peers);
+    }
+
+    fn set_listener_peers(&self, owner: u128, peers: Vec<IpAddr>) {
+        let mut interests = self.interests.lock().unwrap_or_else(|e| e.into_inner());
+        if peers.is_empty() {
+            interests.remove(&owner);
+        } else {
+            interests.insert(owner, peers);
+        }
+        let peers: Vec<_> = interests
+            .values()
+            .flatten()
+            .map(|ip| ip.to_canonical())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
         debug!(?peers, "PTP: участники");
         self.lock().set_peers(peers);
     }
@@ -161,8 +149,6 @@ impl TimeSync {
     }
 
     fn uses_selected_reading(&self) -> bool {
-        #[cfg(target_os = "windows")]
-        if self.nqptp.is_some() { return true; }
         self.host.is_some()
     }
 
@@ -233,5 +219,33 @@ fn bind(addr: SocketAddr) -> std::io::Result<UdpSocket> {
 impl clock::TimeSource for TimeSync {
     fn offset(&self, timeline: u64) -> Option<i64> {
         self.timeline(timeline).map(|t| t.offset_ns)
+    }
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+
+    #[test]
+    fn removing_one_session_keeps_the_other_peers_active() {
+        let time = TimeSync::idle(1);
+        let first: IpAddr = "192.0.2.1".parse().unwrap();
+        let second: IpAddr = "192.0.2.2".parse().unwrap();
+        time.set_session_peers(11, vec![first]);
+        time.set_session_peers(22, vec![second]);
+        time.release_session_peers(11);
+        let mut announce = [0u8; 64];
+        announce[0] = 0x0b;
+        announce[1] = 2;
+        announce[20..28].copy_from_slice(&2u64.to_be_bytes());
+        announce[53..61].copy_from_slice(&2u64.to_be_bytes());
+        announce[47] = 128;
+        announce[52] = 128;
+        for _ in 0..3 {
+            assert!(time.lock().on_packet(first, &announce, 1).is_empty());
+        }
+        assert!(time.lock().on_packet(second, &announce, 1).is_empty());
+        assert!(time.lock().on_packet(second, &announce, 2).is_empty());
+        assert!(!time.lock().on_packet(second, &announce, 3).is_empty());
     }
 }

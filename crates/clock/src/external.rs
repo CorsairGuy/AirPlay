@@ -3,9 +3,24 @@
 //! correlation. This does not attest that evidence or create a media lease.
 use crate::{
     domain::{Domain, Reading},
-    nqptp::Snapshot,
 };
 use std::time::{Duration, Instant};
+
+/// A source-neutral observation of a clock domain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Snapshot {
+    pub clock_id: u64,
+    pub local_time: u64,
+    pub offset: u64,
+    pub clock_change_offset: Option<u64>,
+    pub master_start_time: u64,
+}
+impl Snapshot {
+    pub fn master_time(self, local_ns: u64) -> u64 {
+        local_ns.wrapping_add(self.offset)
+    }
+}
+
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -169,10 +184,7 @@ impl Qualifier {
         {
             return Err(Error::EpochChanged);
         }
-        if !matches!(sample.version, 10 | 11)
-            || (sample.version == 10 && sample.clock_change_offset.is_some())
-            || (sample.version == 11 && sample.clock_change_offset.is_none())
-            || sample.local_time == 0
+        if sample.local_time == 0
         {
             return Err(Error::Invalid);
         }
@@ -237,7 +249,6 @@ mod tests {
             sender_master_verified: true,
         };
         let sample = Snapshot {
-            version: 10,
             clock_id: 9,
             local_time: 1_000_000,
             offset: (-100i64) as u64,
@@ -297,7 +308,6 @@ mod tests {
             );
         }
         let p11 = Snapshot {
-            version: 11,
             clock_change_offset: Some(5),
             ..p
         };

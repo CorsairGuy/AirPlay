@@ -132,7 +132,7 @@ impl Ptp {
         if src.silent_announces != SILENT_ANNOUNCES || src.clock_id != src.grandmaster {
             return Vec::new();
         }
-        // Как nqptp: сначала объявляем себя чуть лучше мастера, затем чуть хуже.
+        // Временно меняем приоритет объявления, чтобы разбудить источник.
         // Это заставляет часы отправителя снова начать рассылать Sync.
         let (p1, p2) = (src.priority1, src.priority2);
         vec![

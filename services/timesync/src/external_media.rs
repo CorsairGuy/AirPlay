@@ -3,7 +3,7 @@
 use clock::{
     domain::{Domain, Reading},
     external::{Correlation, Qualifier, Selection},
-    nqptp::Snapshot,
+    external::Snapshot,
 };
 use std::{
     io,
@@ -171,7 +171,6 @@ mod tests {
             sender_master_verified: true,
         };
         let snapshot = Snapshot {
-            version: 10,
             clock_id: 9,
             local_time: 1_000_000_000,
             offset: 50,

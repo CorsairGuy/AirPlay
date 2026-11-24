@@ -1,7 +1,7 @@
 //! Source control for opt-in continuous relay. No processes/devices or clocks.
-use crate::{mrp_service::model::Feed, remote::Command};
+use crate::{remote::mrp_service::model::Feed, remote::Command};
 use anyhow::{Result, bail};
-use sender::continuous_source::State;
+use media_tx::continuous_source::State;
 use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
