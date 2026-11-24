@@ -5,9 +5,9 @@
 //! supplies observed volume, or authorizes inventing group/cluster descriptors.
 //! The host must obtain those independently before calling this function and
 //! publishing its result through Card::set_outputs. This module starts no task.
+use ::coordinator::outputs::OutputCatalog;
 use anyhow::{Context, Result, bail};
 use mrp::{schema::field::AVOutputDeviceDescriptor as fields, wire::Node};
-use ::coordinator::outputs::OutputCatalog;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::coordinator::output_worker::Snapshot;

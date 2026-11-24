@@ -9,12 +9,12 @@
 pub mod card;
 pub mod card_transport;
 pub mod continuous_control;
-pub mod identity;
+pub use discovery;
+pub use discovery::{catalog as discovery_catalog, feed as discovery_feed};
+pub use identity;
 #[cfg(target_os = "linux")]
 pub use identity::daemon_identity;
 pub use identity::{route_pairing, sender_store, state};
-pub mod discovery;
-pub use discovery::{catalog as discovery_catalog, feed as discovery_feed};
 pub mod events;
 pub mod local_process;
 pub mod media;
@@ -32,6 +32,7 @@ pub mod sessions;
 pub use sessions::{preparer as session_preparer, serve, session};
 pub mod source_process;
 pub mod source_runtime;
+pub use ::remote::{mrp_log, station_log};
 /// Compatibility import for older adapters; new code uses mrp_service.
 pub use mrp_service as station_mrp;
 pub use remote::mrp_service;

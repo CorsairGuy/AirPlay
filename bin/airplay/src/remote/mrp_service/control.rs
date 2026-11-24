@@ -31,7 +31,10 @@ impl Control {
         }
     }
 
-    pub fn with_outputs(mut self, outputs: crate::coordinator::output_control::OutputControl) -> Self {
+    pub fn with_outputs(
+        mut self,
+        outputs: crate::coordinator::output_control::OutputControl,
+    ) -> Self {
         self.outputs = Some(outputs);
         self
     }
@@ -58,83 +61,84 @@ impl Control {
         value: f32,
     ) -> impl std::future::Future<Output = Result<()>> + Send + 'static {
         let control = self.clone();
-        let queued =
-            self.outputs
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("output control unavailable"))
-                .and_then(|queue| {
-                    queue
-                        .submit_operation(Box::new(move |backend, catalog| {
-                            let operation = (|| -> Result<()> {
-                                if !control.remote.connected() {
-                                    bail!("local source control unavailable");
-                                }
-                                let mut policy =
-                                    control.groups.policy.lock().map_err(|_| {
-                                        anyhow::anyhow!("group balance lock failed")
-                                    })?;
-                                let feed = control.feed.borrow().clone();
-                                let mut levels = vec![(local_uid, feed.volume)];
-                                for output in &feed.outputs {
-                                    let uid = output
-                                        .descriptor
-                                        .string(crate::remote::mrp_service::model::f(
+        let queued = self
+            .outputs
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("output control unavailable"))
+            .and_then(|queue| {
+                queue
+                    .submit_operation(Box::new(move |backend, catalog| {
+                        let operation = (|| -> Result<()> {
+                            if !control.remote.connected() {
+                                bail!("local source control unavailable");
+                            }
+                            let mut policy = control
+                                .groups
+                                .policy
+                                .lock()
+                                .map_err(|_| anyhow::anyhow!("group balance lock failed"))?;
+                            let feed = control.feed.borrow().clone();
+                            let mut levels = vec![(local_uid, feed.volume)];
+                            for output in &feed.outputs {
+                                let uid = output
+                                    .descriptor
+                                    .string(crate::remote::mrp_service::model::f(
+                                        "AVOutputDeviceDescriptor",
+                                        "uniqueIdentifier",
+                                    ))
+                                    .ok_or_else(|| anyhow::anyhow!("output UID missing"))?;
+                                levels.push((
+                                    uid.into(),
+                                    output.volume.ok_or_else(|| {
+                                        anyhow::anyhow!("observed output level unavailable")
+                                    })?,
+                                ));
+                            }
+                            let mut candidate = policy.clone();
+                            let planned = candidate.plan(&levels, value)?;
+                            let gains: Result<Vec<_>> = planned
+                                .iter()
+                                .skip(1)
+                                .map(|(uid, value)| {
+                                    ::media::tx::Volume::normalized(*value)
+                                        .map(|gain| (uid.clone(), gain))
+                                })
+                                .collect();
+                            let gains = gains?;
+                            if !gains.is_empty() {
+                                backend.set_routes(catalog, &gains)?;
+                            }
+                            if !control.remote.send(Command::Volume(planned[0].1)) {
+                                bail!("local source disconnected during group change");
+                            }
+                            control.feed.send_if_modified(|current| {
+                                let before = current.clone();
+                                current.volume = planned[0].1;
+                                for output in &mut current.outputs {
+                                    if let Some(uid) = output.descriptor.string(
+                                        crate::remote::mrp_service::model::f(
                                             "AVOutputDeviceDescriptor",
                                             "uniqueIdentifier",
-                                        ))
-                                        .ok_or_else(|| anyhow::anyhow!("output UID missing"))?;
-                                    levels.push((
-                                        uid.into(),
-                                        output.volume.ok_or_else(|| {
-                                            anyhow::anyhow!("observed output level unavailable")
-                                        })?,
-                                    ));
-                                }
-                                let mut candidate = policy.clone();
-                                let planned = candidate.plan(&levels, value)?;
-                                let gains: Result<Vec<_>> = planned
-                                    .iter()
-                                    .skip(1)
-                                    .map(|(uid, value)| {
-                                        media_tx::Volume::normalized(*value)
-                                            .map(|gain| (uid.clone(), gain))
-                                    })
-                                    .collect();
-                                let gains = gains?;
-                                if !gains.is_empty() {
-                                    backend.set_routes(catalog, &gains)?;
-                                }
-                                if !control.remote.send(Command::Volume(planned[0].1)) {
-                                    bail!("local source disconnected during group change");
-                                }
-                                control.feed.send_if_modified(|current| {
-                                    let before = current.clone();
-                                    current.volume = planned[0].1;
-                                    for output in &mut current.outputs {
-                                        if let Some(uid) =
-                                            output.descriptor.string(crate::remote::mrp_service::model::f(
-                                                "AVOutputDeviceDescriptor",
-                                                "uniqueIdentifier",
-                                            ))
+                                        ),
+                                    ) {
+                                        if let Some((_, value)) =
+                                            planned.iter().skip(1).find(|(id, _)| {
+                                                crate::remote::mrp_service::model::same_uid(id, uid)
+                                            })
                                         {
-                                            if let Some((_, value)) =
-                                                planned.iter().skip(1).find(|(id, _)| {
-                                                    crate::remote::mrp_service::model::same_uid(id, uid)
-                                                })
-                                            {
-                                                output.volume = Some(*value);
-                                            }
+                                            output.volume = Some(*value);
                                         }
                                     }
-                                    *current != before
-                                });
-                                *policy = candidate;
-                                Ok(())
-                            })();
-                            if operation.is_ok() { 0 } else { 2 }
-                        }))
-                        .map_err(|_| anyhow::anyhow!("group volume queue full"))
-                });
+                                }
+                                *current != before
+                            });
+                            *policy = candidate;
+                            Ok(())
+                        })();
+                        if operation.is_ok() { 0 } else { 2 }
+                    }))
+                    .map_err(|_| anyhow::anyhow!("group volume queue full"))
+            });
         async move {
             let code = tokio::time::timeout(std::time::Duration::from_secs(10), queued?).await??;
             if code != 0 {
@@ -229,8 +233,8 @@ mod tests {
     #[tokio::test]
     async fn group_individual_group_preserves_reader_order_and_fresh_levels() {
         use crate::{
-            remote::mrp_service::{model::RemoteOutput, wire::Node},
             coordinator::output_control::{OutputControl, testing},
+            remote::mrp_service::{model::RemoteOutput, wire::Node},
         };
         let remote = Remote::new();
         let mut commands = remote.attach(1);

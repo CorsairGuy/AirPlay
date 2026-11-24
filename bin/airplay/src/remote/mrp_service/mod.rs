@@ -4,9 +4,5 @@
 #![allow(dead_code, clippy::all)]
 
 pub mod control;
-pub mod model;
-#[macro_use]
-pub mod stamp;
-pub mod schema;
+pub use ::remote::{model, schema, stamp, wire};
 pub mod server;
-pub mod wire;

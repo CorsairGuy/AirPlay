@@ -1,9 +1,7 @@
 //! Qualified external-clock observations, without SHM/socket access or daemon control.
 //! The owner supplies trusted daemon/role evidence and a MEASURED RAW/Instant
 //! correlation. This does not attest that evidence or create a media lease.
-use crate::{
-    domain::{Domain, Reading},
-};
+use crate::domain::{Domain, Reading};
 use std::time::{Duration, Instant};
 
 /// A source-neutral observation of a clock domain.
@@ -20,7 +18,6 @@ impl Snapshot {
         local_ns.wrapping_add(self.offset)
     }
 }
-
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -184,8 +181,7 @@ impl Qualifier {
         {
             return Err(Error::EpochChanged);
         }
-        if sample.local_time == 0
-        {
+        if sample.local_time == 0 {
             return Err(Error::Invalid);
         }
         let raw_now = correlation.raw_at(now, now, self.max_uncertainty_ns)?;

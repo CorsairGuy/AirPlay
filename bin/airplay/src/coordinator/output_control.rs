@@ -9,14 +9,14 @@ pub(crate) trait VolumeBackend {
     fn set_routes(
         &self,
         catalog: &::coordinator::outputs::OutputCatalog,
-        levels: &[(String, media_tx::Volume)],
+        levels: &[(String, ::media::tx::Volume)],
     ) -> anyhow::Result<()>;
 }
-impl VolumeBackend for media_tx::pool::SessionPool {
+impl VolumeBackend for ::media::tx::pool::SessionPool {
     fn set_routes(
         &self,
         catalog: &::coordinator::outputs::OutputCatalog,
-        levels: &[(String, media_tx::Volume)],
+        levels: &[(String, ::media::tx::Volume)],
     ) -> anyhow::Result<()> {
         self.set_route_volumes(catalog, levels)
     }
@@ -164,12 +164,12 @@ impl OutputControl {
 #[cfg(test)]
 pub(crate) mod testing {
     #[derive(Default)]
-    pub struct Backend(pub std::sync::Mutex<Vec<Vec<(String, media_tx::Volume)>>>);
+    pub struct Backend(pub std::sync::Mutex<Vec<Vec<(String, ::media::tx::Volume)>>>);
     impl super::VolumeBackend for Backend {
         fn set_routes(
             &self,
             _: &::coordinator::outputs::OutputCatalog,
-            levels: &[(String, media_tx::Volume)],
+            levels: &[(String, ::media::tx::Volume)],
         ) -> anyhow::Result<()> {
             self.0.lock().unwrap().push(levels.to_vec());
             Ok(())

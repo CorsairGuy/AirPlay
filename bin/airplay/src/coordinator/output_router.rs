@@ -4,8 +4,8 @@ use crate::{
     coordinator::output_control::{OutputControl, OutputRequest},
     coordinator::relay_selection,
 };
-use anyhow::{Context, Result};
 use ::coordinator::outputs::OutputCatalog;
+use anyhow::{Context, Result};
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 

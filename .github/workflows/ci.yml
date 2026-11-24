@@ -49,7 +49,7 @@ jobs:
         shell: bash
         run: |
           cargo tree -p airplay --no-default-features --prefix none > audio-tree.txt
-          if grep -E '^(mirror|video|hls|capture|mediaserver) v' audio-tree.txt; then
+          if grep -E '^(mirror|video|hls|capture) v' audio-tree.txt; then
             echo 'Unexpected video dependency in audio-only profile'
             exit 1
           fi

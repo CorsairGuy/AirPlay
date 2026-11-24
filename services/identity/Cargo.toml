@@ -1,0 +1,26 @@
+[package]
+name = "identity"
+description = "AirPlay identities, pairing records and authorization."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+pair.workspace = true
+mrp.workspace = true
+media.workspace = true
+rand.workspace = true
+sha2.workspace = true
+hex.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+rtsp.workspace = true
+uuid = { version = "1", features = ["v4", "v5"] }
+libc = "0.2"
+
+[lints]
+workspace = true

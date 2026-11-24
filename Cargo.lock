@@ -45,21 +45,24 @@ dependencies = [
  "coordinator",
  "crypto",
  "device",
+ "discovery",
  "fairplay",
  "hex",
+ "identity",
  "if-addrs",
  "ipc",
  "libc",
  "mdns",
- "media_tx",
- "mediaremote",
+ "media",
  "mirror",
  "mrp",
  "pair",
  "plist",
  "rand",
+ "remote",
  "rtp",
  "rtsp",
+ "sessions",
  "sha2",
  "timesync",
  "tokio",
@@ -109,7 +112,7 @@ name = "ap_sender"
 version = "0.1.0"
 dependencies = [
  "coordinator",
- "media_tx",
+ "media",
 ]
 
 [[package]]
@@ -493,6 +496,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "discovery"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "coordinator",
+ "mdns",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "dispatch2"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -713,6 +727,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "identity"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "libc",
+ "media",
+ "mrp",
+ "pair",
+ "rand",
+ "rtsp",
+ "sha2",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "if-addrs"
 version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -896,13 +928,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "media_tx"
+name = "media"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "audio",
+ "audio_stream",
  "clock",
+ "codec",
  "coordinator",
  "crypto",
+ "mirror",
  "pair",
  "plist",
  "rand",
@@ -910,28 +946,6 @@ dependencies = [
  "rtsp",
  "timesync",
  "tokio",
-]
-
-[[package]]
-name = "mediaremote"
-version = "0.1.0"
-dependencies = [
- "mrp",
- "rand",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "mediaserver"
-version = "0.1.0"
-dependencies = [
- "audio",
- "base",
- "capture",
- "clock",
- "codec",
- "video",
 ]
 
 [[package]]
@@ -1397,6 +1411,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
+name = "remote"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "mrp",
+ "plist",
+ "rand",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "rtp"
 version = "0.1.0"
 dependencies = [
@@ -1480,6 +1507,22 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.9",
+]
+
+[[package]]
+name = "sessions"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clock",
+ "coordinator",
+ "identity",
+ "media",
+ "mrp",
+ "pair",
+ "rtsp",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

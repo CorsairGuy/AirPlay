@@ -1,4 +1,4 @@
-//! Карточка «Сейчас играет» самого приёмника: служба `mediaremote` внутри
+//! Карточка «Сейчас играет» самого приёмника: служба `remote` внутри
 //! процесса, без отдельной программы.
 //!
 //! Трек, обложку, позицию и громкость приёмник и так получает от
@@ -15,12 +15,12 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::watch;
 
 use crate::events::{Events, Metadata, Progress};
+use crate::remote::Remote;
 use crate::remote::mrp_service::{
     control::Control,
     model::{Cover, Feed, Identity, Profile, Route},
     server,
 };
-use crate::remote::Remote;
 
 /// Источник в терминах станции: у неё «airplay» — входящий AirPlay.
 const SOURCE: &str = "airplay";
@@ -259,7 +259,7 @@ impl Card {
 
     /// Opt-in continuous control receiver. The application also awaits
     /// follow_continuous_source with the SAME group stop watch.
-    pub fn continuous_controls(&self) -> watch::Receiver<media_tx::continuous_source::State> {
+    pub fn continuous_controls(&self) -> watch::Receiver<::media::tx::continuous_source::State> {
         self.source.subscribe()
     }
     pub async fn follow_continuous_source(
@@ -419,22 +419,35 @@ mod tests {
             Arc::new(crate::events::NoEvents),
         );
         let info = |card: &Card| {
-            crate::remote::mrp_service::model::device_info(&card.identity, &card.feed.borrow(), None)
-                .nested(crate::remote::mrp_service::schema::extension(
-                    crate::remote::mrp_service::model::kind("DEVICE_INFO_MESSAGE"),
-                ))
-                .unwrap()
+            crate::remote::mrp_service::model::device_info(
+                &card.identity,
+                &card.feed.borrow(),
+                None,
+            )
+            .nested(crate::remote::mrp_service::schema::extension(
+                crate::remote::mrp_service::model::kind("DEVICE_INFO_MESSAGE"),
+            ))
+            .unwrap()
         };
         assert_eq!(
-            info(&a).string(crate::remote::mrp_service::model::f("DeviceInfoMessage", "name")),
+            info(&a).string(crate::remote::mrp_service::model::f(
+                "DeviceInfoMessage",
+                "name"
+            )),
             Some("one")
         );
         assert_eq!(
-            info(&b).string(crate::remote::mrp_service::model::f("DeviceInfoMessage", "name")),
+            info(&b).string(crate::remote::mrp_service::model::f(
+                "DeviceInfoMessage",
+                "name"
+            )),
             Some("two")
         );
         assert_eq!(
-            info(&a).string(crate::remote::mrp_service::model::f("DeviceInfoMessage", "modelID")),
+            info(&a).string(crate::remote::mrp_service::model::f(
+                "DeviceInfoMessage",
+                "modelID"
+            )),
             Some("GenericAudio")
         );
         let mut profile = Profile::from_device(&device("compat"));
@@ -506,8 +519,11 @@ mod tests {
         let previous = card.feed.borrow().clone();
         card.set_outputs(vec![remote(0.3)]).unwrap();
         let current = card.feed.borrow().clone();
-        let changes =
-            crate::remote::mrp_service::model::topology_updates(&card.identity, &previous, &current);
+        let changes = crate::remote::mrp_service::model::topology_updates(
+            &card.identity,
+            &previous,
+            &current,
+        );
         assert_eq!(changes.len(), 1);
         assert_eq!(
             changes[0].number(1),

@@ -296,7 +296,7 @@ impl Media {
                 self.grouped = grouped;
                 self.player
                     .with(self.id, |s| s.playout().set_grouped(grouped));
-                self.player.time.set_session_peers(self.id.into(),peers);
+                self.player.time.set_session_peers(self.id.into(), peers);
                 ok()
             }
             ("SET_PARAMETER", _) => {
@@ -442,12 +442,18 @@ impl Media {
             let mut peer = Dictionary::new();
             peer.insert("Addresses".into(), Value::Array(vec![ip.clone().into()]));
             peer.insert("ID".into(), ip.into());
-            if let Some(reading)=self.player.time.selected_reading() {
-                peer.insert("ClockID".into(),Value::Integer(reading.domain().id().into()));
-                peer.insert("ID".into(),ctx.device.pairing_id.clone().into());
-                peer.insert("DeviceType".into(),Value::Integer(0u64.into()));
-                peer.insert("SupportsClockPortMatchingOverride".into(),true.into());
-                info!(clock_id=reading.domain().id(),"PTP: selected timeline in SETUP");
+            if let Some(reading) = self.player.time.selected_reading() {
+                peer.insert(
+                    "ClockID".into(),
+                    Value::Integer(reading.domain().id().into()),
+                );
+                peer.insert("ID".into(), ctx.device.pairing_id.clone().into());
+                peer.insert("DeviceType".into(), Value::Integer(0u64.into()));
+                peer.insert("SupportsClockPortMatchingOverride".into(), true.into());
+                info!(
+                    clock_id = reading.domain().id(),
+                    "PTP: selected timeline in SETUP"
+                );
             }
             d.insert("timingPeerInfo".into(), peer.into());
         }
@@ -485,7 +491,10 @@ impl Media {
             .ok_or("зеркалирование выключено (--mirror)")?;
         let id = video_stream_id(s, self.aes_key.is_none())?;
         let authenticated = if self.aes_key.is_none() {
-            let shared = self.shared.as_deref().ok_or("video requires ekey or HAP session")?;
+            let shared = self
+                .shared
+                .as_deref()
+                .ok_or("video requires ekey or HAP session")?;
             Some(crypto::kdf::hkdf_sha512(
                 shared,
                 format!("DataStream-Salt{id}").as_bytes(),
@@ -503,12 +512,15 @@ impl Media {
         let sink = factory.open(&info);
         if let Some(key) = authenticated {
             info!("video cipher: HAP-derived ChaCha20-Poly1305");
-            self.tasks.push(tokio::spawn(mirror::receive_authenticated(listener, key, sink)));
+            self.tasks.push(tokio::spawn(mirror::receive_authenticated(
+                listener, key, sink,
+            )));
         } else {
             let aes = self.aes_key.ok_or("missing legacy video key")?;
             let session = mirror::session_key(&aes, self.legacy_shared.as_ref());
             let (key, iv) = mirror::stream_key_iv(&session, id);
-            self.tasks.push(tokio::spawn(mirror::receive(listener, key, iv, sink)));
+            self.tasks
+                .push(tokio::spawn(mirror::receive(listener, key, iv, sink)));
         }
         r.insert("dataPort".into(), Value::Integer(port.into()));
         Ok(())

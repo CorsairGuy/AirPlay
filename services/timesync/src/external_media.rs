@@ -2,8 +2,8 @@
 //! on the producer path. One publisher owns observation updates and revocation.
 use clock::{
     domain::{Domain, Reading},
-    external::{Correlation, Qualifier, Selection},
     external::Snapshot,
+    external::{Correlation, Qualifier, Selection},
 };
 use std::{
     io,

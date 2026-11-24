@@ -175,7 +175,10 @@ impl DeviceInfo {
     pub fn info_plist_for(&self, sender: Option<&str>) -> Vec<u8> {
         let mut d = Dictionary::new();
         if let Some(accessory_type) = self.accessory_type {
-            d.insert("accessoryType".into(), Value::Integer(accessory_type.into()));
+            d.insert(
+                "accessoryType".into(),
+                Value::Integer(accessory_type.into()),
+            );
         }
         d.insert("canRecordScreenStream".into(), false.into());
         if let Some(color) = &self.enclosure_color {

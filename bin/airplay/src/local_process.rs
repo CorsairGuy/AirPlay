@@ -1,6 +1,6 @@
 //! Opt-in process adapter for a timestamped local renderer. No shell or device defaults.
+use ::media::tx::{AudioPacket, LocalPcmPipe, LocalSink};
 use anyhow::{Context, Result, bail};
-use media_tx::{AudioPacket, LocalPcmPipe, LocalSink};
 use std::{
     path::PathBuf,
     process::Stdio,
@@ -104,7 +104,8 @@ impl LocalSink for Renderer {
             bail!("local renderer exited before EOF");
         }
         self.last_end = play_at.checked_add(Duration::from_nanos(
-            media_tx::FRAMES_PER_PACKET as u64 * 1_000_000_000 / u64::from(media_tx::SAMPLE_RATE),
+            ::media::tx::FRAMES_PER_PACKET as u64 * 1_000_000_000
+                / u64::from(::media::tx::SAMPLE_RATE),
         ));
         let pipe = self.pipe.as_mut().context("local renderer pipe closed")?;
         pipe.set_audible(self.gate.as_ref().is_none_or(|path| path.is_file()));
@@ -146,8 +147,8 @@ mod tests {
     async fn renderer_exits_after_scheduled_pcm_and_eof() {
         let mut renderer = Renderer::spawn(cat()).unwrap();
         let packet = Arc::new(
-            media_tx::MediaClock::now()
-                .packet(0, &[0; media_tx::PACKET_BYTES])
+            ::media::tx::MediaClock::now()
+                .packet(0, &[0; ::media::tx::PACKET_BYTES])
                 .unwrap(),
         );
         let at = Instant::now() + Duration::from_millis(20);

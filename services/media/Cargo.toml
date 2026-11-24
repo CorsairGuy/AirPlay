@@ -1,0 +1,33 @@
+[package]
+name = "media"
+description = "AirPlay media receive, transmit and local output interfaces."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[features]
+default = []
+mirroring = ["dep:mirror"]
+
+[dependencies]
+audio.workspace = true
+audio_stream.workspace = true
+codec.workspace = true
+mirror = { workspace = true, optional = true }
+coordinator.workspace = true
+anyhow.workspace = true
+clock.workspace = true
+tokio.workspace = true
+plist.workspace = true
+rand.workspace = true
+pair.workspace = true
+crypto.workspace = true
+rtsp.workspace = true
+rtp.workspace = true
+timesync.workspace = true

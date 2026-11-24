@@ -3,12 +3,9 @@ use crate::{
     coordinator::output_control::OutputRequest,
     coordinator::output_worker::{self, SessionPreparer},
 };
-use anyhow::{Result, bail};
-use media_tx::{
-    AudioPacket, MediaClock, Session,
-    pool::SessionPool,
-};
 use ::coordinator::outputs::{OutputCatalog, ReceiverEndpoint};
+use ::media::tx::{AudioPacket, MediaClock, Session, pool::SessionPool};
+use anyhow::{Result, bail};
 use std::sync::{Arc, Weak};
 use timesync::media::{MasterLease, MasterTimeline};
 use tokio::sync::{mpsc, watch};
@@ -49,10 +46,10 @@ pub struct PtpGroup {
 /// Source adapters own PCM acquisition and publish state before new-generation
 /// PCM. Timeline and clock must share one epoch; broadcast validates it.
 pub struct ContinuousSource {
-    pub timeline: media_tx::continuous::Timeline,
+    pub timeline: ::media::tx::continuous::Timeline,
     pub clock: MediaClock,
-    pub input: mpsc::Receiver<media_tx::continuous_source::SourceFrame>,
-    pub controls: watch::Receiver<media_tx::continuous_source::State>,
+    pub input: mpsc::Receiver<::media::tx::continuous_source::SourceFrame>,
+    pub controls: watch::Receiver<::media::tx::continuous_source::State>,
 }
 /// Inject a tap already owned by the adapter; no process or device is opened.
 pub struct RawPcmSource<R> {
@@ -64,9 +61,9 @@ pub struct RawPcmSource<R> {
 impl ContinuousSource {
     pub fn for_card(
         card: &crate::card::Card,
-        timeline: media_tx::continuous::Timeline,
+        timeline: ::media::tx::continuous::Timeline,
         clock: MediaClock,
-        input: mpsc::Receiver<media_tx::continuous_source::SourceFrame>,
+        input: mpsc::Receiver<::media::tx::continuous_source::SourceFrame>,
     ) -> Self {
         Self {
             timeline,
@@ -252,9 +249,9 @@ impl PtpGroup {
         card: Arc<crate::card::Card>,
         source: ContinuousSource,
         outputs: GroupOutputs<impl SessionPreparer>,
-        sink: impl media_tx::LocalSink,
+        sink: impl ::media::tx::LocalSink,
         latency: std::time::Duration,
-    ) -> Result<media_tx::continuous_source::End> {
+    ) -> Result<::media::tx::continuous_source::End> {
         if !source.controls.same_channel(&card.continuous_controls()) {
             bail!("continuous source belongs to another Card");
         }
@@ -286,8 +283,8 @@ impl PtpGroup {
         card: Arc<crate::card::Card>,
         source: RawPcmSource<impl tokio::io::AsyncRead + Unpin>,
         outputs: GroupOutputs<impl SessionPreparer>,
-        sink: impl media_tx::LocalSink,
-    ) -> Result<media_tx::continuous_source::End> {
+        sink: impl ::media::tx::LocalSink,
+    ) -> Result<::media::tx::continuous_source::End> {
         let local_lead = source.latency;
         self.run_card_pcm_with_local_lead(card, source, outputs, sink, local_lead)
             .await
@@ -299,10 +296,10 @@ impl PtpGroup {
         card: Arc<crate::card::Card>,
         source: RawPcmSource<impl tokio::io::AsyncRead + Unpin>,
         outputs: GroupOutputs<impl SessionPreparer>,
-        sink: impl media_tx::LocalSink,
+        sink: impl ::media::tx::LocalSink,
         local_lead: std::time::Duration,
-    ) -> Result<media_tx::continuous_source::End> {
-        use media_tx::continuous_source::{self, End};
+    ) -> Result<::media::tx::continuous_source::End> {
+        use ::media::tx::continuous_source::{self, End};
         if !(std::time::Duration::from_millis(250)..=std::time::Duration::from_secs(10))
             .contains(&local_lead)
         {
@@ -311,7 +308,7 @@ impl PtpGroup {
         if !(1..=512).contains(&source.queue_capacity) {
             bail!("invalid PCM input capacity");
         }
-        let timeline = media_tx::continuous::Timeline::new(source.epoch, source.latency)?;
+        let timeline = ::media::tx::continuous::Timeline::new(source.epoch, source.latency)?;
         let (pcm, input) = mpsc::channel(source.queue_capacity);
         let controls = card.continuous_controls();
         let cancel = self.lease.cancellation();
@@ -345,17 +342,17 @@ impl PtpGroup {
         self,
         source: ContinuousSource,
         outputs: GroupOutputs<impl SessionPreparer>,
-        sink: impl media_tx::LocalSink,
+        sink: impl ::media::tx::LocalSink,
         latency: std::time::Duration,
-    ) -> Result<media_tx::continuous_source::End> {
-        use media_tx::continuous_source::{self, End};
+    ) -> Result<::media::tx::continuous_source::End> {
+        use ::media::tx::continuous_source::{self, End};
         if latency < std::time::Duration::from_millis(250)
             || latency > std::time::Duration::from_secs(10)
         {
             bail!("invalid continuous local lead");
         }
-        let frames = (latency.as_nanos() * u128::from(media_tx::SAMPLE_RATE))
-            .div_ceil(1_000_000_000 * media_tx::FRAMES_PER_PACKET as u128);
+        let frames = (latency.as_nanos() * u128::from(::media::tx::SAMPLE_RATE))
+            .div_ceil(1_000_000_000 * ::media::tx::FRAMES_PER_PACKET as u128);
         let (audio, packets) = tokio::sync::broadcast::channel(frames as usize + 32);
         let local = audio.subscribe();
         let producer = self.producer(source.clock);
@@ -427,12 +424,12 @@ impl PtpGroup {
         local_ids: Vec<String>,
         preparer: impl SessionPreparer,
         updates: watch::Sender<output_worker::Snapshot>,
-        sink: impl media_tx::LocalSink,
+        sink: impl ::media::tx::LocalSink,
         packets: tokio::sync::broadcast::Receiver<Arc<AudioPacket>>,
         latency: std::time::Duration,
     ) -> Result<()> {
         let worker = self.run_worker(pool, requests, discovery, local_ids, preparer, updates);
-        let local = media_tx::run_local(sink, packets, latency, self.stop());
+        let local = ::media::tx::run_local(sink, packets, latency, self.stop());
         tokio::pin!(worker, local);
         tokio::select! {
             result = &mut worker => {
@@ -640,7 +637,7 @@ mod tests {
     async fn producer_uses_pinned_clock_and_rejects_epoch_loss_and_owner_drop() {
         let (updates, _user, group, origin) = fixture();
         let producer = group.producer(MediaClock::at(origin, 0));
-        let pcm = [0; media_tx::PACKET_BYTES];
+        let pcm = [0; ::media::tx::PACKET_BYTES];
         let packet = producer.packet(0, &pcm).unwrap();
         assert_eq!(
             packet.ptp_reading().unwrap(),
@@ -665,7 +662,7 @@ mod tests {
         finished: Arc<AtomicBool>,
         fail: bool,
     }
-    impl media_tx::LocalSink for PipelineSink {
+    impl ::media::tx::LocalSink for PipelineSink {
         async fn write(&mut self, packet: Arc<AudioPacket>, _: Instant) -> Result<()> {
             self.seen.lock().unwrap().push(packet);
             if self.fail {
@@ -745,7 +742,7 @@ mod tests {
         binding.apply(&[peer]).await.unwrap();
 
         let producer = group.producer(MediaClock::at(origin, 0));
-        let pcm = vec![7; media_tx::PACKET_BYTES];
+        let pcm = vec![7; ::media::tx::PACKET_BYTES];
         let packet = producer.packet(0, &pcm).unwrap();
         assert_eq!(packet.pcm(), pcm.as_slice());
         assert_eq!(
@@ -794,7 +791,7 @@ mod tests {
                 self.released.store(true, Ordering::SeqCst);
             }
         }
-        impl media_tx::LocalSink for HostSink {
+        impl ::media::tx::LocalSink for HostSink {
             async fn write(&mut self, packet: Arc<AudioPacket>, at: Instant) -> Result<()> {
                 assert_eq!(
                     at.duration_since(packet.produced_at()),
@@ -809,7 +806,8 @@ mod tests {
         for malformed in [false, true] {
             let (_clock, _user, group, origin) = fixture();
             let card = pipeline_card(crate::remote::Remote::new());
-            let (_control, requests) = crate::coordinator::output_control::OutputControl::channel(4);
+            let (_control, requests) =
+                crate::coordinator::output_control::OutputControl::channel(4);
             let (_catalog, discovery) =
                 watch::channel(Arc::new(OutputCatalog::new(vec![]).unwrap()));
             let (updates, state) = watch::channel(output_worker::Snapshot::default());
@@ -829,7 +827,11 @@ mod tests {
             let source = RawPcmSource {
                 reader: std::io::Cursor::new(vec![
                     9;
-                    if malformed { 2 } else { media_tx::PACKET_BYTES }
+                    if malformed {
+                        2
+                    } else {
+                        ::media::tx::PACKET_BYTES
+                    }
                 ]),
                 epoch: origin,
                 latency: Duration::from_millis(250),
@@ -858,7 +860,7 @@ mod tests {
                 assert!(result.unwrap_err().to_string().contains("aligned"));
                 assert!(seen.lock().unwrap().is_empty());
             } else {
-                assert_eq!(result.unwrap(), media_tx::continuous_source::End::Eof);
+                assert_eq!(result.unwrap(), ::media::tx::continuous_source::End::Eof);
                 assert!(
                     seen.lock()
                         .unwrap()
@@ -885,15 +887,15 @@ mod tests {
         card.playing(true);
         let mut states = card.continuous_controls();
         let (pcm, input) = mpsc::channel(8);
-        pcm.send(media_tx::continuous_source::SourceFrame::new(
+        pcm.send(::media::tx::continuous_source::SourceFrame::new(
             0,
-            Box::new([7; media_tx::PACKET_BYTES]),
+            Box::new([7; ::media::tx::PACKET_BYTES]),
         ))
         .await
         .unwrap();
         let source = ContinuousSource::for_card(
             &card,
-            media_tx::continuous::Timeline::new(origin, Duration::from_millis(250)).unwrap(),
+            ::media::tx::continuous::Timeline::new(origin, Duration::from_millis(250)).unwrap(),
             MediaClock::at(origin, 0),
             input,
         );
@@ -975,9 +977,9 @@ mod tests {
         })
         .await
         .unwrap();
-        pcm.send(media_tx::continuous_source::SourceFrame::new(
+        pcm.send(::media::tx::continuous_source::SourceFrame::new(
             0,
-            Box::new([9; media_tx::PACKET_BYTES]),
+            Box::new([9; ::media::tx::PACKET_BYTES]),
         ))
         .await
         .unwrap();
@@ -995,7 +997,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .unwrap(),
-            media_tx::continuous_source::End::Eof
+            ::media::tx::continuous_source::End::Eof
         );
         assert!(finished.load(Ordering::SeqCst));
         assert!(final_state.borrow().selected.is_empty());
@@ -1010,9 +1012,9 @@ mod tests {
         let (_clock, _user, group, origin) = fixture();
         let card = pipeline_card(crate::remote::Remote::new());
         let (_pcm, input) = mpsc::channel(1);
-        let (_state, controls) = watch::channel(media_tx::continuous_source::State::default());
+        let (_state, controls) = watch::channel(::media::tx::continuous_source::State::default());
         let source = ContinuousSource {
-            timeline: media_tx::continuous::Timeline::new(origin, Duration::from_millis(250))
+            timeline: ::media::tx::continuous::Timeline::new(origin, Duration::from_millis(250))
                 .unwrap(),
             clock: MediaClock::at(origin, 0),
             input,
@@ -1059,9 +1061,9 @@ mod tests {
             let domain = group.timeline.domain();
             let (source, input) = mpsc::channel(4);
             source
-                .send(media_tx::continuous_source::SourceFrame::new(
+                .send(::media::tx::continuous_source::SourceFrame::new(
                     0,
-                    Box::new([3; media_tx::PACKET_BYTES]),
+                    Box::new([3; ::media::tx::PACKET_BYTES]),
                 ))
                 .await
                 .unwrap();
@@ -1069,20 +1071,25 @@ mod tests {
             if mode != 1 {
                 drop(source);
             }
-            let (_state, controls) = watch::channel(media_tx::continuous_source::State::default());
+            let (_state, controls) =
+                watch::channel(::media::tx::continuous_source::State::default());
             let clock_origin = if mode == 2 {
                 origin + Duration::from_secs(1)
             } else {
                 origin
             };
             let source = ContinuousSource {
-                timeline: media_tx::continuous::Timeline::new(origin, Duration::from_millis(250))
-                    .unwrap(),
+                timeline: ::media::tx::continuous::Timeline::new(
+                    origin,
+                    Duration::from_millis(250),
+                )
+                .unwrap(),
                 clock: MediaClock::at(clock_origin, 0),
                 input,
                 controls,
             };
-            let (_control, requests) = crate::coordinator::output_control::OutputControl::channel(4);
+            let (_control, requests) =
+                crate::coordinator::output_control::OutputControl::channel(4);
             let (_catalog, discovery) =
                 watch::channel(Arc::new(OutputCatalog::new(vec![]).unwrap()));
             let (updates, final_state) = watch::channel(output_worker::Snapshot::default());
@@ -1114,10 +1121,10 @@ mod tests {
             .await
             .unwrap();
             if mode == 0 {
-                assert_eq!(result.unwrap(), media_tx::continuous_source::End::Eof);
+                assert_eq!(result.unwrap(), ::media::tx::continuous_source::End::Eof);
                 let seen = seen.lock().unwrap();
                 assert_eq!(seen.len(), 1);
-                assert_eq!(seen[0].pcm(), &[3; media_tx::PACKET_BYTES]);
+                assert_eq!(seen[0].pcm(), &[3; ::media::tx::PACKET_BYTES]);
                 assert_eq!(seen[0].ptp_reading().unwrap().domain(), domain);
                 assert!(finished.load(Ordering::SeqCst));
             } else {
@@ -1279,7 +1286,7 @@ mod tests {
         .unwrap();
         assert!(!entered.load(Ordering::SeqCst));
         assert!(*renderer_stop.borrow());
-        assert!(producer.packet(0, &[0; media_tx::PACKET_BYTES]).is_err());
+        assert!(producer.packet(0, &[0; ::media::tx::PACKET_BYTES]).is_err());
     }
     struct Pending(Arc<AtomicBool>);
     struct TestSink {
@@ -1295,7 +1302,7 @@ mod tests {
             self.dropped.store(true, Ordering::SeqCst);
         }
     }
-    impl media_tx::LocalSink for TestSink {
+    impl ::media::tx::LocalSink for TestSink {
         async fn write(&mut self, packet: Arc<AudioPacket>, play_at: Instant) -> Result<()> {
             assert!(Arc::ptr_eq(&packet, &self.expected));
             assert_eq!(play_at, packet.play_at(Duration::from_millis(500)).unwrap());
@@ -1318,7 +1325,7 @@ mod tests {
         for fail in [true, false] {
             let (updates, _user, group, origin) = fixture();
             let producer = group.producer(MediaClock::at(origin, 0));
-            let packet = Arc::new(producer.packet(0, &[0; media_tx::PACKET_BYTES]).unwrap());
+            let packet = Arc::new(producer.packet(0, &[0; ::media::tx::PACKET_BYTES]).unwrap());
             let (pcm, audio) = tokio::sync::broadcast::channel(4);
             let local_audio = pcm.subscribe();
             pcm.send(packet.clone()).unwrap();
@@ -1392,14 +1399,14 @@ mod tests {
                 "cancellation must not drain the sink"
             );
             assert!(reply.await.is_err());
-            assert!(producer.packet(0, &[0; media_tx::PACKET_BYTES]).is_err());
+            assert!(producer.packet(0, &[0; ::media::tx::PACKET_BYTES]).is_err());
         }
     }
     #[tokio::test]
     async fn local_eof_drains_and_stops_worker_even_with_live_controller() {
         let (_updates, _user, group, origin) = fixture();
         let producer = group.producer(MediaClock::at(origin, 0));
-        let expected = Arc::new(producer.packet(0, &[0; media_tx::PACKET_BYTES]).unwrap());
+        let expected = Arc::new(producer.packet(0, &[0; ::media::tx::PACKET_BYTES]).unwrap());
         let (pcm, audio) = tokio::sync::broadcast::channel(4);
         let local_audio = pcm.subscribe();
         drop(pcm);
@@ -1438,7 +1445,7 @@ mod tests {
         .unwrap();
         assert!(finished.load(Ordering::SeqCst));
         assert!(dropped.load(Ordering::SeqCst));
-        assert!(producer.packet(0, &[0; media_tx::PACKET_BYTES]).is_err());
+        assert!(producer.packet(0, &[0; ::media::tx::PACKET_BYTES]).is_err());
     }
     impl Drop for Pending {
         fn drop(&mut self) {
@@ -1505,6 +1512,6 @@ mod tests {
         assert!(reply.await.is_err());
         assert!(*renderer_stop.borrow_and_update());
         assert!(final_state.borrow().selected.is_empty());
-        assert!(producer.packet(0, &[0; media_tx::PACKET_BYTES]).is_err());
+        assert!(producer.packet(0, &[0; ::media::tx::PACKET_BYTES]).is_err());
     }
 }

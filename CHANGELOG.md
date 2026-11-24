@@ -2,9 +2,11 @@
 
 ## Unreleased
 
-- Renamed the 20 `ap_` library packages to their unprefixed names. Compatibility re-export packages retain `ap_sender` and `ap_mrp`; the transport itself is `media_tx`. Other old Cargo package names change.
+- Moved actual implementation into seven service packages: discovery, sessions, timesync, media, remote, coordinator and identity. Session preparation, identity and discovery have dedicated packages; part of receive-session and remote runtime wiring remains in the binary library.
+
+- Renamed the 20 `ap_` library packages to their unprefixed names. Compatibility re-export packages retain `ap_sender` and `ap_mrp`; the transport itself is `media::tx`. Other old Cargo package names change.
 - Removed NQPTP-specific ABI, reader and control adapters from the core. Existing Station integration is pinned to its earlier revision and must be adapted before updating; the in-core PTP engine is not yet validated as complete.
-- Moved existing application modules under discovery, sessions, identity, coordinator, remote and media rx/tx/output. Internal imports use the new boundaries; prior Rust module paths remain available for external compatibility. The group state, output selection and volume model live in the coordinator library; media_tx owns sender transport and session pool. This does not add processes or claim completion of MRP consolidation.
+- Moved existing application modules under discovery, sessions, identity, coordinator, remote and media rx/tx/output. Internal imports use the new boundaries; prior Rust module paths remain available for external compatibility. The group state, output selection and volume model live in the coordinator library; media::tx owns sender transport and session pool. This does not add processes or claim completion of MRP consolidation.
 - Native PTP peer interests are retained per session, so removing one session does not discard another session’s peers. The RTSP sender is retained as a timing peer even if timingPeerInfo is absent. PTP operation with real AirPlay devices still needs validation.
 
 - Added configurable AirPlay feature mask, status flags, and accessory type to the receiver. Device profiles are chosen by the caller, independently of any Windows application.

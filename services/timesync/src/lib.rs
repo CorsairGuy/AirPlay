@@ -5,8 +5,8 @@
 //! работает вхолостую, и плеер играет по своим часам, без мультирума.
 
 pub mod engine;
-mod host;
 pub mod external_media;
+mod host;
 pub mod media;
 pub mod ntp;
 pub mod peer_interests;
@@ -92,11 +92,11 @@ impl TimeSync {
     }
 
     /// Explicit interface and one socket pair for combined RX/TX clock roles.
-    pub async fn start_host(self_id:u64, ip:IpAddr) -> std::io::Result<Self> {
-        let host=host::Host::bind(self_id,ip).await?;
-        let mut this=Self::idle(self_id);
-        this.host=Some(Arc::new(host));
-        this.listening=true;
+    pub async fn start_host(self_id: u64, ip: IpAddr) -> std::io::Result<Self> {
+        let host = host::Host::bind(self_id, ip).await?;
+        let mut this = Self::idle(self_id);
+        this.host = Some(Arc::new(host));
+        this.listening = true;
         Ok(this)
     }
 
@@ -104,15 +104,26 @@ impl TimeSync {
         self.host.as_ref()?.reading()
     }
 
-    pub fn set_session_peers(&self,owner:u128,peers:Vec<IpAddr>) {
-        if let Some(host)=&self.host {host.set_peers(owner,peers);} else {self.set_listener_peers(owner,peers);}
+    pub fn set_session_peers(&self, owner: u128, peers: Vec<IpAddr>) {
+        if let Some(host) = &self.host {
+            host.set_peers(owner, peers);
+        } else {
+            self.set_listener_peers(owner, peers);
+        }
     }
-    pub fn release_session_peers(&self,owner:u128) {
-        if let Some(host)=&self.host {host.set_peers(owner,vec![]);} else {self.set_listener_peers(owner,vec![]);}
+    pub fn release_session_peers(&self, owner: u128) {
+        if let Some(host) = &self.host {
+            host.set_peers(owner, vec![]);
+        } else {
+            self.set_listener_peers(owner, vec![]);
+        }
     }
 
     pub fn set_peers(&self, peers: Vec<IpAddr>) {
-        if let Some(host)=&self.host {host.set_peers(0,peers);return;}
+        if let Some(host) = &self.host {
+            host.set_peers(0, peers);
+            return;
+        }
         self.set_listener_peers(0, peers);
     }
 
@@ -135,15 +146,21 @@ impl TimeSync {
     }
 
     pub fn timeline(&self, clock_id: u64) -> Option<Timeline> {
-        if self.uses_selected_reading() {return self.latest().filter(|t|t.clock_id==clock_id);}
+        if self.uses_selected_reading() {
+            return self.latest().filter(|t| t.clock_id == clock_id);
+        }
         self.lock().timeline(clock_id)
     }
 
     pub fn latest(&self) -> Option<Timeline> {
         if self.uses_selected_reading() {
-            let reading=self.selected_reading()?;
-            let now=clock::now_ns();
-            return Some(Timeline {clock_id:reading.domain().id(),offset_ns:i64::try_from(i128::from(reading.ns())-i128::from(now)).ok()?,updated_ns:now});
+            let reading = self.selected_reading()?;
+            let now = clock::now_ns();
+            return Some(Timeline {
+                clock_id: reading.domain().id(),
+                offset_ns: i64::try_from(i128::from(reading.ns()) - i128::from(now)).ok()?,
+                updated_ns: now,
+            });
         }
         self.lock().latest()
     }
@@ -175,7 +192,11 @@ impl TimeSync {
                 && observed_timeline != Some(timeline.clock_id)
             {
                 observed_timeline = Some(timeline.clock_id);
-                info!(clock_id=timeline.clock_id, offset_ns=timeline.offset_ns, "PTP: sender timeline observed");
+                info!(
+                    clock_id = timeline.clock_id,
+                    offset_ns = timeline.offset_ns,
+                    "PTP: sender timeline observed"
+                );
             }
             for Action::Send { to, data, delay_ms } in actions {
                 let this = self.clone();

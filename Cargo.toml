@@ -9,7 +9,7 @@ rust-version = "1.85"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/CorsairGuy/AirPlay"
 
-# Библиотеки называются ap_<имя>, но в коде подключаются без префикса: `use rtsp::…`.
+# Имена пакетов и импортов совпадают: `use rtsp::...`.
 [workspace.dependencies]
 base = { path = "crates/base" }
 rtsp = { path = "crates/rtsp" }
@@ -20,8 +20,11 @@ mdns = { path = "crates/mdns" }
 device = { path = "crates/device" }
 clock = { path = "crates/clock" }
 rtp = { path = "crates/rtp" }
-media_tx = { path = "crates/media_tx" }
-coordinator = { path = "crates/coordinator" }
+media = { path = "services/media" }
+coordinator = { path = "services/coordinator" }
+discovery = { path = "services/discovery" }
+identity = { path = "services/identity" }
+sessions = { path = "services/sessions" }
 audio_stream = { path = "crates/audio_stream" }
 mirror = { path = "crates/mirror" }
 hls = { path = "crates/hls" }
@@ -33,8 +36,7 @@ video = { path = "crates/video" }
 capture = { path = "crates/capture" }
 ipc = { path = "crates/ipc" }
 timesync = { path = "services/timesync" }
-mediaserver = { path = "services/mediaserver" }
-mediaremote = { path = "services/mediaremote" }
+remote = { path = "services/remote" }
 
 anyhow = "1"
 bytes = "1"

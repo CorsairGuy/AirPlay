@@ -157,14 +157,25 @@ impl Session {
             let Some(req) = rtsp::decode_request(&mut self.plain)? else {
                 return Ok(());
             };
-            let request_clock=self.ctx.player.time.selected_reading();
-            let request_local=clock::now_ns();
+            let request_clock = self.ctx.player.time.selected_reading();
+            let request_local = clock::now_ns();
             let (mut resp, keys) = self.handle(&req);
-            if let Some(reading)=request_clock
-                && self.ctx.player.time.selected_reading().is_some_and(|end|end.domain()==reading.domain())
+            if let Some(reading) = request_clock
+                && self
+                    .ctx
+                    .player
+                    .time
+                    .selected_reading()
+                    .is_some_and(|end| end.domain() == reading.domain())
             {
-                resp.headers.insert("X-Apple-RequestReceivedTimestamp",(reading.ns()/1_000_000).to_string());
-                resp.headers.insert("X-Apple-ProcessingTime",(clock::now_ns().saturating_sub(request_local)/1_000_000).to_string());
+                resp.headers.insert(
+                    "X-Apple-RequestReceivedTimestamp",
+                    (reading.ns() / 1_000_000).to_string(),
+                );
+                resp.headers.insert(
+                    "X-Apple-ProcessingTime",
+                    (clock::now_ns().saturating_sub(request_local) / 1_000_000).to_string(),
+                );
             }
             resp.headers.insert(
                 "Server",
@@ -359,7 +370,7 @@ mod tests {
                 name: "Тест".into(),
                 device_id: "02:00:00:00:00:01".into(),
                 model: "AirPlay".into(),
-            accessory_type: None,
+                accessory_type: None,
                 features: Features::AUDIO_RECEIVER,
                 status_flags: 4,
                 pairing_id: identity.pairing_id.clone(),

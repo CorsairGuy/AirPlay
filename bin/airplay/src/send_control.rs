@@ -1,6 +1,6 @@
 //! Application-facing relay handle. No files, device routes or protocol translation.
+use ::media::tx::{MediaProgress, Volume};
 use anyhow::{Result, bail};
-use media_tx::{MediaProgress, Volume};
 use std::{
     collections::HashMap,
     net::SocketAddr,
@@ -23,7 +23,7 @@ struct Target {
 enum Gain {
     #[cfg(test)]
     Watch(watch::Sender<Volume>),
-    Session(Box<media_tx::pool::SessionHandle>),
+    Session(Box<::media::tx::pool::SessionHandle>),
 }
 impl Gain {
     fn requested(&self) -> Volume {
@@ -37,7 +37,7 @@ impl Gain {
         match self {
             #[cfg(test)]
             Self::Watch(v) => !v.is_closed(),
-            Self::Session(v) => *v.state.borrow() == media_tx::pool::SessionState::Running,
+            Self::Session(v) => *v.state.borrow() == ::media::tx::pool::SessionState::Running,
         }
     }
     fn request(&self, volume: Volume) -> Result<()> {
@@ -168,7 +168,7 @@ impl RelayControl {
     pub(crate) fn register_session(
         &self,
         endpoint: SocketAddr,
-        handle: media_tx::pool::SessionHandle,
+        handle: ::media::tx::pool::SessionHandle,
     ) {
         let media = handle.progress.clone();
         self.0.lock().unwrap().targets.insert(

@@ -1,4 +1,4 @@
 //! Receiver and sender session lifecycles.
-pub mod preparer;
+pub use ::sessions::preparer;
 pub mod serve;
 pub mod session;

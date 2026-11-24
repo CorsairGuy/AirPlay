@@ -10,13 +10,15 @@
 | --- | --- | --- |
 | `bin/airplay` | `airplay` | демон (`airplay`) и утилита управления (`airplay status`, `list`, `send`…) в одном бинарнике |
 | `services/timesync` | `timesync` | единые часы PTP/NTP |
-| `services/mediaserver` | `mediaserver` | пока заглушка, pipeline code находится в других модулях |
-| `services/mediaremote` | `mediaremote` | альтернативный MRP server; активная карточка пока в mrp_service приложения |
+| `services/media` | `media` | медиаинтерфейсы и реализация передающего транспорта |
+| `services/remote` | `remote` | MRP-модель, обработка сообщений и альтернативный сервер |
 | `crates/<имя>` | `<имя>` | библиотеки протоколов и медиа |
-| `crates/media_tx` | `media_tx` | передача медиа и пул передающих сессий |
-| `crates/coordinator` | `coordinator` | состояние групп, выбор выходов и громкость |
+| `services/sessions` | `sessions` | подготовка сессий и политика авторизации |
+| `services/discovery` | `discovery` | обнаружение и каталог устройств |
+| `services/identity` | `identity` | идентичность, доверие и данные сопряжений |
+| `services/coordinator` | `coordinator` | состояние групп, выбор выходов и громкость |
 
-Библиотеки называются `ap_<имя>`, а в коде подключаются без префикса: `use rtsp::…`. По умолчанию один процесс `airplay`; каталоги services не означают отдельные демоны. Companion пока заглушка; Coordinator — библиотечная модель. Целевая схема и обнаруженные дубли: [компоненты и имена](docs/COMPONENTS-AND-NAMING.md).
+Имена библиотек совпадают с импортами: `use rtsp::…`. По умолчанию один процесс `airplay`; каталоги services не означают отдельные демоны. Companion пока заглушка; Coordinator — библиотечная модель. Целевая схема и обнаруженные дубли: [компоненты и имена](docs/COMPONENTS-AND-NAMING.md).
 
 Библиотеки: `base`, `rtsp`, `pair`, `crypto`, `fairplay`, `mdns`, `device`, `clock`, `rtp`, `sender`, `audio_stream`, `mirror`, `hls`, `mrp`, `companion`, `codec`, `audio`, `video`, `capture`, `ipc`.
 
@@ -93,6 +95,6 @@ GPL-3.0-or-later: приём зеркалирования и FairPlay основ
 
 ## Исходящая передача и группы
 
-`crates/media_tx` и frontend `airplay send` реализуют экспериментальный AP2 realtime PCM TX. Persistent pairing, pool, catalog, volume, PTP plan и live SETPEERS доступны в библиотечных/приложенческих API. PtpGroup может привязаться к существующей общей clock Service и optional local renderer; это не автоматическое включение всего группового runtime из CLI.
+`services/media` и frontend `airplay send` реализуют экспериментальный AP2 realtime PCM TX. Persistent pairing, pool, catalog, volume, PTP plan и live SETPEERS доступны в библиотечных/приложенческих API. PtpGroup может привязаться к существующей общей clock Service и optional local renderer; это не автоматическое включение всего группового runtime из CLI.
 
 Continuous relay через seek/смену трека, интерактивный PIN активной карточки, native group button и переход Станции на ядро ещё не завершены. Standalone NTP совместимость сохранена; групповой профиль выбирает PTP без скрытого fallback. Sender buffered103 и AP1 TX не заявлены. Минимальная сборка без video dependencies пока остаётся отдельным неперенесённым патчем.

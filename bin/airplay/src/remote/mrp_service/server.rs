@@ -480,7 +480,10 @@ pub async fn connection(
     let opened = std::time::Instant::now();
     let mut last = 0u64;
     let mut pending = tokio::task::JoinSet::new();
-    println!("{} MRP connection opened", crate::remote::mrp_service::stamp::now());
+    println!(
+        "{} MRP connection opened",
+        crate::remote::mrp_service::stamp::now()
+    );
     let result:Result<()>=async{loop{tokio::select!{
   Some(message)=pin_messages.recv()=>{tx.send(Output::Messages(vec![Node::parse(&message.encode())?])).await?;},
   count=read.read(&mut chunk)=>{let count=count?;if count==0{break}buffer.extend_from_slice(&chunk[..count]);while buffer.len()>=32{
@@ -580,8 +583,9 @@ mod tests {
             assert_eq!(recorded[0].len(), 1);
             assert_eq!(recorded[0][0].0, "pod");
             assert!(
-                (recorded[0][0].1.as_db() - media_tx::Volume::normalized(target).unwrap().as_db())
-                    .abs()
+                (recorded[0][0].1.as_db()
+                    - ::media::tx::Volume::normalized(target).unwrap().as_db())
+                .abs()
                     < 1e-6
             );
             drop(recorded);

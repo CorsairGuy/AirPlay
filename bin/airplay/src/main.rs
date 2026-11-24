@@ -8,13 +8,13 @@ use std::process::ExitCode;
 #[cfg(feature = "mirroring")]
 mod video_process;
 
+use airplay::identity::state;
 #[cfg(feature = "mirroring")]
 use airplay::mirror;
+use airplay::sessions::serve;
 #[cfg(all(feature = "mirroring", feature = "ffmpeg"))]
 use airplay::video;
 use airplay::{audio_stream, device};
-use airplay::sessions::serve;
-use airplay::identity::state;
 
 use tracing_subscriber::EnvFilter;
 
@@ -110,7 +110,10 @@ fn hostname() -> String {
 }
 
 fn parse_unsigned(value: &str, flag: &str) -> Result<u64, String> {
-    let parsed = if let Some(hex) = value.strip_prefix("0x").or_else(|| value.strip_prefix("0X")) {
+    let parsed = if let Some(hex) = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
         u64::from_str_radix(hex, 16)
     } else {
         value.parse()
@@ -190,9 +193,18 @@ fn parse_serve(args: &[String]) -> Result<serve::Options, String> {
             "--no-mdns" => opts.mdns = false,
             "--require-pin" => opts.require_pin = true,
             "--source-version" => opts.source_version = value()?,
-            "--features" => opts.features = Some(device::Features(parse_unsigned(&value()?, "--features")?)),
-            "--status-flags" => opts.status_flags = Some(u32::try_from(parse_unsigned(&value()?, "--status-flags")?).map_err(|_| "--status-flags: значение превышает u32".to_string())?),
-            "--accessory-type" => opts.accessory_type = Some(parse_unsigned(&value()?, "--accessory-type")?),
+            "--features" => {
+                opts.features = Some(device::Features(parse_unsigned(&value()?, "--features")?))
+            }
+            "--status-flags" => {
+                opts.status_flags = Some(
+                    u32::try_from(parse_unsigned(&value()?, "--status-flags")?)
+                        .map_err(|_| "--status-flags: значение превышает u32".to_string())?,
+                )
+            }
+            "--accessory-type" => {
+                opts.accessory_type = Some(parse_unsigned(&value()?, "--accessory-type")?)
+            }
             "--enclosure-color" => opts.enclosure_color = Some(value()?),
             "--volume-range" => {
                 opts.volume_range_db = value()?
@@ -209,7 +221,12 @@ fn parse_serve(args: &[String]) -> Result<serve::Options, String> {
                 opts.audio.group_latency_offset_ns =
                     Some(signed_ms(&value()?, "--group-latency-offset")?)
             }
-            "--ptp-bind" => opts.ptp_bind = Some(value()?.parse().map_err(|_|"--ptp-bind: expected a specific local IP address".to_string())?),
+            "--ptp-bind" => {
+                opts.ptp_bind =
+                    Some(value()?.parse().map_err(|_| {
+                        "--ptp-bind: expected a specific local IP address".to_string()
+                    })?)
+            }
             "--mrp" => opts.mrp = serve::Mrp::Card,
             "--mrp-bridge" => {
                 opts.mrp = serve::Mrp::Bridge(value()?.parse().map_err(|_| {
@@ -435,10 +452,14 @@ mod tests {
     #[test]
     fn parses_configurable_advertisement() {
         let opts = super::parse_serve(&[
-            "--features".into(), "0x8300527FFEE6".into(),
-            "--status-flags".into(), "0x4".into(),
-            "--accessory-type".into(), "1".into(),
-        ]).unwrap();
+            "--features".into(),
+            "0x8300527FFEE6".into(),
+            "--status-flags".into(),
+            "0x4".into(),
+            "--accessory-type".into(),
+            "1".into(),
+        ])
+        .unwrap();
         assert_eq!(opts.features.unwrap().0, 0x8300527FFEE6);
         assert_eq!(opts.status_flags, Some(4));
         assert_eq!(opts.accessory_type, Some(1));

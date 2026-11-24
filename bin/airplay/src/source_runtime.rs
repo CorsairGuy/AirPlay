@@ -1,6 +1,6 @@
 //! Source-session supervision, independent of device routes and shared clocks.
+use ::media::tx::continuous_source::End;
 use anyhow::Result;
-use media_tx::continuous_source::End;
 use std::future::Future;
 use tokio::sync::watch;
 struct StopOnDrop(watch::Sender<bool>);

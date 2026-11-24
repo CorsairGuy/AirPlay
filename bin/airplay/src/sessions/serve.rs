@@ -10,10 +10,10 @@ use tokio::net::{TcpListener, TcpStream};
 use tracing::{info, warn};
 
 use crate::card::Card;
+use crate::identity::state;
 use crate::media::rx::Player;
 use crate::remote::MrpService;
 use crate::sessions::session::{Context, Session};
-use crate::identity::state;
 
 pub struct Options {
     pub name: String,
@@ -96,10 +96,12 @@ pub async fn run(opts: Options) -> Result<()> {
         device_id: device_id.clone(),
         model: opts.model,
         accessory_type: opts.accessory_type,
-        features: opts.features.unwrap_or_else(|| if mirroring {
-            Features::MIRROR_RECEIVER
-        } else {
-            Features::AUDIO_RECEIVER
+        features: opts.features.unwrap_or({
+            if mirroring {
+                Features::MIRROR_RECEIVER
+            } else {
+                Features::AUDIO_RECEIVER
+            }
         }),
         // Как у shairport на станции: «аудиокабель подключён» и доступ
         // по HomeKit (бит 10), 0x404.
@@ -134,8 +136,10 @@ pub async fn run(opts: Options) -> Result<()> {
     // Media direction does not select the clock protocol. A combined receiver
     // owns the same PTP service for screen and audio sessions.
     let time = if device.features.0 & Features::PTP != 0 {
-        if let Some(ip)=opts.ptp_bind {
-            timesync::TimeSync::start_host(clock_id(&device_id),ip).await.context("PTP host startup")?
+        if let Some(ip) = opts.ptp_bind {
+            timesync::TimeSync::start_host(clock_id(&device_id), ip)
+                .await
+                .context("PTP host startup")?
         } else {
             timesync::TimeSync::start(clock_id(&device_id))
         }

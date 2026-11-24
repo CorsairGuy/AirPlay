@@ -127,7 +127,10 @@ impl Server {
             }
             ["VOLUME", endpoint, db] => {
                 let parsed = (|| {
-                    Ok::<_, anyhow::Error>((endpoint.parse()?, media_tx::Volume::db(db.parse()?)?))
+                    Ok::<_, anyhow::Error>((
+                        endpoint.parse()?,
+                        ::media::tx::Volume::db(db.parse()?)?,
+                    ))
                 })();
                 match parsed
                     .and_then(|(endpoint, volume)| self.control.set_volume(endpoint, volume))
@@ -175,7 +178,7 @@ pub(crate) async fn run<R: tokio::io::AsyncRead + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use media_tx::{MediaProgress, Volume};
+    use ::media::tx::{MediaProgress, Volume};
     async fn request(path: &Path, command: &str) -> String {
         let mut stream = UnixStream::connect(path).await.unwrap();
         stream.write_all(command.as_bytes()).await.unwrap();

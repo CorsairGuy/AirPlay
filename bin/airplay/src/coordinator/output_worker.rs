@@ -1,47 +1,16 @@
 //! Serialized owner of outgoing selection. No Station paths or capture policy.
 use crate::{coordinator::output_control::OutputRequest, coordinator::relay_selection};
+use ::coordinator::outputs::OutputCatalog;
+#[cfg(test)]
+use ::coordinator::outputs::ReceiverEndpoint;
+#[cfg(test)]
+use ::media::tx::Session;
+use ::media::tx::pool::SessionPool;
 use anyhow::Result;
-use media_tx::{
-    Session,
-    pool::SessionPool,
-};
-use ::coordinator::outputs::{OutputCatalog, ReceiverEndpoint};
-use std::{future::Future, sync::Arc};
+use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 
-/// Application supplies authentication/configuration. Dropping this future
-/// must release pending pairing resources; do not detach network work here.
-pub trait SessionPreparer: Send {
-    /// Connection-private context; default noninteractive preparers ignore it.
-    /// Implementations must never retain one controller's context for another
-    /// request. Opening a scope is lazy, only for receivers needing a PIN.
-    fn prepare_authorized(
-        &mut self,
-        receiver: ReceiverEndpoint,
-        _authorization: Option<&crate::identity::route_pairing::AuthorizationContext>,
-    ) -> impl Future<Output = Result<Session>> + Send {
-        self.prepare(receiver)
-    }
-    /// Bounded reconciliation after pool changes and periodic task-state
-    /// observation. Failure terminates the owner and awaits pool cleanup.
-    fn active(&mut self, _pool: &SessionPool) -> impl Future<Output = Result<()>> + Send {
-        async { Ok(()) }
-    }
-    /// Release external interests after pool teardown, even if reconciliation
-    /// or preparation failed. Must be bounded and safe after a cancelled call.
-    fn finish(&mut self) -> impl Future<Output = Result<()>> + Send {
-        async { Ok(()) }
-    }
-    /// Validated complete physical selection, before preparing any additions.
-    /// Pure configuration/preflight only: no I/O or mutation of live sessions.
-    fn selection(&mut self, _receivers: &[ReceiverEndpoint]) -> Result<()> {
-        Ok(())
-    }
-    fn prepare(
-        &mut self,
-        receiver: ReceiverEndpoint,
-    ) -> impl Future<Output = Result<Session>> + Send;
-}
+pub use sessions::SessionPreparer;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Snapshot {
@@ -160,7 +129,7 @@ pub async fn run_discovered(
         if let Some(levels) = request.batch.take() {
             let gains: Result<Vec<_>> = levels
                 .into_iter()
-                .map(|(uid, value)| media_tx::Volume::normalized(value).map(|gain| (uid, gain)))
+                .map(|(uid, value)| ::media::tx::Volume::normalized(value).map(|gain| (uid, gain)))
                 .collect();
             let code = match gains.and_then(|gains| pool.set_route_volumes(&catalog, &gains)) {
                 Ok(()) => 0,
@@ -170,7 +139,7 @@ pub async fn run_discovered(
             continue;
         }
         if let Some((uid, value)) = request.volume.take() {
-            let code = match media_tx::Volume::normalized(value)
+            let code = match ::media::tx::Volume::normalized(value)
                 .and_then(|gain| pool.set_route_volume(&catalog, &uid, gain))
             {
                 Ok(()) => 0,

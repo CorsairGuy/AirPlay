@@ -9,7 +9,7 @@ publish = false
 
 [dependencies]
 coordinator.workspace = true
-media_tx.workspace = true
+media.workspace = true
 
 [lints]
 workspace = true

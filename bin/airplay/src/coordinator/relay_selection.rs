@@ -2,13 +2,13 @@
 //! Selection precedence follows Station outputs::selection, without Station IPC,
 //! model filters or its old eight-device limit. The owner serializes requests
 //! and publishes confirmed topology after inspecting the returned runtime result.
-use anyhow::Result;
-use mrp::{output_context::Request, wire::Node};
-use media_tx::{
+use ::coordinator::outputs::OutputCatalog;
+use ::media::tx::{
     Session,
     pool::{SelectionResult, SessionPool},
 };
-use ::coordinator::outputs::OutputCatalog;
+use anyhow::Result;
+use mrp::{output_context::Request, wire::Node};
 use std::collections::BTreeSet;
 
 fn same_uid(a: &str, b: &str) -> bool {

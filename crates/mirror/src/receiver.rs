@@ -64,21 +64,12 @@ impl Header {
 }
 
 /// Принимает одно подключение на `listener` и отдаёт видео в `sink`.
-pub async fn receive(
-    listener: TcpListener,
-    key: [u8; 16],
-    iv: [u8; 16],
-    sink: Box<dyn VideoSink>,
-) {
+pub async fn receive(listener: TcpListener, key: [u8; 16], iv: [u8; 16], sink: Box<dyn VideoSink>) {
     receive_stream(listener, Some((key, iv)), None, sink).await;
 }
 
 /// HAP-derived video: authenticate each frame against its complete wire header.
-pub async fn receive_authenticated(
-    listener: TcpListener,
-    key: [u8; 32],
-    sink: Box<dyn VideoSink>,
-) {
+pub async fn receive_authenticated(listener: TcpListener, key: [u8; 32], sink: Box<dyn VideoSink>) {
     receive_stream(listener, None, Some(key), sink).await;
 }
 
@@ -132,7 +123,9 @@ async fn receive_stream(
                     break;
                 }
                 sink.frame(h.pts_ns(), &payload);
-                let Some(next) = frames.checked_add(1) else { break };
+                let Some(next) = frames.checked_add(1) else {
+                    break;
+                };
                 frames = next;
             }
             PacketKind::Config => {
@@ -174,7 +167,9 @@ mod authenticated_tests {
     struct Sink(Arc<Mutex<Vec<Vec<u8>>>>);
     impl VideoSink for Sink {
         fn config(&mut self, _: Codec, _: &[u8]) {}
-        fn frame(&mut self, _: u64, bytes: &[u8]) { self.0.lock().unwrap().push(bytes.to_vec()); }
+        fn frame(&mut self, _: u64, bytes: &[u8]) {
+            self.0.lock().unwrap().push(bytes.to_vec());
+        }
     }
 
     #[tokio::test]
@@ -183,18 +178,27 @@ mod authenticated_tests {
         let address = listener.local_addr().unwrap();
         let frames = Arc::new(Mutex::new(Vec::new()));
         let key = [7; 32];
-        let task = tokio::spawn(receive_authenticated(listener, key, Box::new(Sink(frames.clone()))));
+        let task = tokio::spawn(receive_authenticated(
+            listener,
+            key,
+            Box::new(Sink(frames.clone())),
+        ));
         let mut client = TcpStream::connect(address).await.unwrap();
         for counter in 0u64..3 {
             let mut header = [0u8; HEADER_LEN];
             header[..4].copy_from_slice(&(19u32).to_le_bytes());
             let data = crypto::aead::seal(&key, &counter.to_le_bytes(), &header, b"abc");
-            if counter == 2 { header[8] = 1; }
+            if counter == 2 {
+                header[8] = 1;
+            }
             client.write_all(&header).await.unwrap();
             client.write_all(&data).await.unwrap();
         }
         drop(client);
         task.await.unwrap();
-        assert_eq!(*frames.lock().unwrap(), vec![b"abc".to_vec(), b"abc".to_vec()]);
+        assert_eq!(
+            *frames.lock().unwrap(),
+            vec![b"abc".to_vec(), b"abc".to_vec()]
+        );
     }
 }

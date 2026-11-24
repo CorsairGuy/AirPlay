@@ -1,0 +1,24 @@
+[package]
+name = "remote"
+description = "Служба MediaRemote (аналог mediaremoted): карточка «Сейчас играет», пульт и громкость."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+plist.workspace = true
+uuid = { version = "1", features = ["v4", "v5"] }
+mrp.workspace = true
+rand.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

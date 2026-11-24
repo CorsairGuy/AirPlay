@@ -1,9 +1,7 @@
 //! Full MRP selection/PIN/worker path. Loopback RTSP and null audio only.
 use super::*;
-use media_tx::{
-    pool::SessionPool,
-};
 use ::coordinator::outputs::{OutputCatalog, OutputRoute, ReceiverEndpoint};
+use ::media::tx::pool::SessionPool;
 use std::{
     sync::{Arc, Mutex},
     time::Duration,
@@ -66,8 +64,10 @@ async fn selection_pin(disconnect: bool) {
     });
     let directory = std::env::temp_dir().join(format!("airplay-wire-pin-{}", Uuid::new_v4()));
     let store = Arc::new(crate::identity::sender_store::SenderStore::open(&directory).unwrap());
-    let mut config =
-        media_tx::SessionConfig::new(address, media_tx::Identity::new("wire-controller", "test"));
+    let mut config = ::media::tx::SessionConfig::new(
+        address,
+        ::media::tx::Identity::new("wire-controller", "test"),
+    );
     config.preserve_receiver_volume = true;
     let preparer = crate::sessions::preparer::StoredSessionPreparer::new(
         config,
@@ -224,7 +224,7 @@ async fn selection_pin(disconnect: bool) {
 
 #[tokio::test]
 async fn receiver_control_failure_keeps_other_session_and_media_epoch_alive() {
-    use media_tx::pool::SessionState;
+    use ::media::tx::pool::SessionState;
     let mut servers = Vec::new();
     let mut sessions = Vec::new();
     for id in ["first", "second"] {
@@ -234,10 +234,11 @@ async fn receiver_control_failure_keeps_other_session_and_media_epoch_alive() {
             let (socket, peer) = listener.accept().await.unwrap();
             crate::sessions::serve::serve_connection(socket, receiver_context(false), peer).await
         }));
-        let mut config = media_tx::SessionConfig::new(address, media_tx::Identity::new(id, "test"));
+        let mut config =
+            ::media::tx::SessionConfig::new(address, ::media::tx::Identity::new(id, "test"));
 
         config.preserve_receiver_volume = true;
-        sessions.push(media_tx::Session::connect(config).await.unwrap());
+        sessions.push(::media::tx::Session::connect(config).await.unwrap());
     }
     let (audio, packets) = tokio::sync::broadcast::channel(8);
     let mut pool = SessionPool::new(packets);
@@ -246,10 +247,10 @@ async fn receiver_control_failure_keeps_other_session_and_media_epoch_alive() {
         handles.push(pool.add(id, session).unwrap());
     }
     let origin = std::time::Instant::now();
-    let clock = media_tx::MediaClock::at(origin, 0);
+    let clock = ::media::tx::MediaClock::at(origin, 0);
     audio
         .send(Arc::new(
-            clock.packet(0, &[7; media_tx::PACKET_BYTES]).unwrap(),
+            clock.packet(0, &[7; ::media::tx::PACKET_BYTES]).unwrap(),
         ))
         .unwrap();
     for handle in &mut handles {
@@ -273,12 +274,15 @@ async fn receiver_control_failure_keeps_other_session_and_media_epoch_alive() {
     assert_eq!(*handles[1].state.borrow(), SessionState::Failed);
     assert_eq!(*handles[0].state.borrow(), SessionState::Running);
     assert!(pool.remove("second").await.is_err());
-    let index = ((origin.elapsed().as_nanos() * u128::from(media_tx::SAMPLE_RATE) / 1_000_000_000)
-        / media_tx::FRAMES_PER_PACKET as u128) as u64
-        * media_tx::FRAMES_PER_PACKET as u64;
+    let index = ((origin.elapsed().as_nanos() * u128::from(::media::tx::SAMPLE_RATE)
+        / 1_000_000_000)
+        / ::media::tx::FRAMES_PER_PACKET as u128) as u64
+        * ::media::tx::FRAMES_PER_PACKET as u64;
     audio
         .send(Arc::new(
-            clock.packet(index, &[9; media_tx::PACKET_BYTES]).unwrap(),
+            clock
+                .packet(index, &[9; ::media::tx::PACKET_BYTES])
+                .unwrap(),
         ))
         .unwrap();
     tokio::time::timeout(Duration::from_secs(1), async {

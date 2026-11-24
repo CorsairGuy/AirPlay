@@ -1,0 +1,19 @@
+[package]
+name = "discovery"
+description = "AirPlay service discovery and device catalogue."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+coordinator.workspace = true
+mdns.workspace = true
+tokio.workspace = true
+uuid = { version = "1", features = ["v4", "v5"] }
+
+[lints]
+workspace = true

@@ -1,7 +1,7 @@
 //! Realtime PCM sender frontend. One bounded producer and media epoch feed all
 //! connected receivers; this does not claim AP2 group/PTP synchronization.
 
-pub use media_tx;
+pub use ::media::tx as transport;
 
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
@@ -9,15 +9,15 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::{future::Future, pin::Pin};
 
+use ::media::tx::{AudioPacket, Identity, MediaClock, Session, SessionConfig, Volume};
 use anyhow::{Context, Result, anyhow, bail};
-use media_tx::{AudioPacket, Identity, MediaClock, Session, SessionConfig, Volume};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::{broadcast, watch};
 use tokio::task::JoinSet;
 
-const RATE: u64 = media_tx::SAMPLE_RATE as u64;
-const FRAMES: usize = media_tx::FRAMES_PER_PACKET;
-const PCM_BYTES: usize = media_tx::PACKET_BYTES;
+const RATE: u64 = ::media::tx::SAMPLE_RATE as u64;
+const FRAMES: usize = ::media::tx::FRAMES_PER_PACKET;
+const PCM_BYTES: usize = ::media::tx::PACKET_BYTES;
 const QUEUE_PACKETS: usize = 64;
 
 #[derive(Debug)]
@@ -230,7 +230,7 @@ pub async fn run_selected<R: AsyncRead + Unpin>(
 /// Optional platform renderer, fed from the same clock and immutable packet queue.
 /// The adapter owns its output latency, gain, startup gate and resource cleanup.
 /// No route is changed by this API; platform handoff requires separate validation.
-pub async fn run_with_local<R: AsyncRead + Unpin, S: media_tx::LocalSink>(
+pub async fn run_with_local<R: AsyncRead + Unpin, S: ::media::tx::LocalSink>(
     options: Options,
     input: R,
     stop: watch::Receiver<bool>,
@@ -242,7 +242,7 @@ pub async fn run_with_local<R: AsyncRead + Unpin, S: media_tx::LocalSink>(
     run_inner(options, input, stop, Some(local_factory(sink)), None).await
 }
 
-pub async fn run_with_local_controlled<R: AsyncRead + Unpin, S: media_tx::LocalSink>(
+pub async fn run_with_local_controlled<R: AsyncRead + Unpin, S: ::media::tx::LocalSink>(
     options: Options,
     input: R,
     stop: watch::Receiver<bool>,
@@ -262,16 +262,16 @@ pub async fn run_with_local_controlled<R: AsyncRead + Unpin, S: media_tx::LocalS
     .await
 }
 
-fn local_factory<S: media_tx::LocalSink>(sink: S) -> LocalFactory {
+fn local_factory<S: ::media::tx::LocalSink>(sink: S) -> LocalFactory {
     Box::new(move |packets, latency, stop| {
         Box::pin(async move {
-            media_tx::run_local(sink, packets, latency, stop).await?;
-            Ok(media_tx::StreamStats::default())
+            ::media::tx::run_local(sink, packets, latency, stop).await?;
+            Ok(::media::tx::StreamStats::default())
         })
     })
 }
 
-type LocalFuture = Pin<Box<dyn Future<Output = Result<media_tx::StreamStats>> + Send>>;
+type LocalFuture = Pin<Box<dyn Future<Output = Result<::media::tx::StreamStats>> + Send>>;
 type LocalFactory = Box<
     dyn FnOnce(
             broadcast::Receiver<Arc<AudioPacket>>,
@@ -326,7 +326,7 @@ async fn run_inner<R: AsyncRead + Unpin>(
         QUEUE_PACKETS
     };
     let (audio, receiver) = broadcast::channel(capacity);
-    let mut sessions = media_tx::pool::SessionPool::new(receiver);
+    let mut sessions = ::media::tx::pool::SessionPool::new(receiver);
     let (halt, halted) = watch::channel(false);
     let mut workers = JoinSet::new();
     let mut addresses = HashSet::new();
@@ -359,11 +359,13 @@ async fn run_inner<R: AsyncRead + Unpin>(
             loop {
                 let current = *state.borrow_and_update();
                 match current {
-                    media_tx::pool::SessionState::Running => {
+                    ::media::tx::pool::SessionState::Running => {
                         state.changed().await.context("receiver task closed")?
                     }
-                    media_tx::pool::SessionState::Ended => return Ok(media_tx::StreamStats::default()),
-                    media_tx::pool::SessionState::Failed => bail!("receiver session failed"),
+                    ::media::tx::pool::SessionState::Ended => {
+                        return Ok(::media::tx::StreamStats::default());
+                    }
+                    ::media::tx::pool::SessionState::Failed => bail!("receiver session failed"),
                 }
             }
         });
@@ -586,7 +588,7 @@ mod tests {
                 name: "Loopback null receiver".into(),
                 device_id: "02:00:00:00:00:23".into(),
                 model: "AirPlay".into(),
-            accessory_type: None,
+                accessory_type: None,
                 features: Features::AUDIO_RECEIVER,
                 status_flags: 4,
                 pairing_id: identity.pairing_id.clone(),
@@ -633,7 +635,7 @@ mod tests {
         };
         type CapturedLocal = Arc<Mutex<Vec<(Arc<AudioPacket>, std::time::Instant)>>>;
         struct LocalCapture(CapturedLocal);
-        impl media_tx::LocalSink for LocalCapture {
+        impl ::media::tx::LocalSink for LocalCapture {
             async fn write(
                 &mut self,
                 packet: Arc<AudioPacket>,

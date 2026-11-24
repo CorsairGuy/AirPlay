@@ -7,8 +7,8 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use video::{DecodingSink, FrameSink, Options, Picture, PixelFormat};
 use mirror::{Codec, StreamInfo, VideoSink};
+use video::{DecodingSink, FrameSink, Options, Picture, PixelFormat};
 
 /// Файл: u32 длина + настройки, дальше u32 длина + кадр.
 fn load(data: &[u8]) -> (Vec<u8>, Vec<Vec<u8>>) {
