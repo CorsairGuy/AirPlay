@@ -1,5 +1,5 @@
 //! Bounded handoff from each MRP reader to the application's serialized output
-//! worker. The worker owns discovery, pairing, relay_selection and topology.
+//! worker. MRP payloads and request-scoped authorization stay on the remote side.
 use mrp::wire::Node;
 use tokio::sync::{mpsc, oneshot};
 
@@ -8,21 +8,12 @@ pub struct OutputControl(mpsc::Sender<OutputRequest>);
 pub(crate) trait VolumeBackend {
     fn set_routes(
         &self,
-        catalog: &::coordinator::outputs::OutputCatalog,
+        catalog: &::discovery::catalog::OutputCatalog,
         levels: &[(String, ::media::tx::Volume)],
     ) -> anyhow::Result<()>;
 }
-impl VolumeBackend for ::media::tx::pool::SessionPool {
-    fn set_routes(
-        &self,
-        catalog: &::coordinator::outputs::OutputCatalog,
-        levels: &[(String, ::media::tx::Volume)],
-    ) -> anyhow::Result<()> {
-        self.set_route_volumes(catalog, levels)
-    }
-}
 pub(crate) type VolumeOperation =
-    Box<dyn FnOnce(&dyn VolumeBackend, &::coordinator::outputs::OutputCatalog) -> u64 + Send>;
+    Box<dyn FnOnce(&dyn VolumeBackend, &::discovery::catalog::OutputCatalog) -> u64 + Send>;
 struct Completion(Option<Box<dyn FnOnce(u64) + Send>>);
 impl Completion {
     fn new(callback: Box<dyn FnOnce(u64) + Send>) -> Self {
@@ -168,7 +159,7 @@ pub(crate) mod testing {
     impl super::VolumeBackend for Backend {
         fn set_routes(
             &self,
-            _: &::coordinator::outputs::OutputCatalog,
+            _: &::discovery::catalog::OutputCatalog,
             levels: &[(String, ::media::tx::Volume)],
         ) -> anyhow::Result<()> {
             self.0.lock().unwrap().push(levels.to_vec());
@@ -179,7 +170,7 @@ pub(crate) mod testing {
         let operation = request.operation.take().unwrap();
         let code = operation(
             backend,
-            &::coordinator::outputs::OutputCatalog::new(vec![]).unwrap(),
+            &::discovery::catalog::OutputCatalog::new(vec![]).unwrap(),
         );
         request.finish(code);
     }

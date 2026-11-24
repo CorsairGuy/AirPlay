@@ -101,7 +101,7 @@ impl RelayControl {
     /// overall multiroom master-volume balance is a separate adapter policy.
     pub fn set_route_volume(
         &self,
-        catalog: &::coordinator::outputs::OutputCatalog,
+        catalog: &::discovery::catalog::OutputCatalog,
         uid: &str,
         volume: Volume,
     ) -> Result<()> {
@@ -124,7 +124,7 @@ impl RelayControl {
     }
     pub fn set_member_volume(
         &self,
-        catalog: &::coordinator::outputs::OutputCatalog,
+        catalog: &::discovery::catalog::OutputCatalog,
         uid: &str,
         volume: Volume,
     ) -> Result<()> {
@@ -198,7 +198,7 @@ mod tests {
     use super::*;
     #[test]
     fn logical_row_volume_is_atomic_and_member_volume_remains_independent() {
-        use ::coordinator::outputs::{OutputCatalog, OutputRoute, ReceiverEndpoint};
+        use ::discovery::catalog::{OutputCatalog, OutputRoute, ReceiverEndpoint};
         let a = "127.0.0.1:7001".parse().unwrap();
         let b = "127.0.0.1:7002".parse().unwrap();
         let catalog = OutputCatalog::new(vec![OutputRoute {

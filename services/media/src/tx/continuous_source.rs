@@ -4,7 +4,7 @@ use crate::tx::{
     continuous::{Input, Step, Timeline},
 };
 use anyhow::{Result, bail};
-use std::time::Instant;
+use std::{future::Future, time::Instant};
 use tokio::sync::{mpsc, watch};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -139,6 +139,30 @@ pub async fn read_pcm(
         }
     }
 }
+
+/// Build a bounded acquisition boundary for an already-open PCM reader.
+/// The returned future is caller-owned: it is not spawned and must be awaited
+/// alongside the rest of the source/group lifetime.
+pub fn bounded_reader<R>(
+    reader: R,
+    capacity: usize,
+    controls: watch::Receiver<State>,
+    stop: watch::Receiver<bool>,
+) -> Result<(
+    mpsc::Receiver<SourceFrame>,
+    impl Future<Output = Result<End>> + Send + 'static,
+)>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    if !(1..=512).contains(&capacity) {
+        bail!("PCM input queue capacity must be 1..=512");
+    }
+    let (output, frames) = mpsc::channel(capacity);
+    let acquisition = async move { read_pcm(reader, output, controls, stop).await };
+    Ok((frames, acquisition))
+}
+
 fn state(timeline: &mut Timeline, controls: &mut watch::Receiver<State>) -> Result<State> {
     let next = *controls.borrow_and_update();
     timeline.apply_source_state(next.generation, next.paused, Instant::now())?;
@@ -321,6 +345,38 @@ fn stamp_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn bounded_reader_owns_a_capacity_limited_pcm_boundary_until_eof() {
+        use tokio::io::AsyncWriteExt;
+
+        let (mut writer, reader) = tokio::io::duplex(PACKET_BYTES);
+        writer.write_all(&[0x5a; PACKET_BYTES]).await.unwrap();
+        drop(writer);
+        let (source, _) = watch::channel(State {
+            generation: 7,
+            paused: false,
+        });
+        let (stop, cancelled) = watch::channel(false);
+        let (mut frames, acquisition) =
+            bounded_reader(reader, 2, source.subscribe(), cancelled).unwrap();
+        assert_eq!(acquisition.await.unwrap(), End::Eof);
+        let frame = frames.recv().await.unwrap();
+        assert_eq!(frame.generation, 7);
+        assert_eq!(frame.pcm.as_slice(), &[0x5a; PACKET_BYTES]);
+        assert!(frames.recv().await.is_none());
+        drop(stop);
+        drop(source);
+    }
+    #[tokio::test]
+    async fn bounded_reader_rejects_unbounded_or_empty_capacity() {
+        let (reader, _writer) = tokio::io::duplex(PACKET_BYTES);
+        let (_control, controls) = watch::channel(State::default());
+        let (_stop, stopped) = watch::channel(false);
+        assert!(bounded_reader(reader, 0, controls.clone(), stopped.clone()).is_err());
+        let (reader, _writer) = tokio::io::duplex(PACKET_BYTES);
+        assert!(bounded_reader(reader, 513, controls, stopped).is_err());
+    }
+
     #[tokio::test]
     async fn raw_pcm_preserves_bytes_and_pads_only_aligned_final_frames() {
         let (_owner, controls) = watch::channel(State::default());

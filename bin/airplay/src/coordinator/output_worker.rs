@@ -1,24 +1,25 @@
-//! Serialized owner of outgoing selection. No Station paths or capture policy.
-use crate::{coordinator::output_control::OutputRequest, coordinator::relay_selection};
-use ::coordinator::outputs::OutputCatalog;
-#[cfg(test)]
-use ::coordinator::outputs::ReceiverEndpoint;
+//! Application adapter that applies coordinator selection to prepared sessions.
+//! No Station paths or capture policy.
+use crate::{
+    remote::output_control::{OutputRequest, VolumeBackend},
+    remote::output_selection,
+};
+use ::coordinator::{
+    outputs::{self, ReceiverEndpoint, SelectionPlan},
+    runtime::{ApplyResult, PhysicalSessionBackend, Runtime},
+};
+use ::discovery::catalog::OutputCatalog;
 #[cfg(test)]
 use ::media::tx::Session;
 use ::media::tx::pool::SessionPool;
 use anyhow::Result;
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 use tokio::sync::{mpsc, watch};
 
+pub use ::coordinator::runtime::Snapshot;
 pub use sessions::SessionPreparer;
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Snapshot {
-    /// Logical rows whose required physical workers are currently running.
-    /// Running is task state, not proof of audible output/group adoption.
-    pub selected: Vec<String>,
-    pub last_error: Option<u64>,
-}
+pub type AppliedSelection =
+    ApplyResult<::media::tx::pool::SessionHandle, Result<::media::tx::StreamStats>>;
 
 async fn stopped(stop: &mut watch::Receiver<bool>) {
     loop {
@@ -27,15 +28,129 @@ async fn stopped(stop: &mut watch::Receiver<bool>) {
         }
     }
 }
-fn confirmed(pool: &SessionPool, catalog: &OutputCatalog, desired: &[String]) -> Vec<String> {
+pub(super) fn plan_selection(
+    pool: &SessionPool,
+    runtime: &Runtime,
+    catalog: &OutputCatalog,
+    desired: &[String],
+) -> Result<SelectionPlan> {
+    let members = pool.members();
+    let current = members
+        .iter()
+        .filter(|member| member.running)
+        .map(|member| ReceiverEndpoint {
+            uid: member.uid.clone(),
+            address: member.address,
+        })
+        .collect::<Vec<_>>();
+    let desired_members = catalog.receivers(desired)?;
+    let mut plan = runtime.plan(catalog, &current, desired)?;
+    for member in members.into_iter().filter(|member| !member.running) {
+        let endpoint = ReceiverEndpoint {
+            uid: member.uid,
+            address: member.address,
+        };
+        if desired_members.iter().any(|desired| desired == &endpoint)
+            && !plan.adding.contains(&endpoint)
+        {
+            plan.adding.push(endpoint.clone());
+        }
+        plan.removing.push(endpoint);
+    }
+    Ok(plan)
+}
+
+fn confirmed(
+    pool: &SessionPool,
+    runtime: &Runtime,
+    catalog: &OutputCatalog,
+    desired: &[String],
+) -> Vec<String> {
     desired
         .iter()
         .filter(|uid| {
-            pool.plan_selection(catalog, &[(*uid).clone()])
+            plan_selection(pool, runtime, catalog, &[(*uid).clone()])
                 .is_ok_and(|plan| plan.adding.is_empty())
         })
         .cloned()
         .collect()
+}
+
+fn apply_route_volumes(
+    pool: &SessionPool,
+    catalog: &OutputCatalog,
+    levels: &[(String, ::media::tx::Volume)],
+) -> Result<()> {
+    let expanded = outputs::expand_route_values(catalog, levels)?;
+    let members = pool
+        .members()
+        .into_iter()
+        .map(|member| (member.uid.clone(), member))
+        .collect::<BTreeMap<_, _>>();
+    let mut physical = Vec::new();
+    for (receiver, gain) in expanded {
+        let member = members
+            .get(&receiver.uid)
+            .ok_or_else(|| anyhow::anyhow!("inactive output member"))?;
+        if !member.running || member.address != receiver.address {
+            anyhow::bail!("output member is inactive or changed endpoint");
+        }
+        physical.push((receiver.uid, gain));
+    }
+    pool.set_member_volumes(&physical)
+}
+
+struct RuntimeVolumeBackend<'a> {
+    pool: &'a SessionPool,
+    catalog: &'a OutputCatalog,
+}
+impl VolumeBackend for RuntimeVolumeBackend<'_> {
+    fn set_routes(
+        &self,
+        catalog: &OutputCatalog,
+        levels: &[(String, ::media::tx::Volume)],
+    ) -> Result<()> {
+        anyhow::ensure!(
+            std::ptr::eq(catalog, self.catalog),
+            "catalog changed during operation"
+        );
+        apply_route_volumes(self.pool, catalog, levels)
+    }
+}
+
+struct PoolBackend<'a>(&'a mut SessionPool);
+impl PhysicalSessionBackend<::media::tx::Session> for PoolBackend<'_> {
+    type Handle = ::media::tx::pool::SessionHandle;
+    type Removal = Result<::media::tx::StreamStats>;
+
+    fn endpoint(&self, uid: &str, prepared: &::media::tx::Session) -> ReceiverEndpoint {
+        ReceiverEndpoint {
+            uid: uid.to_owned(),
+            address: prepared.endpoint(),
+        }
+    }
+
+    fn remove<'a>(
+        &'a mut self,
+        uid: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Self::Removal> + Send + 'a>> {
+        Box::pin(async move { self.0.remove(uid).await })
+    }
+
+    fn add(&mut self, uid: &str, prepared: ::media::tx::Session) -> Result<Self::Handle> {
+        self.0.add(uid, prepared)
+    }
+}
+
+pub(super) async fn apply_selection(
+    runtime: &mut Runtime,
+    pool: &mut SessionPool,
+    plan: SelectionPlan,
+    prepared: Vec<(String, ::media::tx::Session)>,
+) -> Result<AppliedSelection> {
+    runtime
+        .apply_plan(plan, prepared, &mut PoolBackend(pool))
+        .await
 }
 fn publish(updates: &watch::Sender<Snapshot>, value: Snapshot) {
     updates.send_if_modified(|previous| {
@@ -87,7 +202,7 @@ pub async fn run_discovered(
     let mut discovered = discovery.borrow_and_update().clone();
     let mut catalog = discovered.clone();
     let mut discovery_open = true;
-    let mut desired = Vec::new();
+    let mut desired = Runtime::default();
     let mut last_error = None;
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(250));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -99,7 +214,7 @@ pub async fn run_discovered(
             changed = discovery.changed(), if discovery_open => {
                 if changed.is_err() { discovery_open=false; continue; }
                 discovered = discovery.borrow_and_update().clone();
-                match discovered.preserving_selected(&catalog,&desired) {
+                match desired.preserve_selected(discovered.as_ref(), catalog.as_ref()) {
                     Ok(next) => catalog=Arc::new(next),
                     Err(_) => last_error=Some(39),
                 }
@@ -113,7 +228,13 @@ pub async fn run_discovered(
                     result = preparer.active(&pool) => result,
                 };
                 if result.is_err() { last_error=Some(100); break; }
-                publish(&updates,Snapshot {selected: confirmed(&pool,&catalog,&desired),last_error});
+                publish(
+                    &updates,
+                    Snapshot {
+                        selected: confirmed(&pool, &desired, &catalog, desired.selected()),
+                        last_error,
+                    },
+                );
                 continue;
             }
         };
@@ -122,7 +243,11 @@ pub async fn run_discovered(
             continue;
         }
         if let Some(operation) = request.operation.take() {
-            let code = operation(&pool, &catalog);
+            let backend = RuntimeVolumeBackend {
+                pool: &pool,
+                catalog: &catalog,
+            };
+            let code = operation(&backend, &catalog);
             request.finish(code);
             continue;
         }
@@ -131,7 +256,7 @@ pub async fn run_discovered(
                 .into_iter()
                 .map(|(uid, value)| ::media::tx::Volume::normalized(value).map(|gain| (uid, gain)))
                 .collect();
-            let code = match gains.and_then(|gains| pool.set_route_volumes(&catalog, &gains)) {
+            let code = match gains.and_then(|gains| apply_route_volumes(&pool, &catalog, &gains)) {
                 Ok(()) => 0,
                 Err(_) => 39,
             };
@@ -140,7 +265,7 @@ pub async fn run_discovered(
         }
         if let Some((uid, value)) = request.volume.take() {
             let code = match ::media::tx::Volume::normalized(value)
-                .and_then(|gain| pool.set_route_volume(&catalog, &uid, gain))
+                .and_then(|gain| apply_route_volumes(&pool, &catalog, &[(uid, gain)]))
             {
                 Ok(()) => 0,
                 Err(_) => 39,
@@ -148,9 +273,17 @@ pub async fn run_discovered(
             request.finish(code);
             continue;
         }
-        let current = confirmed(&pool, &catalog, &desired);
-        let selection = relay_selection::selection(&request.body, &catalog, &local_ids, &current);
-        let next = match selection {
+        let selection_request = match output_selection::decode(&request.body) {
+            Ok(selection) => selection,
+            Err(_) => {
+                request.finish(39);
+                last_error = Some(39);
+                continue;
+            }
+        };
+        let current = confirmed(&pool, &desired, &catalog, desired.selected());
+        let next = match desired.resolve(&selection_request, catalog.as_ref(), &local_ids, &current)
+        {
             Ok(next) => next,
             Err(_) => {
                 request.finish(39);
@@ -158,7 +291,7 @@ pub async fn run_discovered(
                 continue;
             }
         };
-        let plan = match pool.plan_selection(&catalog, &next) {
+        let plan = match plan_selection(&pool, &desired, &catalog, &next) {
             Ok(plan) => plan,
             Err(_) => {
                 request.finish(39);
@@ -176,7 +309,7 @@ pub async fn run_discovered(
         }
         let prepare = async {
             let mut prepared = Vec::new();
-            for receiver in plan.adding {
+            for receiver in plan.adding.iter().cloned() {
                 let uid = receiver.uid.clone();
                 prepared.push((
                     uid,
@@ -202,9 +335,10 @@ pub async fn run_discovered(
         if discovery.has_changed().unwrap_or(true) {
             // A closed watch can still contain a final, unseen snapshot.
             discovered = discovery.borrow_and_update().clone();
-            let refreshed = discovered.preserving_selected(&catalog, &desired);
+            let refreshed = desired.preserve_selected(discovered.as_ref(), catalog.as_ref());
             let still_matches = refreshed.as_ref().is_ok_and(|fresh| {
-                relay_selection::selection(&request.body, fresh, &local_ids, &current)
+                desired
+                    .resolve(&selection_request, fresh, &local_ids, &current)
                     .is_ok_and(|value| value == next)
                     && fresh.receivers(&next).ok() == catalog.receivers(&next).ok()
             });
@@ -219,12 +353,13 @@ pub async fn run_discovered(
         }
         let code = match prepared {
             Err(_) => 100,
-            Ok(prepared) => match pool.apply_selection(&catalog, &next, prepared).await {
+            Ok(prepared) => match apply_selection(&mut desired, &mut pool, plan, prepared).await {
                 Ok(result) => {
-                    desired = next;
                     // Release deselected pins immediately, even if discovery
                     // sends no further update before the next selection.
-                    if let Ok(fresh) = discovered.preserving_selected(&catalog, &desired) {
+                    if let Ok(fresh) =
+                        desired.preserve_selected(discovered.as_ref(), catalog.as_ref())
+                    {
                         catalog = Arc::new(fresh);
                     }
                     if result.start_errors.is_empty() {
@@ -250,7 +385,7 @@ pub async fn run_discovered(
         publish(
             &updates,
             Snapshot {
-                selected: confirmed(&pool, &catalog, &desired),
+                selected: confirmed(&pool, &desired, &catalog, desired.selected()),
                 last_error,
             },
         );
@@ -272,7 +407,7 @@ pub async fn run_discovered(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ::coordinator::outputs::OutputRoute;
+    use ::discovery::catalog::OutputRoute;
     struct FailedReconciliation;
     impl SessionPreparer for FailedReconciliation {
         async fn active(&mut self, _: &SessionPool) -> Result<()> {

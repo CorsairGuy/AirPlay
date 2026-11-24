@@ -210,7 +210,7 @@ pub async fn run_controlled<R: AsyncRead + Unpin>(
 /// connection. Discovery/catalog ownership stays with the embedding application.
 pub async fn run_selected<R: AsyncRead + Unpin>(
     mut options: Options,
-    catalog: &::coordinator::outputs::OutputCatalog,
+    catalog: &::discovery::catalog::OutputCatalog,
     selected: &[String],
     input: R,
     stop: watch::Receiver<bool>,
@@ -686,7 +686,7 @@ mod tests {
                 )
                 .await
             } else if with_routes {
-                use ::coordinator::outputs::{OutputCatalog, OutputRoute, ReceiverEndpoint};
+                use ::discovery::catalog::{OutputCatalog, OutputRoute, ReceiverEndpoint};
                 let catalog = OutputCatalog::new(vec![OutputRoute {
                     uid: "logical-output".into(),
                     name: "Output".into(),

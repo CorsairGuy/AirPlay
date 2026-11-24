@@ -65,13 +65,12 @@ pub struct SessionPool {
     entries: BTreeMap<String, Entry>,
 }
 
-/// Runtime operations accepted, not a claim of audible playback or group adoption.
-/// Cleanup errors do not discard the remaining requested changes.
-pub struct SelectionResult {
-    pub requested: Vec<String>,
-    pub started: Vec<(String, SessionHandle)>,
-    pub removed: Vec<(String, Result<StreamStats>)>,
-    pub start_errors: Vec<(String, anyhow::Error)>,
+/// A physical receiver session currently owned by this pool.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PhysicalMember {
+    pub uid: String,
+    pub address: SocketAddr,
+    pub running: bool,
 }
 impl SessionPool {
     /// Queue one peer list to a single-domain PTP pool after complete local
@@ -142,12 +141,13 @@ impl SessionPool {
     }
     /// Physical workers currently owned by this pool. Task membership alone
     /// is not media progress, acoustic readiness or native group adoption.
-    pub fn members(&self) -> Vec<coordinator::outputs::ReceiverEndpoint> {
+    pub fn members(&self) -> Vec<PhysicalMember> {
         self.entries
             .iter()
-            .map(|(uid, entry)| coordinator::outputs::ReceiverEndpoint {
+            .map(|(uid, entry)| PhysicalMember {
                 uid: uid.clone(),
                 address: entry.endpoint,
+                running: *entry.handle.state.borrow() == SessionState::Running,
             })
             .collect()
     }
@@ -180,141 +180,6 @@ impl SessionPool {
             handle.set_volume(gain)?;
         }
         Ok(())
-    }
-
-    /// One logical row may cover multiple physical members. Preflight every
-    /// member before publishing a gain revision; unrelated outputs are untouched.
-    /// Success means control accepted, not receiver/acoustic acknowledgement.
-    pub fn set_route_volumes(
-        &self,
-        catalog: &coordinator::outputs::OutputCatalog,
-        levels: &[(String, Volume)],
-    ) -> Result<()> {
-        let ids: Vec<_> = levels.iter().map(|(id, _)| id.clone()).collect();
-        catalog.receivers(&ids)?;
-        let mut physical = std::collections::BTreeMap::new();
-        for (uid, gain) in levels {
-            for member in catalog.receivers(std::slice::from_ref(uid))? {
-                let entry = self
-                    .entries
-                    .get(&member.uid)
-                    .ok_or_else(|| anyhow::anyhow!("inactive group volume member"))?;
-                if entry.endpoint != member.address {
-                    bail!("group member endpoint changed");
-                }
-                if physical
-                    .insert(member.uid, *gain)
-                    .is_some_and(|old| old != *gain)
-                {
-                    bail!("overlapping outputs request different gains");
-                }
-            }
-        }
-        self.set_member_volumes(&physical.into_iter().collect::<Vec<_>>())
-    }
-
-    pub fn set_route_volume(
-        &self,
-        catalog: &coordinator::outputs::OutputCatalog,
-        uid: &str,
-        volume: Volume,
-    ) -> Result<()> {
-        let members = catalog.receivers(&[uid.into()])?;
-        let mut handles = Vec::new();
-        for member in members {
-            let entry = self
-                .entries
-                .get(&member.uid)
-                .ok_or_else(|| anyhow::anyhow!("output member is inactive"))?;
-            if entry.endpoint != member.address
-                || *entry.handle.state.borrow() != SessionState::Running
-            {
-                bail!("output member is inactive or changed endpoint");
-            }
-            handles.push(entry.handle.clone());
-        }
-        for handle in handles {
-            handle.set_volume(volume)?;
-        }
-        Ok(())
-    }
-
-    /// Snapshot a desired selection against live workers, without starting or
-    /// stopping anything. Completed workers must be removed before re-adding;
-    /// they cannot satisfy a desired selection merely because their UID exists.
-    /// This snapshot is not a transaction or a reservation against later failure.
-    pub fn plan_selection(
-        &self,
-        catalog: &coordinator::outputs::OutputCatalog,
-        selected: &[String],
-    ) -> Result<coordinator::outputs::SelectionPlan> {
-        let current = self.members();
-        let mut plan = catalog.plan(&current, selected)?;
-        let mut retained = Vec::new();
-        for receiver in plan.retained {
-            if self
-                .entries
-                .get(&receiver.uid)
-                .is_some_and(|e| *e.handle.state.borrow() == SessionState::Running)
-            {
-                retained.push(receiver);
-            } else {
-                plan.removing.push(receiver.clone());
-                plan.adding.push(receiver);
-            }
-        }
-        plan.retained = retained;
-        Ok(plan)
-    }
-    /// Apply a complete desired logical selection using caller-authenticated
-    /// sessions for precisely the additions in a freshly computed plan.
-    /// Preflight rejects missing/extra/mismatched sessions before any mutation.
-    /// Retained workers keep their PCM receiver, clock and volume handle.
-    ///
-    /// This is not rollback-atomic: cancellation during bounded teardown can
-    /// leave a partial selection. The owner must serialize requests, inspect
-    /// live state and publish confirmed topology, never optimistically copy the
-    /// requested list into MRP. Dropped unused prepared sessions close normally.
-    pub async fn apply_selection(
-        &mut self,
-        catalog: &coordinator::outputs::OutputCatalog,
-        selected: &[String],
-        prepared: Vec<(String, Session)>,
-    ) -> Result<SelectionResult> {
-        let plan = self.plan_selection(catalog, selected)?;
-        if prepared.len() != plan.adding.len() {
-            bail!("prepared sessions do not match selection additions");
-        }
-        let mut sessions = BTreeMap::new();
-        for (uid, session) in prepared {
-            if !plan
-                .adding
-                .iter()
-                .any(|r| r.uid == uid && r.address == session.endpoint())
-                || sessions.insert(uid, session).is_some()
-            {
-                bail!("duplicate or mismatched prepared session");
-            }
-        }
-        let mut result = SelectionResult {
-            requested: plan.selected,
-            started: Vec::new(),
-            removed: Vec::new(),
-            start_errors: Vec::new(),
-        };
-        // Remove conflicting endpoints before starting replacements. A failed
-        // worker's cleanup can fail too; record it without blocking recovery.
-        for receiver in plan.removing {
-            let removed = self.remove(&receiver.uid).await;
-            result.removed.push((receiver.uid, removed));
-        }
-        for (uid, session) in sessions {
-            match self.add(&uid, session) {
-                Ok(handle) => result.started.push((uid, handle)),
-                Err(error) => result.start_errors.push((uid, error)),
-            }
-        }
-        Ok(result)
     }
 
     /// Accept a prepared session without resetting existing targets or media clock.
@@ -481,46 +346,6 @@ mod tests {
         }).unwrap()
     }
     #[tokio::test]
-    async fn logical_group_batch_expands_rows_and_rejects_conflicting_overlap() {
-        use coordinator::outputs::{OutputCatalog, OutputRoute, ReceiverEndpoint};
-        let (_source, packets) = broadcast::channel(16);
-        let mut pool = SessionPool::new(packets);
-        let (events, _received) = mpsc::unbounded_channel();
-        let a = add(&mut pool, "a", 7001, events.clone());
-        let b = add(&mut pool, "b", 7002, events);
-        let peer = |id: &str, port| ReceiverEndpoint {
-            uid: id.into(),
-            address: ([127, 0, 0, 1], port).into(),
-        };
-        let route = |id: &str, receivers| OutputRoute {
-            uid: id.into(),
-            name: id.into(),
-            model: "".into(),
-            aliases: vec![],
-            receivers,
-        };
-        let catalog = OutputCatalog::new(vec![
-            route("pair", vec![peer("a", 7001), peer("b", 7002)]),
-            route("one", vec![peer("a", 7001)]),
-        ])
-        .unwrap();
-        let gain = Volume::normalized(0.2).unwrap();
-        pool.set_route_volumes(&catalog, &[("pair".into(), gain)])
-            .unwrap();
-        assert_eq!(a.requested_volume(), gain);
-        assert_eq!(b.requested_volume(), gain);
-        assert!(
-            pool.set_route_volumes(
-                &catalog,
-                &[("pair".into(), Volume::MUTE), ("one".into(), gain)]
-            )
-            .is_err()
-        );
-        assert_eq!(a.requested_volume(), gain);
-        assert_eq!(b.requested_volume(), gain);
-        pool.shutdown().await;
-    }
-    #[tokio::test]
     async fn ptp_reconciliation_rejects_running_ntp_workers_and_accepts_empty_pool() {
         let (_source, packets) = broadcast::channel(4);
         let mut pool = SessionPool::new(packets);
@@ -563,146 +388,6 @@ mod tests {
             pool.set_member_volumes(&[("a".into(), Volume::MUTE), ("a".into(), Volume::MUTE)])
                 .is_err()
         );
-        pool.shutdown().await;
-    }
-    #[tokio::test]
-    async fn route_volume_is_independent_and_missing_member_fails_preflight() {
-        use coordinator::outputs::{OutputCatalog, OutputRoute, ReceiverEndpoint};
-        let (_audio, packets) = broadcast::channel(16);
-        let mut pool = SessionPool::new(packets);
-        let (events, _received) = mpsc::unbounded_channel();
-        let a = add(&mut pool, "a", 7001, events.clone());
-        let b = add(&mut pool, "b", 7002, events);
-        let peer = |uid: &str, port| ReceiverEndpoint {
-            uid: uid.into(),
-            address: ([127, 0, 0, 1], port).into(),
-        };
-        let route = |uid: &str, receivers| OutputRoute {
-            uid: uid.into(),
-            name: uid.into(),
-            model: "".into(),
-            aliases: vec![],
-            receivers,
-        };
-        let catalog = OutputCatalog::new(vec![
-            route("one", vec![peer("a", 7001)]),
-            route("pair", vec![peer("a", 7001), peer("missing", 7003)]),
-        ])
-        .unwrap();
-        let initial = b.requested_volume();
-        let gain = Volume::normalized(0.3).unwrap();
-        pool.set_route_volume(&catalog, "one", gain).unwrap();
-        assert_eq!(a.requested_volume(), gain);
-        assert_eq!(b.requested_volume(), initial);
-        assert!(
-            pool.set_route_volume(&catalog, "pair", Volume::MUTE)
-                .is_err()
-        );
-        assert_eq!(a.requested_volume(), gain);
-        assert_eq!(b.requested_volume(), initial);
-        pool.shutdown().await;
-    }
-    #[tokio::test]
-    async fn apply_selection_preflights_before_removal_and_keeps_surviving_worker() {
-        use coordinator::outputs::{OutputCatalog, OutputRoute, ReceiverEndpoint};
-        let (audio, packets) = broadcast::channel(16);
-        let mut pool = SessionPool::new(packets);
-        let (events, mut received) = mpsc::unbounded_channel();
-        let live = add(&mut pool, "a", 7001, events.clone());
-        let removed = add(&mut pool, "b", 7002, events);
-        let route = |id: &str, member: &str, port| OutputRoute {
-            uid: id.into(),
-            name: id.into(),
-            model: "".into(),
-            aliases: vec![],
-            receivers: vec![ReceiverEndpoint {
-                uid: member.into(),
-                address: ([127, 0, 0, 1], port).into(),
-            }],
-        };
-        let catalog =
-            OutputCatalog::new(vec![route("keep", "a", 7001), route("new", "c", 7003)]).unwrap();
-        // Missing authenticated addition must not remove either old worker.
-        assert!(
-            pool.apply_selection(&catalog, &["keep".into(), "new".into()], vec![])
-                .await
-                .is_err()
-        );
-        assert_eq!(pool.len(), 2);
-        assert_eq!(*removed.state.borrow(), SessionState::Running);
-        let result = pool
-            .apply_selection(&catalog, &["keep".into()], vec![])
-            .await
-            .unwrap();
-        assert_eq!(result.removed.len(), 1);
-        assert_eq!(result.removed[0].0, "b");
-        assert!(result.started.is_empty() && result.start_errors.is_empty());
-        assert_eq!(*removed.state.borrow(), SessionState::Ended);
-        audio
-            .send(Arc::new(
-                MediaClock::now().packet(352, &[0; PACKET_BYTES]).unwrap(),
-            ))
-            .unwrap();
-        assert_eq!(received.recv().await.unwrap(), ("a".into(), 352));
-        assert_eq!(*live.state.borrow(), SessionState::Running);
-        let result = pool.apply_selection(&catalog, &[], vec![]).await.unwrap();
-        assert_eq!(result.removed.len(), 1);
-        assert!(pool.is_empty());
-    }
-    #[tokio::test]
-    async fn selection_plan_retains_live_worker_but_replaces_completed_worker() {
-        use coordinator::outputs::{OutputCatalog, OutputRoute, ReceiverEndpoint};
-        let (_audio, packets) = broadcast::channel(16);
-        let mut pool = SessionPool::new(packets);
-        let (events, _received) = mpsc::unbounded_channel();
-        let live = add(&mut pool, "a", 7001, events);
-        let mut ended = pool
-            .launch(
-                "b",
-                ([127, 0, 0, 1], 7002).into(),
-                Volume::MUTE,
-                Duration::from_secs(1),
-                |_, _, _, _| async { Ok(StreamStats::default()) },
-            )
-            .unwrap();
-        while *ended.state.borrow_and_update() == SessionState::Running {
-            ended.state.changed().await.unwrap();
-        }
-        let catalog = OutputCatalog::new(vec![OutputRoute {
-            uid: "pair".into(),
-            name: "pair".into(),
-            model: "".into(),
-            aliases: vec![],
-            receivers: vec![
-                ReceiverEndpoint {
-                    uid: "a".into(),
-                    address: ([127, 0, 0, 1], 7001).into(),
-                },
-                ReceiverEndpoint {
-                    uid: "b".into(),
-                    address: ([127, 0, 0, 1], 7002).into(),
-                },
-            ],
-        }])
-        .unwrap();
-        let plan = pool.plan_selection(&catalog, &["pair".into()]).unwrap();
-        assert_eq!(
-            plan.retained
-                .iter()
-                .map(|r| r.uid.as_str())
-                .collect::<Vec<_>>(),
-            vec!["a"]
-        );
-        assert_eq!(
-            plan.adding
-                .iter()
-                .map(|r| r.uid.as_str())
-                .collect::<Vec<_>>(),
-            vec!["b"]
-        );
-        assert_eq!(plan.removing, plan.adding);
-        assert_eq!(pool.len(), 2);
-        assert_eq!(*live.state.borrow(), SessionState::Running);
         pool.shutdown().await;
     }
     #[tokio::test]
@@ -805,6 +490,14 @@ mod tests {
         let mut pool = SessionPool::new(packets);
         let (events, mut received) = mpsc::unbounded_channel();
         let first = add(&mut pool, "a", 7001, events.clone());
+        assert_eq!(
+            pool.members(),
+            vec![PhysicalMember {
+                uid: "a".into(),
+                address: ([127, 0, 0, 1], 7001).into(),
+                running: true,
+            }]
+        );
         let clock = MediaClock::now();
         audio
             .send(Arc::new(clock.packet(0, &[0; PACKET_BYTES]).unwrap()))

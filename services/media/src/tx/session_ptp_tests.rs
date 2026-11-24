@@ -136,6 +136,13 @@ async fn ptp_negotiates_setpeers_sends_d7_and_rejects_ntp_downgrade() {
                         assert_eq!(peers.as_array().unwrap().len(), 2);
                         tokio::time::sleep(Duration::from_millis(300)).await;
                     }
+                    6 => {
+                        assert_eq!(request.method, "SETPEERS");
+                        let peers =
+                            plist::Value::from_reader(std::io::Cursor::new(&request.body)).unwrap();
+                        assert_eq!(peers.as_array().unwrap().len(), 1);
+                        assert_eq!(peers.as_array().unwrap()[0].as_string(), Some("127.0.0.1"));
+                    }
                     _ => panic!("unexpected request: {}", request.method),
                 }
                 stage += 1;
@@ -143,7 +150,7 @@ async fn ptp_negotiates_setpeers_sends_d7_and_rejects_ntp_downgrade() {
                 response.encode(&mut bytes);
                 conn.send(&bytes).await.unwrap();
             }
-            assert_eq!(stage, if accept { 6 } else { 1 });
+            assert_eq!(stage, if accept { 7 } else { 1 });
             if accept {
                 let mut bytes = [0; 2048];
                 let (size, _) = control.recv_from(&mut bytes).await.unwrap();
@@ -167,6 +174,15 @@ async fn ptp_negotiates_setpeers_sends_d7_and_rejects_ntp_downgrade() {
                 assert_eq!(
                     u32::from_be_bytes(bytes[4..8].try_into().unwrap()),
                     first_time.wrapping_add(352)
+                );
+                data.recv_from(&mut bytes).await.unwrap();
+                assert_eq!(
+                    u16::from_be_bytes(bytes[2..4].try_into().unwrap()),
+                    first_seq.wrapping_add(2)
+                );
+                assert_eq!(
+                    u32::from_be_bytes(bytes[4..8].try_into().unwrap()),
+                    first_time.wrapping_add(704)
                 );
             }
         });
@@ -249,6 +265,8 @@ async fn ptp_negotiates_setpeers_sends_d7_and_rejects_ntp_downgrade() {
                 .unwrap();
             assert_eq!(applied.borrow().addresses().len(), 2);
             applied.borrow_and_update();
+            // Reordered/duplicate discovery addresses must not trigger another
+            // RTSP operation or reset RTP state.
             peers
                 .set_peers(&[
                     "192.0.2.2".parse().unwrap(),
@@ -256,12 +274,39 @@ async fn ptp_negotiates_setpeers_sends_d7_and_rejects_ntp_downgrade() {
                     "192.0.2.2".parse().unwrap(),
                 ])
                 .unwrap();
-            // The mock rejects any extra SETPEERS: reordered/duplicate discovery
-            // addresses must not trigger another RTSP operation or RTP reset.
+            peers.set_peers(&["127.0.0.1".parse().unwrap()]).unwrap();
+            timeout(Duration::from_secs(1), applied.changed())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(applied.borrow().addresses().len(), 1);
+            applied.borrow_and_update();
+            let frame = clock
+                .packet_with_ptp(704, &[0; PACKET_BYTES], domain, |_| {
+                    Ok(domain.reading(7_015_963_718))
+                })
+                .unwrap();
+            audio.send(Arc::new(frame)).unwrap();
+            timeout(Duration::from_millis(150), async {
+                loop {
+                    if observed
+                        .borrow_and_update()
+                        .as_ref()
+                        .is_some_and(|p| p.packets_sent >= 3)
+                    {
+                        break;
+                    }
+                    observed.changed().await.unwrap();
+                }
+            })
+            .await
+            .unwrap();
+            // A duplicate update is a no-op; the removed peer does not return.
+            peers.set_peers(&["127.0.0.1".parse().unwrap()]).unwrap();
             drop(audio);
             let mut ended = timeout(Duration::from_secs(3), pool.drain()).await.unwrap();
             let stats = ended.pop().unwrap().1.unwrap();
-            assert_eq!(stats.packets_sent, 2);
+            assert_eq!(stats.packets_sent, 3);
             assert!(pool.sync_ptp_members().unwrap().is_empty());
         } else {
             assert!(session.err().unwrap().to_string().contains("PTP timing"));

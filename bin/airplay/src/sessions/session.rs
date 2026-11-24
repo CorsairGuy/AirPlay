@@ -15,6 +15,8 @@ use rtsp::{Request, Response};
 use tracing::{debug, info, warn};
 
 use crate::media::rx::{Media, Player};
+#[cfg(feature = "hls")]
+use crate::sessions::serve::HlsOptions;
 
 const PUBLIC: &str = "ANNOUNCE, SETUP, RECORD, PAUSE, FLUSH, TEARDOWN, OPTIONS, GET_PARAMETER, SET_PARAMETER, POST, GET";
 pub(crate) const BPLIST: &str = "application/x-apple-binary-plist";
@@ -36,6 +38,9 @@ pub struct Context {
     /// Зеркалирование экрана: куда отдавать видео.
     #[cfg(feature = "mirroring")]
     pub mirror: Option<mirror::VideoSinkFactory>,
+    /// URL-cast output; only configured by hosts with a video renderer.
+    #[cfg(feature = "hls")]
+    pub hls: Option<HlsOptions>,
     /// Команды отправителю.
     pub remote: crate::remote::Remote,
     /// Кто разбирает канал потока 130; `None` — поток только регистрируется.
@@ -390,6 +395,8 @@ mod tests {
             port: 7000,
             #[cfg(feature = "mirroring")]
             mirror: None,
+            #[cfg(feature = "hls")]
+            hls: None,
             remote: Default::default(),
             mrp: None,
             session_group: Default::default(),

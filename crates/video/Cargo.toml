@@ -1,6 +1,6 @@
 [package]
 name = "video"
-description = "Видео зеркалирования: декодер на libavcodec и выдача кадров по часам отправителя. Показ — в программе, которая встраивает приёмник."
+description = "Декодирование видео на libavcodec и выдача кадров в подключаемый FrameSink."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -15,6 +15,7 @@ workspace = true
 clock.workspace = true
 codec.workspace = true
 mirror.workspace = true
+ffmpeg-next = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 tracing.workspace = true
 
@@ -24,4 +25,4 @@ tokio.workspace = true
 [features]
 # Декодирование H.264/H.265 через libavcodec. Без неё остаётся только
 # планировщик показа [`Pacer`].
-ffmpeg = ["codec/ffmpeg", "dep:tokio"]
+ffmpeg = ["codec/ffmpeg", "dep:ffmpeg-next", "dep:tokio"]

@@ -194,3 +194,10 @@ Unified manual acceptance now lives in TESTING.md; historical hardware results
 are not carried over to a new core installation. The13November run identified
 initial AirPlay LED, volume feedback, wrong Bluetooth command routing, group
 button label and content interruption during Alice listening as separate defects.
+
+2026-11-24 continuous source boundary: added offline tests for a caller-owned
+bounded `AsyncRead` acquisition future and PTP peer-list shrink while an existing
+session continues RTP/frame-index progression. The separate existing two-session
+control-failure loopback covers one receiver failing while its survivor remains
+active. Rust tooling is unavailable in this worktree, so these new tests were
+not executed here; none of these checks represents device/group adoption.

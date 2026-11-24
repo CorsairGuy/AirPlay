@@ -1,6 +1,6 @@
 //! Discovery event stream -> validated catalog watch, without sender restarts.
 use crate::catalog;
-use ::coordinator::outputs::OutputCatalog;
+use crate::snapshot::OutputCatalog;
 use mdns::discovery::{Browser, Kind, ResolvedService, ServiceEvent, ServiceTable};
 use std::{net::SocketAddr, sync::Arc};
 use tokio::sync::{mpsc, watch};

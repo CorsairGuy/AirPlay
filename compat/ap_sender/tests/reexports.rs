@@ -10,6 +10,6 @@ fn legacy_sender_package_reexports_the_same_type() {
     );
     assert_eq!(
         std::any::TypeId::of::<ap_sender::outputs::OutputCatalog>(),
-        std::any::TypeId::of::<coordinator::outputs::OutputCatalog>()
+        std::any::TypeId::of::<discovery::catalog::OutputCatalog>()
     );
 }

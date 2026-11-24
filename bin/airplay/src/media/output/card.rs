@@ -5,7 +5,7 @@
 //! supplies observed volume, or authorizes inventing group/cluster descriptors.
 //! The host must obtain those independently before calling this function and
 //! publishing its result through Card::set_outputs. This module starts no task.
-use ::coordinator::outputs::OutputCatalog;
+use ::discovery::catalog::OutputCatalog;
 use anyhow::{Context, Result, bail};
 use mrp::{schema::field::AVOutputDeviceDescriptor as fields, wire::Node};
 use std::collections::{BTreeMap, BTreeSet};
@@ -85,7 +85,7 @@ pub fn project(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ::coordinator::outputs::{OutputRoute, ReceiverEndpoint};
+    use ::discovery::catalog::{OutputRoute, ReceiverEndpoint};
 
     fn catalog() -> OutputCatalog {
         OutputCatalog::new(

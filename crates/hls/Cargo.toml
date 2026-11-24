@@ -1,6 +1,6 @@
 [package]
 name = "hls"
-description = "Видео по HLS: /play, /scrub, /rate, плейлисты, FCUP."
+description = "Ограниченная загрузка и воспроизведение HLS VOD в подключаемый видеовыход."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,3 +10,13 @@ publish = false
 
 [lints]
 workspace = true
+
+[dependencies]
+reqwest.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+ffmpeg-next = { workspace = true, optional = true }
+video = { workspace = true, optional = true }
+
+[features]
+ffmpeg = ["dep:ffmpeg-next", "dep:video", "video/ffmpeg"]

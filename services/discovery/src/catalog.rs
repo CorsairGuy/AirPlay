@@ -1,6 +1,6 @@
 //! Station's capability/declared-group discovery rules, without model filters.
 //! Admission is not proof of AP2 realtime compatibility or group adoption.
-use ::coordinator::outputs::{OutputCatalog, OutputRoute, ReceiverEndpoint};
+pub use crate::snapshot::{OutputCatalog, OutputRoute, ReceiverEndpoint};
 use anyhow::{Result, bail};
 use std::{
     collections::{BTreeMap, BTreeSet},

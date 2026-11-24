@@ -4,7 +4,7 @@
 
 Пакеты библиотек переименованы без `ap_`; передающий транспорт находится в `services/media/src/tx`. Внутренний код использует новые пути компонентов. Для существующих потребителей добавлены переходные пакеты `ap_sender` и `ap_mrp`, которые только реэкспортируют `media::tx` и `mrp`, без собственной реализации. Адаптер Станции закреплён за прежним коммитом и не обновлялся; его NQPTP-интеграция в этом дереве ядра удалена, поэтому переход потребует адаптации; остальные старые имена Cargo-пакетов не являются совместимыми алиасами.
 
-В приложении существующий код физически сгруппирован по областям `discovery`, `sessions`, `identity`, `coordinator`, `remote` и `media::{rx,tx,output}`; `timesync` остаётся общей библиотекой. Внутренние вызовы используют новые пути; старые пути модулей сохранены внешними реэкспортами. Модель группы, список выходов и групповая громкость вынесены в библиотеку `coordinator`; `media::tx` владеет транспортом и пулом передающих сессий. Это перенос имеющегося кода, а не создание отдельных процессов. Пакеты `discovery`, `identity`, `sessions`, `media`, `remote`, `coordinator`, `timesync` размещены в `services`. Медиа-события, управление локальным выводом и процессом источника вынесены из бинарной библиотеки в `services/media`. Приёмная RTSP-сессия, медиаприём, координатор runtime и часть MRP runtime пока остаются в бинарной библиотеке; их дальнейшее извлечение требует разорвать циклические зависимости. Консолидация альтернативной реализации MRP `services/remote` и дальнейшее разделение ответственности остаются отдельной работой.
+В приложении существующий код физически сгруппирован по областям `discovery`, `sessions`, `identity`, `coordinator`, `remote` и `media::{rx,tx,output}`; `timesync` остаётся общей библиотекой. Внутренние вызовы используют новые пути; прежние пути модулей сохраняются реэкспортами там, где это не нарушает dependency DAG. `discovery` владеет валидированным snapshot устройств/групп и физических адресов; `coordinator` владеет моделями групп, пользовательским выбором, resolver и protocol-neutral runtime policy. `media::tx` владеет только транспортом и физическими передающими сессиями. Это перенос имеющегося кода, а не создание отдельных процессов. Пакеты `discovery`, `identity`, `sessions`, `media`, `remote`, `coordinator`, `timesync` размещены в `services`. Медиа-события, управление локальным выводом и процессом источника вынесены из бинарной библиотеки в `services/media`. MRP output-context разбирается в компоненте `remote` и переводится в типизированный запрос coordinator. `bin/airplay` остаётся host adapter для async request loop, request-scoped authorization, `SessionPreparer` и физического media backend; coordinator принимает `PhysicalSessionBackend`, не импортируя media/session реализации. Discovery реализует read-only `OutputSnapshot` из coordinator; coordinator не ссылается обратно на discovery, поэтому граф не цикличен. Каталог переэкспортируется переходным пакетом `ap_sender::outputs`, но путь `coordinator::outputs::OutputCatalog` удалён вместе с владением каталога. Приёмная RTSP-сессия, медиаприём и часть MRP runtime также остаются в бинарной библиотеке. Консолидация альтернативной реализации MRP `services/remote` остаётся отдельной работой.
 
 NQPTP-специфичные reader/control/ABI-адаптеры удалены из ядра; собственный timesync сохраняется, его полная совместимость с PTP-профилями AirPlay ещё требует подтверждения.
 
@@ -80,7 +80,7 @@ reference/ — архив, не активные workspace members; чужие �
 | Companion Link | самостоятельный control protocol | ap_companion; общий crypto/pairing/command/event model; OPACK — его data codec, не OS service |
 | DACP | reverse-control protocol | remote::dacp, shared HTTP/transport; не заменять его MRP и не обобщать «DACP только AP1» |
 | DMAP | tagged metadata format | один metadata codec, сейчас events::Metadata::from_dmap; не новая сетевая служба |
-| HLS/URL casting | медиа delivery profile | ap_hls после реализации + sessions/media; capabilities объявлять по фактической готовности |
+| HLS/URL casting | медиа delivery profile | opt-in `hls` принимает V1 `/play` и V2 `NTP SETUP`→`RECORD`→`/play`→`/rate?value=1`, декодирует конечный HTTP(S) VOD в `FrameSink`; пауза, seek, live, аудио и capability bits пока не реализованы |
 | MLP1 / local IPC | внутренние контракты | один encoder/decoder и version contract; не протокол Apple и не отдельный AirPlay stack |
 
 ## Подтверждённые дубли и места консолидации
@@ -140,8 +140,11 @@ pair::hap обеих сторон использует единый crypto::srp 
 5. Переименования runtime-пакетов и переносы из bin — отдельными move-коммитами с
    compatibility aliases, audio-only tree check и проверкой Station core pin/lock/package.
 6. Companion реализуется в единственном существующем ap_companion, с общими pairing/crypto;
-   coordinator не требует нового протокола. HLS/capture/IPC placeholders реализовывать
-   только при старте соответствующих фаз, не рекламировать готовыми.
+   coordinator не требует нового протокола. HLS сейчас имеет ограниченный
+   HTTP(S) VOD-to-`FrameSink` pipeline с opt-in V1/V2 start/stop routes;
+   HLS live/audio, pause/seek и capability advertisement не готовы. Capture/IPC
+   остаются placeholders. Ни один
+   из этих компонентов не рекламировать готовым без сквозной реализации.
 7. По каждому profile фиксировать: enabled components, actual processes/binaries, listeners,
    physical-clock owner и failure ownership. Не поддерживать фиксированную рекламную цифру служб.
 
@@ -161,7 +164,7 @@ pair::hap обеих сторон использует единый crypto::srp 
 | crates/crypto | ap_crypto | 7 | 573 | есть код; полнота см. STATUS |
 | crates/device | ap_device | 1 | 323 | есть код; полнота см. STATUS |
 | crates/fairplay | ap_fairplay | 4 | 6610 | есть код; полнота см. STATUS |
-| crates/hls | ap_hls | 1 | 0 | заглушка |
+| crates/hls | ap_hls | 1 | 0 | bounded HTTP(S) VOD-to-FrameSink pipeline; AirPlay integration is opt-in in `airplay` |
 | crates/ipc | ap_ipc | 1 | 0 | заглушка |
 | crates/mdns | ap_mdns | 2 | 216 | есть код; полнота см. STATUS |
 | crates/mirror | ap_mirror | 2 | 312 | есть код; полнота см. STATUS |

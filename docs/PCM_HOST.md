@@ -6,6 +6,8 @@ RawPcmSource содержит reader, явную media epoch, latency250мс..10
 
 read_pcm хранит один частичный пакет352фрейма, сохраняет границы при дробном чтении и смене control revision. Frame-aligned последний хвост дополняется нулями; оборванный стереофрейм — ошибка. Между треками владелец сохраняет reader открытым; EOF означает окончательное завершение источника. Backpressure ограничен ёмкостью канала и отменяется stop.
 
+`continuous_source::bounded_reader` предоставляет frontend-у эту границу как bounded receiver плюс принадлежащий вызывающему acquisition future. Future не запускается в фоне и должна быть ожидаема вместе с pipeline; ёмкость ограничена1..512. Reader уже должен представлять нужный PCM формат.
+
 SourceFrame::guarded фиксирует revision при получении PCM. Pump отвергает другой control channel и отбрасывает устаревшую очередь даже при coalesced Pause→Play без смены generation. SourceFrame::new оставляет адаптеру управление собственной очередью. Struct literals заменены конструкторами: это изменение Rust API до миграции адаптера.
 
 Guard относится к кадрам, уже принятым этим API. Он не определяет возраст байтов, оставшихся внутри upstream tap/pipe, и не отзывает уже переданные hardware/receiver buffers. Адаптер отдельно согласует source events, буферы tap и фактическую смену контента.

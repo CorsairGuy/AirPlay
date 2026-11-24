@@ -2,7 +2,7 @@
 
 Экспериментальное универсальное ядро AirPlay на Rust: приём аудио, AP2 realtime PCM-отправитель, timing, MediaRemote и отдельные video/mirroring-компоненты. Это набор реализованных профилей с ограничениями, а не полная замена HomePod или обещание производительности на любом железе.
 
-Актуально13ноября2026: [состояние реализации](docs/STATUS.md), [архитектура](docs/ARCHITECTURE.md), [протокол](docs/PROTOCOL.md), [проверки](docs/VALIDATION.md).
+Актуально24ноября2026: [состояние реализации](docs/STATUS.md), [архитектура](docs/ARCHITECTURE.md), [протокол](docs/PROTOCOL.md), [проверки](docs/VALIDATION.md).
 
 ## Структура
 
@@ -10,15 +10,15 @@
 | --- | --- | --- |
 | `bin/airplay` | `airplay` | демон (`airplay`) и утилита управления (`airplay status`, `list`, `send`…) в одном бинарнике |
 | `services/timesync` | `timesync` | единые часы PTP/NTP |
-| `services/media` | `media` | медиаинтерфейсы и реализация передающего транспорта |
+| `services/media` | `media` | медиаинтерфейсы и физические передающие сессии |
 | `services/remote` | `remote` | MRP-модель, обработка сообщений и альтернативный сервер |
 | `crates/<имя>` | `<имя>` | библиотеки протоколов и медиа |
 | `services/sessions` | `sessions` | подготовка сессий и политика авторизации |
-| `services/discovery` | `discovery` | обнаружение и каталог устройств |
+| `services/discovery` | `discovery` | обнаружение и валидированный snapshot устройств/групп |
 | `services/identity` | `identity` | идентичность, доверие и данные сопряжений |
-| `services/coordinator` | `coordinator` | состояние групп, выбор выходов и громкость |
+| `services/coordinator` | `coordinator` | состояние групп, выбор и разрешение логических выходов, runtime policy |
 
-Имена библиотек совпадают с импортами: `use rtsp::…`. По умолчанию один процесс `airplay`; каталоги services не означают отдельные демоны. Companion пока заглушка; Coordinator — библиотечная модель. Целевая схема и обнаруженные дубли: [компоненты и имена](docs/COMPONENTS-AND-NAMING.md).
+Имена библиотек совпадают с импортами: `use rtsp::…`. По умолчанию один процесс `airplay`; каталоги services не означают отдельные демоны. Discovery владеет snapshot; coordinator разрешает логический выбор в физические операции через интерфейс, а media не знает каталогов и алиасов. Приложение соединяет runtime с авторизацией и подготовкой сессий. Целевая схема и обнаруженные дубли: [компоненты и имена](docs/COMPONENTS-AND-NAMING.md).
 
 Библиотеки: `base`, `rtsp`, `pair`, `crypto`, `fairplay`, `mdns`, `device`, `clock`, `rtp`, `sender`, `audio_stream`, `mirror`, `hls`, `mrp`, `companion`, `codec`, `audio`, `video`, `capture`, `ipc`.
 

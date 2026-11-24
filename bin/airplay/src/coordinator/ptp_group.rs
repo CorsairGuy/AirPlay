@@ -3,7 +3,7 @@ use crate::{
     coordinator::output_control::OutputRequest,
     coordinator::output_worker::{self, SessionPreparer},
 };
-use ::coordinator::outputs::{OutputCatalog, ReceiverEndpoint};
+use ::discovery::catalog::{OutputCatalog, ReceiverEndpoint};
 use ::media::tx::{AudioPacket, MediaClock, Session, pool::SessionPool};
 use anyhow::{Result, bail};
 use std::sync::{Arc, Weak};
@@ -1328,7 +1328,7 @@ mod tests {
             let local_audio = pcm.subscribe();
             pcm.send(packet.clone()).unwrap();
             let (control, requests) = crate::coordinator::output_control::OutputControl::channel(4);
-            let catalog = OutputCatalog::new(vec![::coordinator::outputs::OutputRoute {
+            let catalog = OutputCatalog::new(vec![::discovery::catalog::OutputRoute {
                 uid: "row".into(),
                 name: "speaker".into(),
                 model: String::new(),
@@ -1464,7 +1464,7 @@ mod tests {
         let mut renderer_stop = group.stop();
         let (_pcm, audio) = tokio::sync::broadcast::channel(4);
         let (control, requests) = crate::coordinator::output_control::OutputControl::channel(4);
-        let catalog = OutputCatalog::new(vec![::coordinator::outputs::OutputRoute {
+        let catalog = OutputCatalog::new(vec![::discovery::catalog::OutputRoute {
             uid: "row".into(),
             name: "speaker".into(),
             model: String::new(),

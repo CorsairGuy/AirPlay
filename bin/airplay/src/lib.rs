@@ -47,4 +47,5 @@ pub use mirror;
 #[cfg(feature = "mirroring")]
 pub use video;
 
+pub use hls;
 pub use timesync;

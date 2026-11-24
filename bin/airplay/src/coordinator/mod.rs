@@ -1,5 +1,5 @@
 //! Group selection and coordination using the existing runtime.
-pub mod output_control;
+pub use crate::remote::output_control;
 pub mod output_router;
 pub mod output_worker;
 pub mod ptp_group;

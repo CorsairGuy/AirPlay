@@ -137,6 +137,8 @@ fn parse_serve(args: &[String]) -> Result<serve::Options, String> {
         require_pin: false,
         #[cfg(feature = "mirroring")]
         mirror: None,
+        #[cfg(feature = "hls")]
+        hls: None,
         remote: Default::default(),
         mrp: serve::Mrp::Off,
         events: std::sync::Arc::new(media::events::NoEvents),

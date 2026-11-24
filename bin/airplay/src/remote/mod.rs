@@ -10,6 +10,8 @@
 
 #[macro_use]
 pub mod mrp_service;
+pub mod output_control;
+pub mod output_selection;
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};

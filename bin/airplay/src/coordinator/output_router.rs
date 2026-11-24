@@ -2,9 +2,9 @@
 //! Intent is never confirmed topology, audible readiness or pairing approval.
 use crate::{
     coordinator::output_control::{OutputControl, OutputRequest},
-    coordinator::relay_selection,
+    remote::output_selection,
 };
-use ::coordinator::outputs::OutputCatalog;
+use ::discovery::catalog::OutputCatalog;
 use anyhow::{Context, Result};
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
@@ -140,7 +140,7 @@ pub async fn run(
         let selection =
             request.volume.is_none() && request.batch.is_none() && request.operation.is_none();
         let revision = if selection {
-            let next = match relay_selection::selection(
+            let next = match output_selection::selection(
                 &request.body,
                 &catalog.borrow(),
                 &local_ids,

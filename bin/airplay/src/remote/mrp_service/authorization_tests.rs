@@ -1,6 +1,6 @@
 //! Full MRP selection/PIN/worker path. Loopback RTSP and null audio only.
 use super::*;
-use ::coordinator::outputs::{OutputCatalog, OutputRoute, ReceiverEndpoint};
+use ::discovery::catalog::{OutputCatalog, OutputRoute, ReceiverEndpoint};
 use ::media::tx::pool::SessionPool;
 use std::{
     sync::{Arc, Mutex},
@@ -342,6 +342,8 @@ fn receiver_context(require_pin: bool) -> Arc<crate::sessions::session::Context>
         port: 0,
         #[cfg(feature = "mirroring")]
         mirror: None,
+        #[cfg(feature = "hls")]
+        hls: None,
         remote: Default::default(),
         mrp: None,
         session_group: Default::default(),

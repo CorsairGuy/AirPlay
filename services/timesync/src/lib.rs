@@ -93,6 +93,7 @@ impl TimeSync {
 
     /// Explicit interface and one socket pair for combined RX/TX clock roles.
     pub async fn start_host(self_id: u64, ip: IpAddr) -> std::io::Result<Self> {
+        validate_host_ip(ip)?;
         let host = host::Host::bind(self_id, ip).await?;
         let mut this = Self::idle(self_id);
         this.host = Some(Arc::new(host));
@@ -231,6 +232,19 @@ impl TimeSync {
     }
 }
 
+fn validate_host_ip(ip: IpAddr) -> std::io::Result<()> {
+    if ip.is_unspecified()
+        || ip.is_multicast()
+        || matches!(ip, IpAddr::V4(address) if address.is_broadcast())
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "PTP host requires a specific unicast interface address",
+        ));
+    }
+    Ok(())
+}
+
 fn bind(addr: SocketAddr) -> std::io::Result<UdpSocket> {
     let s = std::net::UdpSocket::bind(addr)?;
     s.set_nonblocking(true)?;
@@ -246,6 +260,25 @@ impl clock::TimeSource for TimeSync {
 #[cfg(test)]
 mod ownership_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn host_rejects_non_unicast_bind_address_before_opening_sockets() {
+        for ip in [
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            IpAddr::V4(Ipv4Addr::BROADCAST),
+            IpAddr::V4(Ipv4Addr::new(239, 255, 0, 1)),
+        ] {
+            let error = match TimeSync::start_host(1, ip).await {
+                Ok(_) => panic!("invalid host address was accepted"),
+                Err(error) => error,
+            };
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+            assert_eq!(
+                error.to_string(),
+                "PTP host requires a specific unicast interface address"
+            );
+        }
+    }
 
     #[test]
     fn removing_one_session_keeps_the_other_peers_active() {

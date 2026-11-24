@@ -1,6 +1,6 @@
 # Архитектура ядра и перенос Станции
 
-Актуализировано12ноября2026. [Статус и проверки](STATUS.md).
+Актуализировано24ноября2026. [Статус и проверки](STATUS.md).
 
 ## Принятое устройство проекта
 
@@ -9,10 +9,33 @@
 | Слой | Ответственность |
 |---|---|
 | crates/pair, crypto, rtsp, rtp, mrp | Общие кодеки и протоколы; независимое состояние каждой сессии |
-| crates/clock, services/timesync | Общий источник времени, role/mapping; явно созданная Service, общие сокеты и union адресатов |
-| crates/sender | Экспериментальный AP2 realtime sender, PtpPlan, SessionPool, LocalSink; без Quasar/ALSA paths |
-| bin/airplay | Receiver/frontend, MRP card/backend, discovery feed, pairing store, output worker, PtpGroup |
+| services/timesync | Общий источник времени, role/mapping; явно созданная Service, общие сокеты и union адресатов |
+| services/media | Приём/передача, физические media sessions, PtpPlan, SessionPool и платформо-нейтральный `LocalSink`; без каталога/выбора выходов и Quasar/ALSA paths |
+| services/discovery | Browsing и валидированный snapshot устройств, логических групп и физических адресатов |
+| services/coordinator | Модели групп, пользовательский выбор, разрешение логических строк в физические операции и protocol-neutral runtime policy |
+| services/identity, sessions, remote | Доверие, подготовка сессий и протоколы управления |
+| bin/airplay | Frontend и композиция runtime: MRP адаптеры, авторизация и физическая SessionPool integration |
 | Репозиторий Станции | Glagol/Quasar, native PCM tap, BT/focus, ALSA маршруты, LED, supervisor, install и rollback |
+
+Локальный вывод не является отдельным core-сервисом: `media::tx::LocalSink` и `run_local`
+задают общий PCM/presentation-time контракт, необходимый для синхронного локального
+и сетевого воспроизведения. Перечисление устройств, драйверы и запуск конкретного
+backend-а принадлежат адаптеру приложения или устройства. `media::output::local_process`
+— узкий Linux process adapter, а не владелец устройств.
+
+Discovery публикует только последний валидный snapshot и не принимает пользовательский
+выбор, не аутентифицирует получателей и не запускает сессии. Coordinator получает
+snapshot через интерфейс `coordinator::outputs::OutputSnapshot`, применяет user intent и
+планирует additions/removals физических receiver sessions. `services/media` не знает
+логических строк, алиасов, каталогов или планов выбора: он добавляет, удаляет и сообщает
+состояние физических сессий. Приложение остаётся host adapter для async MRP request loop,
+PIN authorization и `SessionPreparer`; политика выбора, подтверждённое состояние и перевод
+логических выходов в физический план размещены в `services/coordinator`. Направление
+зависимостей — discovery → coordinator contract, media → общие group primitives; coordinator
+не зависит от discovery/media/sessions, поэтому циклической зависимости нет.
+`Runtime::apply_plan` принимает host-адаптер `PhysicalSessionBackend`: coordinator
+проверяет подготовленные endpoints, сериализует замену и фиксирует desired state,
+не импортируя `SessionPool`, `Session` или типы авторизации.
 
 ## Исходящий групповой путь
 

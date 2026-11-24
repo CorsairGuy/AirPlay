@@ -33,6 +33,9 @@ pub struct Options {
     /// UxPlay, видео уходит в эту фабрику.
     #[cfg(feature = "mirroring")]
     pub mirror: Option<mirror::VideoSinkFactory>,
+    /// HLS VOD output; absent means URL casting is unavailable.
+    #[cfg(feature = "hls")]
+    pub hls: Option<HlsOptions>,
     /// Экран, который объявляем для зеркалирования.
     pub display: device::Display,
     /// Ручка команд отправителю (play/pause/next, громкость, перемотка).
@@ -49,6 +52,17 @@ pub struct Options {
     pub source_version: String,
     /// `deviceEnclosureColor` в `/info`.
     pub enclosure_color: Option<String>,
+}
+
+#[cfg(feature = "hls")]
+#[derive(Clone)]
+pub struct HlsOptions {
+    /// Variant bitrate ceiling; if none fits, the fetcher selects the lowest.
+    pub max_bandwidth: u64,
+    /// FFmpeg decoder selection and latency options.
+    pub decoder: video::VideoOptions,
+    /// Host-provided renderer for decoded frames.
+    pub sink: video::FrameSinkFactory,
 }
 
 /// MediaRemote: карточка «Сейчас играет» на iPhone.
@@ -177,6 +191,8 @@ pub async fn run(opts: Options) -> Result<()> {
         port: opts.port,
         #[cfg(feature = "mirroring")]
         mirror: opts.mirror,
+        #[cfg(feature = "hls")]
+        hls: opts.hls,
         remote: opts.remote,
         mrp,
         session_group: Default::default(),

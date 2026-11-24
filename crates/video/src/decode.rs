@@ -43,6 +43,22 @@ pub trait FrameSink: Send {
     fn end(&mut self) {}
 }
 
+type FrameSinkOpen = dyn Fn() -> Box<dyn FrameSink> + Send + Sync;
+
+/// Создаёт выход кадров для новой медиасессии.
+#[derive(Clone)]
+pub struct FrameSinkFactory(Arc<FrameSinkOpen>);
+
+impl FrameSinkFactory {
+    pub fn new(open: impl Fn() -> Box<dyn FrameSink> + Send + Sync + 'static) -> Self {
+        Self(Arc::new(open))
+    }
+
+    pub fn open(&self) -> Box<dyn FrameSink> {
+        (self.0)()
+    }
+}
+
 /// Ничего не показывает: чтобы мерить скорость декодера на железе.
 pub struct Discard;
 

@@ -27,6 +27,8 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use crate::remote::{self, Command, Remote};
+#[cfg(feature = "hls")]
+use crate::sessions::serve::HlsOptions;
 use crate::sessions::session::{BPLIST, Context, OCTETS};
 use ::media::events::{Events, Metadata, NoEvents, Progress};
 
@@ -223,6 +225,18 @@ pub struct Media {
     sender_addrs: Vec<IpAddr>,
     /// В сессии есть другие приёмники (мультирум).
     grouped: bool,
+    #[cfg(feature = "hls")]
+    hls: Option<HlsOptions>,
+    #[cfg(feature = "hls")]
+    hls_task: Option<JoinHandle<()>>,
+    #[cfg(feature = "hls")]
+    pending_hls: Option<hls::Url>,
+    #[cfg(feature = "hls")]
+    cast_v2: bool,
+    #[cfg(feature = "hls")]
+    hls_v2_setup: bool,
+    #[cfg(feature = "hls")]
+    hls_v2_recorded: bool,
 }
 
 impl Media {
@@ -252,6 +266,18 @@ impl Media {
             mrp: None,
             sender_addrs: vec![remote.to_canonical()],
             grouped: false,
+            #[cfg(feature = "hls")]
+            hls: ctx.hls.clone(),
+            #[cfg(feature = "hls")]
+            hls_task: None,
+            #[cfg(feature = "hls")]
+            pending_hls: None,
+            #[cfg(feature = "hls")]
+            cast_v2: false,
+            #[cfg(feature = "hls")]
+            hls_v2_setup: false,
+            #[cfg(feature = "hls")]
+            hls_v2_recorded: false,
         }
     }
 
@@ -275,8 +301,18 @@ impl Media {
                     Response::to(req, 400)
                 }
             },
-            ("SETUP", _) => self.setup(ctx, req),
+            ("SETUP", _) => {
+                #[cfg(feature = "hls")]
+                {
+                    self.cast_v2 = true;
+                }
+                self.setup(ctx, req)
+            }
             ("RECORD", _) => {
+                #[cfg(feature = "hls")]
+                {
+                    self.hls_v2_recorded = true;
+                }
                 let mut resp = ok();
                 resp.headers.insert("Audio-Latency", "0");
                 resp
@@ -317,6 +353,8 @@ impl Media {
                 ok().with_body("text/parameters", body)
             }
             ("TEARDOWN", _) => {
+                #[cfg(feature = "hls")]
+                self.stop_hls();
                 let streams_only = plist_dict(&req.body).is_some_and(|d| d.contains_key("streams"));
                 self.player.release(self.id);
                 if self.anchor.take().is_some_and(|a| a.playing) {
@@ -343,9 +381,149 @@ impl Media {
                 self.sender_command(req);
                 ok()
             }
+            #[cfg(feature = "hls")]
+            ("POST", "/play") => self.hls_play(req),
+            #[cfg(feature = "hls")]
+            ("POST", "/rate") => self.hls_rate(req),
+            #[cfg(feature = "hls")]
+            ("POST", "/stop") => {
+                self.stop_hls();
+                ok()
+            }
+            #[cfg(feature = "hls")]
+            ("POST", "/scrub") => Response::to(req, 501),
             ("POST", "/feedback") | ("POST", "/audioMode") => ok(),
             _ => return None,
         })
+    }
+
+    #[cfg(feature = "hls")]
+    fn hls_play(&mut self, req: &Request) -> Response {
+        let Some(options) = self.hls.clone() else {
+            return Response::to(req, 501);
+        };
+        if req.body.len() > 64 * 1024
+            || !req
+                .headers
+                .get("Content-Type")
+                .is_some_and(|value| value.to_ascii_lowercase().contains("apple-binary-plist"))
+            || req
+                .headers
+                .get("X-Apple-Session-ID")
+                .is_none_or(str::is_empty)
+        {
+            return Response::to(req, 400);
+        }
+        let Some(body) = plist_dict(&req.body) else {
+            return Response::to(req, 400);
+        };
+        let Some(uuid) = body.get("uuid").and_then(Value::as_string) else {
+            return Response::to(req, 400);
+        };
+        if uuid.is_empty() {
+            return Response::to(req, 400);
+        }
+        if body.get("clientProcName").and_then(Value::as_string) != Some("YouTube") {
+            return Response::to(req, 415);
+        }
+        let start = match body.get("Start-Position-Seconds") {
+            None => 0.0,
+            Some(value) => {
+                let Some(start) = value
+                    .as_real()
+                    .or_else(|| value.as_signed_integer().map(|number| number as f64))
+                    .or_else(|| value.as_unsigned_integer().map(|number| number as f64))
+                else {
+                    return Response::to(req, 400);
+                };
+                start
+            }
+        };
+        if !start.is_finite() || start < 0.0 {
+            return Response::to(req, 400);
+        }
+        if start > 0.0 {
+            return Response::to(req, 501);
+        }
+        let Some(location) = body.get("Content-Location").and_then(Value::as_string) else {
+            return Response::to(req, 400);
+        };
+        let url = match hls::Url::parse(location) {
+            Ok(url) => url,
+            Err(error) => {
+                warn!("HLS Content-Location: {error}");
+                return Response::to(req, 415);
+            }
+        };
+
+        if self.cast_v2 {
+            if !self.hls_v2_setup || !self.hls_v2_recorded {
+                return Response::to(req, 409);
+            }
+            self.stop_hls();
+            self.pending_hls = Some(url);
+            return Response::to(req, 200);
+        }
+        self.start_hls(req, options, url)
+    }
+
+    #[cfg(feature = "hls")]
+    fn hls_rate(&mut self, req: &Request) -> Response {
+        if !self.cast_v2 || !self.hls_v2_setup || !self.hls_v2_recorded {
+            return Response::to(req, 501);
+        }
+        let rate = req
+            .uri
+            .split_once('?')
+            .map(|(_, query)| query)
+            .into_iter()
+            .flat_map(|query| query.split('&'))
+            .find_map(|item| item.strip_prefix("value="))
+            .and_then(|value| value.parse::<f64>().ok());
+        if rate != Some(1.0) {
+            return Response::to(req, 501);
+        }
+        let Some(url) = self.pending_hls.take() else {
+            return Response::to(req, 409);
+        };
+        let Some(options) = self.hls.clone() else {
+            return Response::to(req, 501);
+        };
+        self.start_hls(req, options, url)
+    }
+
+    #[cfg(feature = "hls")]
+    fn start_hls(&mut self, req: &Request, options: HlsOptions, url: hls::Url) -> Response {
+        let fetcher = match hls::Fetcher::new() {
+            Ok(fetcher) => fetcher,
+            Err(error) => {
+                warn!("HLS client: {error}");
+                return Response::to(req, 500);
+            }
+        };
+        self.stop_hls();
+        self.hls_task = Some(tokio::spawn(async move {
+            if let Err(error) = fetcher
+                .play_vod(
+                    &url,
+                    options.max_bandwidth,
+                    options.decoder,
+                    options.sink.open(),
+                )
+                .await
+            {
+                warn!("HLS playback: {error}");
+            }
+        }));
+        Response::to(req, 200)
+    }
+
+    #[cfg(feature = "hls")]
+    fn stop_hls(&mut self) {
+        self.pending_hls = None;
+        if let Some(task) = self.hls_task.take() {
+            task.abort();
+        }
     }
 
     fn sender_command(&self, req: &Request) {
@@ -417,6 +595,10 @@ impl Media {
                 Ok((local, clock, task)) => {
                     self.tasks.push(task);
                     self.ntp = Some(clock);
+                    #[cfg(feature = "hls")]
+                    {
+                        self.hls_v2_setup = port != 0;
+                    }
                     d.insert("timingPort".into(), Value::Integer(local.into()));
                 }
                 Err(e) => warn!("NTP: {e}"),
@@ -823,6 +1005,8 @@ impl Media {
 /// Соединение RTSP закрылось — его звук тоже заканчивается.
 impl Drop for Media {
     fn drop(&mut self) {
+        #[cfg(feature = "hls")]
+        self.stop_hls();
         self.player.time.release_session_peers(self.id.into());
         self.player.release(self.id);
         self.player.forget_reported_state(self.id);

@@ -29,6 +29,7 @@ audio.workspace = true
 audio_stream.workspace = true
 mirror = { workspace = true, optional = true }
 video = { workspace = true, optional = true }
+hls = { workspace = true, optional = true }
 ipc.workspace = true
 timesync.workspace = true
 remote.workspace = true
@@ -49,6 +50,7 @@ default = ["mirroring"]
 mirroring = ["dep:mirror", "dep:video", "media/mirroring"]
 # Звук (AAC-ELD) и видео (H.264/H.265) зеркалирования через libavcodec.
 ffmpeg = ["codec/ffmpeg", "video?/ffmpeg"]
+hls = ["dep:hls", "dep:video", "hls/ffmpeg"]
 
 [lints]
 workspace = true

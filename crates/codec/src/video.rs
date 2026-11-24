@@ -58,19 +58,7 @@ impl VideoDecoder {
         })?;
         let mut ctx = ff::codec::Context::new_with_codec(found);
         crate::ff::set_extradata(&mut ctx, parameter_sets)?;
-        if opts.low_delay {
-            ctx.set_flags(ff::codec::Flags::LOW_DELAY);
-            ctx.set_threading(ff::threading::Config {
-                kind: ff::threading::Type::Slice,
-                ..Default::default()
-            });
-        } else {
-            // Потоки по кадрам: на четырёх ядрах ARM это и даёт 60 к/с.
-            ctx.set_threading(ff::threading::Config {
-                kind: ff::threading::Type::Frame,
-                ..Default::default()
-            });
-        }
+        configure_context(&mut ctx, opts);
         let dec = ctx
             .decoder()
             .open_as(found)
@@ -81,6 +69,33 @@ impl VideoDecoder {
             dec,
             frame: ff::frame::Video::empty(),
             name: found.name().to_owned(),
+        })
+    }
+
+    /// Создаёт декодер из параметров видеопотока, полученных demuxer-ом.
+    pub fn from_parameters(
+        parameters: ff::codec::Parameters,
+        opts: &VideoOptions,
+    ) -> Result<Self, Error> {
+        let init = |e: ff::Error| Error::Init(format!("libavcodec: {e}"));
+        crate::ff::init()?;
+        let mut ctx = ff::codec::Context::from_parameters(parameters).map_err(init)?;
+        configure_context(&mut ctx, opts);
+        let dec = if let Some(name) = &opts.decoder {
+            let found = ff::decoder::find_by_name(name)
+                .ok_or_else(|| Error::Init(format!("в libavcodec нет декодера {name}")))?;
+            ctx.decoder()
+                .open_as(found)
+                .map_err(init)?
+                .video()
+                .map_err(init)?
+        } else {
+            ctx.decoder().video().map_err(init)?
+        };
+        Ok(Self {
+            dec,
+            frame: ff::frame::Video::empty(),
+            name: opts.decoder.clone().unwrap_or_else(|| "auto".into()),
         })
     }
 
@@ -97,8 +112,21 @@ impl VideoDecoder {
         data: &[u8],
         out: &mut impl FnMut(Picture),
     ) -> Result<(), Error> {
+        self.decode_timed(Some(pts), None, data, out)
+    }
+
+    /// Декодирует пакет demuxer-а. `pts` и `dts` передаются декодеру без
+    /// пересчёта; caller задаёт единую временную шкалу, если она нужна.
+    pub fn decode_timed(
+        &mut self,
+        pts: Option<i64>,
+        dts: Option<i64>,
+        data: &[u8],
+        out: &mut impl FnMut(Picture),
+    ) -> Result<(), Error> {
         let mut packet = ff::Packet::copy(data);
-        packet.set_pts(Some(pts));
+        packet.set_pts(pts);
+        packet.set_dts(dts);
         let sent = self.dec.send_packet(&packet);
         // Очередь декодера полна: сначала забираем готовые кадры.
         self.drain(out);
@@ -127,6 +155,21 @@ impl VideoDecoder {
                 ff::frame::Video::empty(),
             )));
         }
+    }
+}
+
+fn configure_context(ctx: &mut ff::codec::Context, opts: &VideoOptions) {
+    if opts.low_delay {
+        ctx.set_flags(ff::codec::Flags::LOW_DELAY);
+        ctx.set_threading(ff::threading::Config {
+            kind: ff::threading::Type::Slice,
+            ..Default::default()
+        });
+    } else {
+        ctx.set_threading(ff::threading::Config {
+            kind: ff::threading::Type::Frame,
+            ..Default::default()
+        });
     }
 }
 
