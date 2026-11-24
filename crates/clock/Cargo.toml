@@ -1,5 +1,5 @@
 [package]
-name = "ap_clock"
+name = "clock"
 description = "Часы: PTP (профиль Apple), NTP AirPlay 1, якорь времени, фильтр смещения и частоты."
 version.workspace = true
 edition.workspace = true

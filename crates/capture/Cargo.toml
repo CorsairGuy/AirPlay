@@ -1,5 +1,5 @@
 [package]
-name = "ap_capture"
+name = "capture"
 description = "Захват экрана и системного звука для отправки."
 version.workspace = true
 edition.workspace = true

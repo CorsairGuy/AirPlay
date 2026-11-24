@@ -1,5 +1,5 @@
 [package]
-name = "ap_video"
+name = "video"
 description = "Видео зеркалирования: декодер на libavcodec и выдача кадров по часам отправителя. Показ — в программе, которая встраивает приёмник."
 version.workspace = true
 edition.workspace = true

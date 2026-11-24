@@ -710,7 +710,7 @@ mod tests {
         }));
         let mut c = Client::new(ctx);
 
-        // FairPlay: векторы из тестов ap_fairplay, ekey → 51e601d6...
+        // FairPlay: векторы из тестов fairplay, ekey → 51e601d6...
         let mut m1 = [0u8; 16];
         m1[4] = 3;
         m1[14] = 1;

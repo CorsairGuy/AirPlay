@@ -1,5 +1,5 @@
 [package]
-name = "ap_base"
+name = "base"
 description = "Общие типы, ошибки, конфигурация, пул буферов."
 version.workspace = true
 edition.workspace = true

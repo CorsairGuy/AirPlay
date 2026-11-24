@@ -1,5 +1,5 @@
 [package]
-name = "ap_device"
+name = "device"
 description = "Битовые поля Features и StatusFlags, ответ /info, профили моделей."
 version.workspace = true
 edition.workspace = true

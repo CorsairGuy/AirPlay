@@ -1,5 +1,5 @@
 [package]
-name = "ap_fairplay"
+name = "fairplay"
 description = "FairPlay SAP (fp-setup) приёмника и отправителя, ключи потока зеркалирования."
 version.workspace = true
 edition.workspace = true

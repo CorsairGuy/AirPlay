@@ -1,5 +1,5 @@
 [package]
-name = "ap_audio"
+name = "audio"
 description = "Вывод звука: lock-free кольцевой буфер, ресемплер, ALSA/PipeWire/WASAPI/CoreAudio."
 version.workspace = true
 edition.workspace = true

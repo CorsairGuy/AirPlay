@@ -1,5 +1,5 @@
 [package]
-name = "ap_companion"
+name = "companion"
 description = "Companion Link: пульт и клавиатура."
 version.workspace = true
 edition.workspace = true

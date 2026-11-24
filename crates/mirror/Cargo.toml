@@ -1,5 +1,5 @@
 [package]
-name = "ap_mirror"
+name = "mirror"
 description = "Зеркалирование экрана (тип 110): H.264/H.265 поверх TCP, AES-CTR, SPS/PPS."
 version.workspace = true
 edition.workspace = true

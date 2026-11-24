@@ -1,5 +1,5 @@
 [package]
-name = "ap_hls"
+name = "hls"
 description = "Видео по HLS: /play, /scrub, /rate, плейлисты, FCUP."
 version.workspace = true
 edition.workspace = true

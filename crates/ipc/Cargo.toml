@@ -1,5 +1,5 @@
 [package]
-name = "ap_ipc"
+name = "ipc"
 description = "Локальный API демона для подкоманд airplay, приложения и платформенных хуков."
 version.workspace = true
 edition.workspace = true

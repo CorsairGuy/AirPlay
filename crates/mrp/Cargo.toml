@@ -1,5 +1,5 @@
 [package]
-name = "ap_mrp"
+name = "mrp"
 description = "MediaRemote protocol: кадры канала, protobuf и сообщения приёмника."
 version.workspace = true
 edition.workspace = true

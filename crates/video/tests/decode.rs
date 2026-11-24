@@ -7,7 +7,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ap_video::{DecodingSink, FrameSink, Options, Picture, PixelFormat};
+use video::{DecodingSink, FrameSink, Options, Picture, PixelFormat};
 use mirror::{Codec, StreamInfo, VideoSink};
 
 /// Файл: u32 длина + настройки, дальше u32 длина + кадр.
@@ -137,7 +137,7 @@ fn inside_tokio_runtime() {
 #[test]
 fn low_delay_decoder() {
     let opts = Options {
-        decoder: ap_video::VideoOptions {
+        decoder: video::VideoOptions {
             low_delay: true,
             ..Default::default()
         },
@@ -224,7 +224,7 @@ fn synced_waits_for_due_time() {
 #[test]
 fn unknown_decoder_is_not_fatal() {
     let opts = Options {
-        decoder: ap_video::VideoOptions {
+        decoder: video::VideoOptions {
             decoder: Some("нет_такого".into()),
             ..Default::default()
         },

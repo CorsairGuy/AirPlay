@@ -1,5 +1,5 @@
 [package]
-name = "ap_mdns"
+name = "mdns"
 description = "Bonjour: объявление и поиск _airplay._tcp и _raop._tcp, TXT-записи."
 version.workspace = true
 edition.workspace = true

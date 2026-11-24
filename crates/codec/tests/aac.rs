@@ -1,6 +1,6 @@
 //! AAC-LC от FFmpeg (0,5 с, 440 Гц, стерео): кадры без ADTS, как их шлёт iPhone.
 
-use ap_codec::{Decoder, Format};
+use codec::{Decoder, Format};
 
 /// Режет поток ADTS на сырые кадры AAC.
 pub fn adts_frames(mut data: &[u8]) -> Vec<&[u8]> {

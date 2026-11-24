@@ -1,5 +1,5 @@
 [package]
-name = "ap_crypto"
+name = "crypto"
 description = "Шифрованный канал ChaCha20-Poly1305, HKDF, SRP-6a 3072, AES для AirPlay 1."
 version.workspace = true
 edition.workspace = true

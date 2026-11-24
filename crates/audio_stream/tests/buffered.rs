@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ap_audio_stream::{Config, Stream};
+use audio_stream::{Config, Stream};
 use clock::{Anchor, NoTime};
 use rtp::{AudioCipher, Header};
 use tokio::io::AsyncWriteExt;
@@ -182,7 +182,7 @@ async fn realtime_aes_cbc_with_sync() {
     let format = codec::Format::from_ssrc(0x1600_0000).unwrap();
     let stream = Stream::realtime(
         config(),
-        ap_audio_stream::StreamKey::AesCbc { key, iv },
+        audio_stream::StreamKey::AesCbc { key, iv },
         format,
         Arc::new(NoTime),
     )

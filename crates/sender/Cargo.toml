@@ -1,5 +1,5 @@
 [package]
-name = "ap_sender"
+name = "sender"
 description = "Experimental AirPlay 2 realtime PCM sender transport and media timeline."
 version.workspace = true
 edition.workspace = true

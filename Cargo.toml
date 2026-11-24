@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "services/*", "bin/*"]
+members = ["crates/*", "services/*", "bin/*", "compat/*"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,26 +11,26 @@ repository = "https://github.com/CorsairGuy/AirPlay"
 
 # Библиотеки называются ap_<имя>, но в коде подключаются без префикса: `use rtsp::…`.
 [workspace.dependencies]
-base = { package = "ap_base", path = "crates/base" }
-rtsp = { package = "ap_rtsp", path = "crates/rtsp" }
-pair = { package = "ap_pair", path = "crates/pair" }
-crypto = { package = "ap_crypto", path = "crates/crypto" }
-fairplay = { package = "ap_fairplay", path = "crates/fairplay" }
-mdns = { package = "ap_mdns", path = "crates/mdns" }
-device = { package = "ap_device", path = "crates/device" }
-clock = { package = "ap_clock", path = "crates/clock" }
-rtp = { package = "ap_rtp", path = "crates/rtp" }
-sender = { package = "ap_sender", path = "crates/sender" }
-audio_stream = { package = "ap_audio_stream", path = "crates/audio_stream" }
-mirror = { package = "ap_mirror", path = "crates/mirror" }
-hls = { package = "ap_hls", path = "crates/hls" }
-mrp = { package = "ap_mrp", path = "crates/mrp" }
-companion = { package = "ap_companion", path = "crates/companion" }
-codec = { package = "ap_codec", path = "crates/codec" }
-audio = { package = "ap_audio", path = "crates/audio" }
-video = { package = "ap_video", path = "crates/video" }
-capture = { package = "ap_capture", path = "crates/capture" }
-ipc = { package = "ap_ipc", path = "crates/ipc" }
+base = { path = "crates/base" }
+rtsp = { path = "crates/rtsp" }
+pair = { path = "crates/pair" }
+crypto = { path = "crates/crypto" }
+fairplay = { path = "crates/fairplay" }
+mdns = { path = "crates/mdns" }
+device = { path = "crates/device" }
+clock = { path = "crates/clock" }
+rtp = { path = "crates/rtp" }
+sender = { path = "crates/sender" }
+audio_stream = { path = "crates/audio_stream" }
+mirror = { path = "crates/mirror" }
+hls = { path = "crates/hls" }
+mrp = { path = "crates/mrp" }
+companion = { path = "crates/companion" }
+codec = { path = "crates/codec" }
+audio = { path = "crates/audio" }
+video = { path = "crates/video" }
+capture = { path = "crates/capture" }
+ipc = { path = "crates/ipc" }
 timesync = { path = "services/timesync" }
 mediaserver = { path = "services/mediaserver" }
 mediaremote = { path = "services/mediaremote" }

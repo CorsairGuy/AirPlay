@@ -1,5 +1,5 @@
 [package]
-name = "ap_rtsp"
+name = "rtsp"
 description = "RTSP/HTTP 1.1 без ввода-вывода: кодек, сервер, клиент, reverse HTTP, event-канал."
 version.workspace = true
 edition.workspace = true

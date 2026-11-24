@@ -37,35 +37,35 @@ name = "airplay"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "ap_audio",
- "ap_audio_stream",
- "ap_base",
- "ap_clock",
- "ap_codec",
- "ap_crypto",
- "ap_device",
- "ap_fairplay",
- "ap_ipc",
- "ap_mdns",
- "ap_mirror",
- "ap_mrp",
- "ap_pair",
- "ap_rtp",
- "ap_rtsp",
- "ap_sender",
- "ap_video",
+ "audio",
+ "audio_stream",
+ "base",
+ "clock",
+ "codec",
+ "crypto",
+ "device",
+ "fairplay",
  "hex",
  "if-addrs",
+ "ipc",
  "libc",
+ "mdns",
  "mediaremote",
+ "mirror",
+ "mrp",
+ "pair",
  "plist",
  "rand",
+ "rtp",
+ "rtsp",
+ "sender",
  "sha2",
  "timesync",
  "tokio",
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "video",
 ]
 
 [[package]]
@@ -97,7 +97,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
-name = "ap_audio"
+name = "ap_mrp"
+version = "0.1.0"
+dependencies = [
+ "mrp",
+]
+
+[[package]]
+name = "ap_sender"
+version = "0.1.0"
+dependencies = [
+ "sender",
+]
+
+[[package]]
+name = "audio"
 version = "0.1.0"
 dependencies = [
  "cpal",
@@ -106,162 +120,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "ap_audio_stream"
+name = "audio_stream"
 version = "0.1.0"
 dependencies = [
- "ap_audio",
- "ap_clock",
- "ap_codec",
- "ap_crypto",
- "ap_rtp",
+ "audio",
+ "clock",
+ "codec",
+ "crypto",
+ "rtp",
  "socket2",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "ap_base"
-version = "0.1.0"
-
-[[package]]
-name = "ap_capture"
-version = "0.1.0"
-
-[[package]]
-name = "ap_clock"
-version = "0.1.0"
-
-[[package]]
-name = "ap_codec"
-version = "0.1.0"
-dependencies = [
- "ffmpeg-next",
- "symphonia",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "ap_companion"
-version = "0.1.0"
-
-[[package]]
-name = "ap_crypto"
-version = "0.1.0"
-dependencies = [
- "aes",
- "chacha20poly1305",
- "ctr",
- "hex",
- "hkdf",
- "num-bigint",
- "rand",
- "sha2",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "ap_device"
-version = "0.1.0"
-dependencies = [
- "hex",
- "plist",
- "sha2",
-]
-
-[[package]]
-name = "ap_fairplay"
-version = "0.1.0"
-dependencies = [
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "ap_hls"
-version = "0.1.0"
-
-[[package]]
-name = "ap_ipc"
-version = "0.1.0"
-
-[[package]]
-name = "ap_mdns"
-version = "0.1.0"
-dependencies = [
- "mdns-sd",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "ap_mirror"
-version = "0.1.0"
-dependencies = [
- "ap_clock",
- "ap_crypto",
- "sha2",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "ap_mrp"
-version = "0.1.0"
-dependencies = [
- "hex",
- "plist",
- "rand",
- "sha2",
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "ap_pair"
-version = "0.1.0"
-dependencies = [
- "ap_crypto",
- "ed25519-dalek",
- "rand",
- "sha2",
- "thiserror 2.0.21",
- "x25519-dalek",
-]
-
-[[package]]
-name = "ap_rtp"
-version = "0.1.0"
-dependencies = [
- "chacha20poly1305",
-]
-
-[[package]]
-name = "ap_rtsp"
-version = "0.1.0"
-dependencies = [
- "thiserror 2.0.21",
-]
-
-[[package]]
-name = "ap_sender"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "ap_clock",
- "ap_crypto",
- "ap_pair",
- "ap_rtp",
- "ap_rtsp",
- "plist",
- "rand",
- "timesync",
- "tokio",
-]
-
-[[package]]
-name = "ap_video"
-version = "0.1.0"
-dependencies = [
- "ap_clock",
- "ap_codec",
- "ap_mirror",
  "tokio",
  "tracing",
 ]
@@ -271,6 +138,10 @@ name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
+
+[[package]]
+name = "base"
+version = "0.1.0"
 
 [[package]]
 name = "base64"
@@ -344,6 +215,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
+name = "capture"
+version = "0.1.0"
+
+[[package]]
 name = "cc"
 version = "1.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -415,6 +290,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "clock"
+version = "0.1.0"
+
+[[package]]
+name = "codec"
+version = "0.1.0"
+dependencies = [
+ "ffmpeg-next",
+ "symphonia",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "combine"
 version = "4.6.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -423,6 +311,10 @@ dependencies = [
  "bytes",
  "memchr",
 ]
+
+[[package]]
+name = "companion"
+version = "0.1.0"
 
 [[package]]
 name = "const-oid"
@@ -481,6 +373,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "59ed5838eebb26a2bb2e58f6d5b5316989ae9d08bab10e0e6d103e656d1b0280"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "crypto"
+version = "0.1.0"
+dependencies = [
+ "aes",
+ "chacha20poly1305",
+ "ctr",
+ "hex",
+ "hkdf",
+ "num-bigint",
+ "rand",
+ "sha2",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -556,6 +463,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "device"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "plist",
+ "sha2",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -615,6 +531,13 @@ checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
  "windows-sys",
+]
+
+[[package]]
+name = "fairplay"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -767,6 +690,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "hls"
+version = "0.1.0"
+
+[[package]]
 name = "hmac"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -803,6 +730,10 @@ checksum = "879f10e63c20629ecabbb64a8010319738c66a5cd0c29b02d63d272b03751d01"
 dependencies = [
  "generic-array",
 ]
+
+[[package]]
+name = "ipc"
+version = "0.1.0"
 
 [[package]]
 name = "itoa"
@@ -932,6 +863,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "mdns"
+version = "0.1.0"
+dependencies = [
+ "mdns-sd",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "mdns-sd"
 version = "0.21.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -950,7 +889,7 @@ dependencies = [
 name = "mediaremote"
 version = "0.1.0"
 dependencies = [
- "ap_mrp",
+ "mrp",
  "rand",
  "tokio",
  "tracing",
@@ -960,12 +899,12 @@ dependencies = [
 name = "mediaserver"
 version = "0.1.0"
 dependencies = [
- "ap_audio",
- "ap_base",
- "ap_capture",
- "ap_clock",
- "ap_codec",
- "ap_video",
+ "audio",
+ "base",
+ "capture",
+ "clock",
+ "codec",
+ "video",
 ]
 
 [[package]]
@@ -990,6 +929,28 @@ dependencies = [
  "log",
  "wasi",
  "windows-sys",
+]
+
+[[package]]
+name = "mirror"
+version = "0.1.0"
+dependencies = [
+ "clock",
+ "crypto",
+ "sha2",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "mrp"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "plist",
+ "rand",
+ "sha2",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -1229,6 +1190,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
+name = "pair"
+version = "0.1.0"
+dependencies = [
+ "crypto",
+ "ed25519-dalek",
+ "rand",
+ "sha2",
+ "thiserror 2.0.21",
+ "x25519-dalek",
+]
+
+[[package]]
 name = "pin-project-lite"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1397,6 +1370,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
+name = "rtp"
+version = "0.1.0"
+dependencies = [
+ "chacha20poly1305",
+]
+
+[[package]]
+name = "rtsp"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "rustc-hash"
 version = "2.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1437,6 +1424,22 @@ name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
+
+[[package]]
+name = "sender"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clock",
+ "crypto",
+ "pair",
+ "plist",
+ "rand",
+ "rtp",
+ "rtsp",
+ "timesync",
+ "tokio",
+]
 
 [[package]]
 name = "serde"
@@ -1773,7 +1776,7 @@ dependencies = [
 name = "timesync"
 version = "0.1.0"
 dependencies = [
- "ap_clock",
+ "clock",
  "libc",
  "tokio",
  "tracing",
@@ -1948,6 +1951,17 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "video"
+version = "0.1.0"
+dependencies = [
+ "clock",
+ "codec",
+ "mirror",
+ "tokio",
+ "tracing",
+]
 
 [[package]]
 name = "walkdir"

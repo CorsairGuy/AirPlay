@@ -1,5 +1,5 @@
 [package]
-name = "ap_pair"
+name = "pair"
 description = "HAP pairing в обе стороны: pair-setup, pair-verify, transient, PIN, хранилище ключей."
 version.workspace = true
 edition.workspace = true
