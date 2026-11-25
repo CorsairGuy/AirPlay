@@ -1252,10 +1252,14 @@ fn realtime_format(s: &Dictionary) -> Result<Format, String> {
         8 => return Err("AAC-ELD пока не поддерживается".into()),
         other => return Err(format!("неизвестный кодек ct={other}")),
     };
+    let channels = uint(s, "ch").unwrap_or(2);
+    if !matches!(channels, 1 | 2 | 6 | 8) || (matches!(codec, Codec::Aac) && channels > 2) {
+        return Err(format!("неподдерживаемое число каналов ch={channels}"));
+    }
     Ok(Format {
         codec,
         sample_rate,
-        channels: 2,
+        channels: channels as u8,
     })
 }
 
@@ -1518,6 +1522,26 @@ mod tests {
         ]));
         assert_eq!(other_receivers(&x, &sender), 1);
         assert_eq!(other_receivers(b"garbage", &sender), 0);
+    }
+
+    #[test]
+    fn realtime_channels_come_from_setup() {
+        let mut d = Dictionary::new();
+        d.insert("ct".into(), Value::Integer(1.into()));
+        d.insert("sr".into(), Value::Integer(48_000.into()));
+        d.insert("spf".into(), Value::Integer(352.into()));
+        d.insert("ch".into(), Value::Integer(6.into()));
+        assert_eq!(realtime_format(&d).unwrap().channels, 6);
+        d.insert("ch".into(), Value::Integer(258.into()));
+        assert!(realtime_format(&d).is_err());
+        d.insert("ch".into(), Value::Integer(3.into()));
+        assert!(realtime_format(&d).is_err());
+        d.insert("ct".into(), Value::Integer(4.into()));
+        d.insert("ch".into(), Value::Integer(6.into()));
+        assert!(realtime_format(&d).is_err());
+        d.insert("ct".into(), Value::Integer(1.into()));
+        d.remove("ch");
+        assert_eq!(realtime_format(&d).unwrap().channels, 2);
     }
 
     #[test]
