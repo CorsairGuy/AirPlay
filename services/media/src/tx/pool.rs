@@ -601,3 +601,85 @@ mod tests {
         assert_eq!(received.recv().await.unwrap(), ("a".into(), 352));
     }
 }
+
+#[cfg(test)]
+mod live_group_tests {
+    use super::*;
+    use crate::tx::{MediaClock, PACKET_BYTES};
+    use tokio::sync::mpsc;
+
+    /// Сбойная колонка удаляется и подключается заново на тот же endpoint,
+    /// не перезапуская уже играющую соседнюю.
+    #[tokio::test]
+    async fn failed_member_is_replaced_without_restarting_survivor() {
+        let (audio, packets) = broadcast::channel(16);
+        let mut pool = SessionPool::new(packets);
+        let (events, mut received) = mpsc::unbounded_channel();
+        let survivor = pool
+            .launch(
+                "a",
+                ([127, 0, 0, 1], 7101).into(),
+                Volume::MUTE,
+                Duration::from_secs(1),
+                move |mut audio, _volume, mut stop, _progress| async move {
+                    let mut stats = StreamStats::default();
+                    loop {
+                        tokio::select! {
+                            _ = stop.changed() => break,
+                            packet = audio.recv() => match packet {
+                                Ok(packet) => { events.send(packet.frame_index())?; stats.packets_sent += 1; }
+                                Err(_) => break,
+                            }
+                        }
+                    }
+                    Ok(stats)
+                },
+            )
+            .unwrap();
+        let mut failed = pool
+            .launch(
+                "b",
+                ([127, 0, 0, 1], 7102).into(),
+                Volume::MUTE,
+                Duration::from_secs(1),
+                |_, _, _, _| async { anyhow::bail!("speaker refused") },
+            )
+            .unwrap();
+        while *failed.state.borrow_and_update() == SessionState::Running {
+            failed.state.changed().await.unwrap();
+        }
+        assert_eq!(*failed.state.borrow(), SessionState::Failed);
+        // Удаление сбойной сессии возвращает ошибку, но освобождает место.
+        assert!(pool.remove("b").await.is_err());
+        let replacement = pool
+            .launch(
+                "b",
+                ([127, 0, 0, 1], 7102).into(),
+                Volume::MUTE,
+                Duration::from_secs(1),
+                |mut audio, _volume, mut stop, _progress| async move {
+                    let mut stats = StreamStats::default();
+                    loop {
+                        tokio::select! {
+                            _ = stop.changed() => break,
+                            packet = audio.recv() => match packet {
+                                Ok(_) => stats.packets_sent += 1,
+                                Err(_) => break,
+                            }
+                        }
+                    }
+                    Ok(stats)
+                },
+            )
+            .expect("same endpoint may rejoin after failed member removal");
+        assert_eq!(*replacement.state.borrow(), SessionState::Running);
+        let clock = MediaClock::now();
+        audio
+            .send(Arc::new(clock.packet(0, &[0; PACKET_BYTES]).unwrap()))
+            .unwrap();
+        assert_eq!(received.recv().await.unwrap(), 0);
+        assert_eq!(*survivor.state.borrow(), SessionState::Running);
+        assert_eq!(pool.members().len(), 2);
+        pool.shutdown().await;
+    }
+}
