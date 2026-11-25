@@ -12,7 +12,6 @@ pub use mirror;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-#[cfg(feature = "hls")]
 use std::time::Duration;
 
 use audio_stream::{Stream, StreamKey};
@@ -304,6 +303,7 @@ pub struct Media {
     hls_v2_recorded: bool,
     /// Classic AirPlay 1: формат из ANNOUNCE и UDP-порты SETUP.
     raop: Raop,
+    now_playing_duration: Mutex<Option<Duration>>,
 }
 
 impl Media {
@@ -349,6 +349,7 @@ impl Media {
             #[cfg(feature = "hls")]
             hls_v2_recorded: false,
             raop: Raop::default(),
+            now_playing_duration: Mutex::new(None),
         }
     }
 
@@ -457,10 +458,7 @@ impl Media {
                 info!("TEARDOWN");
                 ok()
             }
-            ("POST", "/command") => {
-                self.sender_command(req);
-                ok()
-            }
+            ("POST", "/command") => self.sender_command(req),
             #[cfg(feature = "hls")]
             ("POST", "/play") => self.hls_play(req),
             #[cfg(feature = "hls")]
@@ -661,25 +659,56 @@ impl Media {
         }
     }
 
-    fn sender_command(&self, req: &Request) {
+    fn sender_command(&self, req: &Request) -> Response {
+        let ok = || Response::to(req, 200);
         let Some(command) = plist_dict(&req.body) else {
-            return;
+            // `/command` — всегда plist. Пустое тело не наказываем, битое — 400.
+            return if req.body.is_empty() {
+                ok()
+            } else {
+                Response::to(req, 400)
+            };
         };
         let kind = command.get("type").and_then(Value::as_string).unwrap_or("");
         debug!(kind, "sender command");
-        if kind != "updateMRPlaybackState" || self.rc_only {
-            return;
+        if self.rc_only {
+            return ok();
         }
-        let state = command
-            .get("params")
-            .and_then(Value::as_dictionary)
-            .and_then(|p| uint(p, "mrPlaybackState"));
-        match state {
-            Some(1) => self.player.report_state(self.id, true),
-            Some(2..=4) => self.player.report_state(self.id, false),
-            _ => return,
+        if kind == "updateMRNowPlayingInfo" {
+            let mut previous = self.now_playing_duration.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(now) = parse_now_playing(&command, *previous) else {
+                // Конверт `npi-text` обязателен: отправитель, который его не
+                // прислал, должен узнать об этом кодом 400, а не считать,
+                // что метаданные приняты (music-assistant/airplay-cli, §8).
+                debug!("now-playing: конверт npi-text не разобран");
+                return Response::to(req, 400);
+            };
+            if now.replace || now.metadata.duration.is_some() { *previous = now.metadata.duration; }
+            drop(previous);
+            debug!(?now.metadata, "now-playing через POST /command");
+            let events = &self.player.events;
+            if now.metadata != Metadata::default() { events.metadata(&now.metadata); }
+            if let Some(progress) = now.progress {
+                events.progress(progress);
+            }
+            if let Some((mime, data)) = now.artwork {
+                events.artwork(&mime, &data);
+            }
+            return ok();
         }
-        debug!(?state, "sender playback state");
+        if kind == "updateMRPlaybackState" {
+            let state = command
+                .get("params")
+                .and_then(Value::as_dictionary)
+                .and_then(|p| uint(p, "mrPlaybackState"));
+            match state {
+                Some(1) => self.player.report_state(self.id, true),
+                Some(2..=4) => self.player.report_state(self.id, false),
+                _ => return ok(),
+            }
+            debug!(?state, "sender playback state");
+        }
+        ok()
     }
 
     fn setup(&mut self, req: &Request) -> Response {
@@ -1253,6 +1282,84 @@ fn sample_rate(s: &Dictionary) -> Result<u32, String> {
 
 /// Тело RTSP → словарь plist. Разбор идёт через [`rtsp::plist`]: вложенность
 /// ограничена, иначе тело из сети снимает стек.
+/// Распознанное `updateMRNowPlayingInfo` — метаданные, позиция и обложка.
+#[derive(Debug)]
+struct NowPlaying {
+    replace: bool,
+    metadata: Metadata,
+    progress: Option<Progress>,
+    artwork: Option<(String, Vec<u8>)>,
+}
+
+/// `POST /command` с `type=updateMRNowPlayingInfo` (D63). Конверт
+/// `{type:"npi-text", mergePolicy, params:{…}}` обязателен, иначе
+/// отправитель получает 400; внутри — ключи `kMRMediaRemoteNowPlayingInfo*`
+/// без префикса. Источник: music-assistant/airplay-cli, DESIGN.md §8
+/// (Apache-2.0); код не копировался — только имена полей и их смысл.
+/// `update` can carry only elapsed time, so it may reuse the prior duration.
+fn parse_now_playing(command: &Dictionary, previous_duration: Option<Duration>) -> Option<NowPlaying> {
+    /// Сколько байт обложки принимаем: отправитель шлёт около 43 КБ, предел
+    /// в 5 МиБ — из того же описания и защищает память.
+    const MAX_ARTWORK: usize = 5 << 20;
+    let envelope = command.get("params").and_then(Value::as_dictionary)?;
+    if envelope.get("type").and_then(Value::as_string) != Some("npi-text") {
+        return None;
+    }
+    let replace = match envelope.get("mergePolicy").and_then(Value::as_string)? {
+        "replace" => true,
+        "update" => false,
+        _ => return None,
+    };
+    let params = envelope.get("params").and_then(Value::as_dictionary)?;
+    let text = |key: &str| {
+        params
+            .get(key)
+            .and_then(Value::as_string)
+            .filter(|s| !s.is_empty() && s.len() <= 4096)
+            .map(str::to_owned)
+    };
+    let real = |key: &str| {
+        params
+            .get(key)
+            .and_then(Value::as_real)
+            .filter(|v| v.is_finite())
+    };
+    let duration = real("Duration")
+        .filter(|s| *s > 0.0)
+        .and_then(|s| Duration::try_from_secs_f64(s).ok());
+    let metadata = Metadata {
+        title: text("Title"),
+        artist: text("Artist"),
+        album: text("Album"),
+        genre: text("Genre"),
+        duration,
+    };
+    let progress = duration.or(if replace { None } else { previous_duration }).and_then(|duration| {
+        let elapsed = real("ElapsedTime").filter(|s| *s >= 0.0)?;
+        // Позиция не может быть дальше конца: отправитель считает её сам,
+        // а расхождение иначе уедет в карточку.
+        let position = elapsed.min(duration.as_secs_f64());
+        Some(Progress {
+            position: Duration::try_from_secs_f64(position).ok()?,
+            duration,
+        })
+    });
+    let artwork = params
+        .get("ArtworkData")
+        .and_then(Value::as_data)
+        .filter(|data| !data.is_empty() && data.len() <= MAX_ARTWORK)
+        .map(|data| {
+            let mime = text("ArtworkMIMEType").unwrap_or_else(|| "image/jpeg".into());
+            (mime, data.to_vec())
+        });
+    Some(NowPlaying {
+        replace,
+        metadata,
+        progress,
+        artwork,
+    })
+}
+
 fn plist_dict(body: &[u8]) -> Option<Dictionary> {
     if body.is_empty() {
         return None;
@@ -1368,6 +1475,83 @@ impl From<&str> for SetupError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn now_playing_command_maps_to_the_existing_events() {
+        let mut inner = Dictionary::new();
+        inner.insert("Title".into(), Value::String("Song".into()));
+        inner.insert("Artist".into(), Value::String("Artist".into()));
+        inner.insert("Album".into(), Value::String("Album".into()));
+        inner.insert("Duration".into(), Value::Real(210.5));
+        inner.insert("ElapsedTime".into(), Value::Real(12.0));
+        inner.insert("ArtworkMIMEType".into(), Value::String("image/jpeg".into()));
+        inner.insert("ArtworkData".into(), Value::Data(vec![0xff, 0xd8, 0xff]));
+        let mut envelope = Dictionary::new();
+        envelope.insert("type".into(), Value::String("npi-text".into()));
+        envelope.insert("mergePolicy".into(), Value::String("replace".into()));
+        envelope.insert("params".into(), Value::Dictionary(inner));
+        let mut command = Dictionary::new();
+        command.insert(
+            "type".into(),
+            Value::String("updateMRNowPlayingInfo".into()),
+        );
+        command.insert("params".into(), Value::Dictionary(envelope));
+        let now = parse_now_playing(&command, None).unwrap();
+        assert_eq!(now.metadata.title.as_deref(), Some("Song"));
+        assert_eq!(now.metadata.artist.as_deref(), Some("Artist"));
+        assert_eq!(
+            now.metadata.duration,
+            Some(std::time::Duration::from_secs_f64(210.5))
+        );
+        let progress = now.progress.unwrap();
+        assert_eq!(progress.position, std::time::Duration::from_secs(12));
+        assert_eq!(
+            progress.duration,
+            std::time::Duration::from_secs_f64(210.5)
+        );
+        let (mime, data) = now.artwork.unwrap();
+        assert_eq!(mime, "image/jpeg");
+        assert_eq!(data, vec![0xff, 0xd8, 0xff]);
+    }
+
+    #[test]
+    fn now_playing_needs_the_npi_envelope_and_keeps_metadata_without_duration() {
+        let mut inner = Dictionary::new();
+        inner.insert("Title".into(), Value::String("Song".into()));
+        let mut bare = Dictionary::new();
+        bare.insert("params".into(), Value::Dictionary(inner));
+        assert!(parse_now_playing(&bare, None).is_none());
+        let mut inner = Dictionary::new();
+        inner.insert("Title".into(), Value::String("Song".into()));
+        let mut envelope = Dictionary::new();
+        envelope.insert("type".into(), Value::String("npi-text".into()));
+        envelope.insert("mergePolicy".into(), Value::String("replace".into()));
+        envelope.insert("params".into(), Value::Dictionary(inner));
+        let mut command = Dictionary::new();
+        command.insert("params".into(), Value::Dictionary(envelope));
+        let now = parse_now_playing(&command, None).unwrap();
+        assert_eq!(now.metadata.title.as_deref(), Some("Song"));
+        assert!(now.progress.is_none());
+        assert!(now.artwork.is_none());
+    }
+
+    #[test]
+    fn now_playing_update_preserves_duration_and_rejects_invalid_envelopes() {
+        let mut params = Dictionary::new();
+        params.insert("ElapsedTime".into(), Value::Real(12.0));
+        params.insert("Duration".into(), Value::Real(1.0e100));
+        let mut envelope = Dictionary::new();
+        envelope.insert("type".into(), Value::String("npi-text".into()));
+        envelope.insert("params".into(), Value::Dictionary(params));
+        let mut command = Dictionary::new();
+        command.insert("params".into(), Value::Dictionary(envelope.clone()));
+        assert!(parse_now_playing(&command, None).is_none());
+        envelope.insert("mergePolicy".into(), Value::String("update".into()));
+        command.insert("params".into(), Value::Dictionary(envelope));
+        let now = parse_now_playing(&command, Some(Duration::from_secs(100))).unwrap();
+        assert_eq!(now.progress.unwrap().position, Duration::from_secs(12));
+        assert!(now.metadata.duration.is_none());
+    }
 
     #[cfg(feature = "mirroring")]
     #[test]
