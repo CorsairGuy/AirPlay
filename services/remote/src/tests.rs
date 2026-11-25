@@ -137,6 +137,19 @@ async fn card_session() {
         Some(0)
     );
 
+    // Тот же identifier — это повтор доставки, а не вторая команда.
+    phone
+        .send(&[request(kind::SEND_COMMAND_MESSAGE, &next, "3")])
+        .await;
+    let m = phone.answer("3").await;
+    let result = m[0]
+        .nested(f::ProtocolMessage::sendCommandResultMessage)
+        .unwrap();
+    assert_eq!(
+        result.number(f::SendCommandResultMessage::sendError),
+        Some(0)
+    );
+
     let mut seek = Node::default();
     let mut options = Node::default();
     options.double(f::CommandOptions::playbackPosition, 42.5);

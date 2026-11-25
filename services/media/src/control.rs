@@ -430,4 +430,21 @@ mod tests {
         r.detach(1);
         assert!(!r.send(Command::Play));
     }
+
+    #[test]
+    fn lost_event_channel_detaches_and_queued_commands_are_not_replayed() {
+        let r = Remote::new();
+        let rx = r.attach(7);
+        assert!(r.send(Command::Pause));
+        drop(rx);
+        assert!(!r.connected());
+        assert!(!r.send(Command::Pause));
+        let mut next = r.attach(8);
+        assert!(r.send(Command::Next));
+        assert_eq!(next.try_recv().unwrap(), Command::Next);
+        assert!(
+            next.try_recv().is_err(),
+            "a new owner must not receive commands from the old session"
+        );
+    }
 }
