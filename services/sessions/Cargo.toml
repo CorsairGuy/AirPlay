@@ -33,6 +33,7 @@ tracing.workspace = true
 uuid = { version = "1", features = ["v4", "v5"] }
 
 [dev-dependencies]
+audio.workspace = true
 audio_stream.workspace = true
 hex.workspace = true
 plist.workspace = true

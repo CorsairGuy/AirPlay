@@ -1395,7 +1395,174 @@ mod tests {
     #[test]
     fn unknown_request_is_not_implemented() {
         let mut c = Client::new(ctx());
-        assert_eq!(c.call("ANNOUNCE", "rtsp://x/1", &[], vec![]).status, 501);
+        assert_eq!(c.call("DESCRIBE", "rtsp://x/1", &[], vec![]).status, 501);
+    }
+
+    /// Classic AirPlay 1: ANNOUNCE/SDP → UDP SETUP → RECORD → открытый ALAC
+    /// по RTP превращается в известный PCM, затем громкость, FLUSH и TEARDOWN.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn raop_end_to_end_plays_alac() {
+        use std::sync::Mutex as StdMutex;
+        use tokio::net::UdpSocket;
+
+        #[derive(Clone, Default)]
+        struct Capture(Arc<StdMutex<Vec<i16>>>);
+
+        impl audio::Sink for Capture {
+            fn sample_rate(&self) -> u32 {
+                44_100
+            }
+            fn write(&mut self, samples: &[i16]) -> std::io::Result<()> {
+                self.0.lock().unwrap().extend_from_slice(samples);
+                Ok(())
+            }
+            fn delay_frames(&mut self) -> u32 {
+                0
+            }
+            fn stop(&mut self) {}
+        }
+
+        let capture = Capture::default();
+        let sink = capture.clone();
+        let mut context = ctx();
+        {
+            let player = Arc::get_mut(&mut Arc::get_mut(&mut context).unwrap().player).unwrap();
+            player.audio.sink = Some(audio::SinkFactory::new(move |_, _| {
+                Ok(Box::new(sink.clone()) as Box<dyn audio::Sink>)
+            }));
+        }
+        let mut c = Client::new(context.clone());
+
+        let sdp = "v=0\r\no=Sender 42 0 IN IP4 127.0.0.1\r\ns=AirTunes\r\n\
+            c=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 0 RTP/AVP 96\r\n\
+            a=rtpmap:96 AppleLossless\r\na=fmtp:96 352 0 16 40 10 14 2 255 0 0 44100\r\n\
+            a=et:0\r\n";
+        let announce = c.call(
+            "ANNOUNCE",
+            "rtsp://127.0.0.1/1",
+            &[("Content-Type", "application/sdp")],
+            sdp.as_bytes().to_vec(),
+        );
+        assert_eq!(announce.status, 200);
+
+        let setup = c.call(
+            "SETUP",
+            "rtsp://127.0.0.1/1",
+            &[(
+                "Transport",
+                "RTP/AVP/UDP;unicast;mode=record;control_port=6001;timing_port=6002",
+            )],
+            Vec::new(),
+        );
+        assert_eq!(setup.status, 200);
+        let transport = setup.headers.get("Transport").expect("Transport").to_owned();
+        let port = transport
+            .split(';')
+            .find_map(|p| p.strip_prefix("server_port="))
+            .expect("server_port")
+            .parse::<u16>()
+            .unwrap();
+        assert!(port > 0);
+        assert_eq!(c.call("RECORD", "rtsp://127.0.0.1/1", &[], vec![]).status, 200);
+
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        socket.connect(("127.0.0.1", port)).await.unwrap();
+        for (i, base) in [0i32, 352].into_iter().enumerate() {
+            let header = rtp::Header {
+                marker: i == 0,
+                payload_type: 96,
+                seq: i as u16,
+                timestamp: 1000 + i as u32 * 352,
+                ssrc: 0x1234_5678,
+            };
+            let mut packet = header.encode().to_vec();
+            packet.extend_from_slice(&alac_escape(base, 352));
+            socket.send(&packet).await.unwrap();
+        }
+
+        let pattern = [10i16, -10, 20, -20, 30, -30];
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let pcm = capture.0.lock().unwrap().clone();
+            if pcm.windows(pattern.len()).any(|w| w == pattern) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "известный ALAC не превратился в PCM: {} сэмплов",
+                pcm.len()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+
+        let volume = c.call(
+            "SET_PARAMETER",
+            "rtsp://127.0.0.1/1",
+            &[("Content-Type", "text/parameters")],
+            b"volume: -20.0\r\n".to_vec(),
+        );
+        assert_eq!(volume.status, 200);
+        assert_eq!(
+            c.call(
+                "GET_PARAMETER",
+                "rtsp://127.0.0.1/1",
+                &[],
+                b"volume\r\n".to_vec()
+            )
+            .body,
+            b"volume: -20.000000\r\n"
+        );
+
+        let flush = c.call(
+            "FLUSH",
+            "rtsp://127.0.0.1/1",
+            &[("RTP-Info", "seq=2;rtptime=1704")],
+            Vec::new(),
+        );
+        assert_eq!(flush.status, 200);
+        assert_eq!(c.call("TEARDOWN", "rtsp://127.0.0.1/1", &[], vec![]).status, 200);
+        assert_eq!(context.player.active_packets(), None);
+    }
+
+    /// ALAC-кадр без сжатия: известные сэмплы, восстанавливаемые декодером.
+    fn alac_escape(base: i32, frames: u32) -> Vec<u8> {
+        #[derive(Default)]
+        struct Bits {
+            bytes: Vec<u8>,
+            acc: u64,
+            n: u32,
+        }
+        impl Bits {
+            fn put(&mut self, value: u32, bits: u32) {
+                self.acc = (self.acc << bits) | (value as u64 & ((1u64 << bits) - 1));
+                self.n += bits;
+                while self.n >= 8 {
+                    self.n -= 8;
+                    self.bytes.push((self.acc >> self.n) as u8);
+                }
+            }
+            fn finish(mut self) -> Vec<u8> {
+                if self.n > 0 {
+                    let pad = 8 - self.n;
+                    self.put(0, pad);
+                }
+                self.bytes
+            }
+        }
+        let mut bits = Bits::default();
+        bits.put(1, 3);
+        bits.put(0, 4);
+        bits.put(0, 12);
+        bits.put(0, 1);
+        bits.put(0, 2);
+        bits.put(1, 1);
+        for i in 0..frames {
+            let left = (base + i as i32) * 10;
+            bits.put(left as u32 & 0xffff, 16);
+            bits.put((-left) as u32 & 0xffff, 16);
+        }
+        bits.put(7, 3);
+        bits.finish()
     }
     #[test]
     fn sender_playback_commands_update_events_without_teardown() {

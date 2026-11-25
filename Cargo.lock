@@ -2074,6 +2074,7 @@ name = "sessions"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "audio",
  "audio_stream",
  "clock",
  "coordinator",
