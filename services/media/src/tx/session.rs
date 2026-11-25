@@ -193,6 +193,7 @@ impl std::fmt::Debug for PairingCredentials {
 pub struct PinPairing {
     rtsp: Rtsp,
     controller: PairIdentity,
+    client_name: String,
     m2: Vec<u8>,
     deadline: Duration,
 }
@@ -203,11 +204,24 @@ impl PinPairing {
         controller: PairIdentity,
         deadline: Duration,
     ) -> Result<Self> {
+        Self::begin_with_client_name(endpoint, controller, deadline, "AirPlay").await
+    }
+
+    /// Begin PIN pairing with the caller's display name, sent in pairing headers.
+    pub async fn begin_with_client_name(
+        endpoint: SocketAddr,
+        controller: PairIdentity,
+        deadline: Duration,
+        client_name: &str,
+    ) -> Result<Self> {
         if endpoint.port() == 0
             || deadline.is_zero()
             || deadline > Duration::from_secs(30)
             || controller.pairing_id.is_empty()
             || controller.pairing_id.len() > 256
+            || client_name.trim().is_empty()
+            || client_name.len() > 256
+            || client_name.chars().any(char::is_control)
         {
             bail!("invalid PIN pairing endpoint, identity or deadline");
         }
@@ -222,10 +236,14 @@ impl PinPairing {
             0,
             deadline,
         );
-        rtsp.pin_post("/pair-pin-start", Vec::new()).await?;
+        rtsp.pin_post("/pair-pin-start", Vec::new(), client_name)
+            .await?;
         // M1 has no PIN-dependent values; proof generation waits for finish().
         let setup = ControllerSetup::new(controller.clone(), "", false);
-        let m2 = rtsp.pin_post("/pair-setup", setup.m1()).await?.body;
+        let m2 = rtsp
+            .pin_post("/pair-setup", setup.m1(), client_name)
+            .await?
+            .body;
         let reply = pair::tlv8::Tlv8::decode(&m2)?;
         if reply.state()? != 2 || reply.get(pair::tlv8::ERROR).is_some() {
             bail!("receiver rejected PIN pairing start");
@@ -235,6 +253,7 @@ impl PinPairing {
         Ok(Self {
             rtsp,
             controller,
+            client_name: client_name.to_owned(),
             m2,
             deadline,
         })
@@ -248,11 +267,17 @@ impl PinPairing {
         let (setup, m3) = timeout(self.deadline, setup_proof(setup, self.m2))
             .await
             .context("PIN proof deadline")??;
-        let m4 = self.rtsp.pin_post("/pair-setup", m3).await?;
+        let m4 = self
+            .rtsp
+            .pin_post("/pair-setup", m3, &self.client_name)
+            .await?;
         if setup.check_m4(&m4.body)?.is_some() {
             bail!("unexpected transient PIN exchange");
         }
-        let m6 = self.rtsp.pin_post("/pair-setup", setup.m5()?).await?;
+        let m6 = self
+            .rtsp
+            .pin_post("/pair-setup", setup.m5()?, &self.client_name)
+            .await?;
         let accessory = setup.check_m6(&m6.body)?;
         PairingCredentials::new(self.controller, accessory.id, accessory.public_key)
     }
@@ -1142,6 +1167,11 @@ mod tests {
             hap::{PairSetup, SetupOutcome},
         };
         for pin in ["1234", "9999"] {
+            let expected_name = if pin == "1234" {
+                "Test Sender"
+            } else {
+                "AirPlay"
+            };
             let controller = PairIdentity::from_seed("controller", &[11; 32]);
             let accessory = PairIdentity::from_seed("receiver", &[12; 32]);
             let expected_key = accessory.public_key();
@@ -1156,6 +1186,10 @@ mod tests {
                     let request = connection.event_request().await.unwrap();
                     assert_eq!(request.method, "POST");
                     assert_eq!(request.headers.get("X-Apple-HKP"), Some("3"));
+                    assert_eq!(
+                        request.headers.get("X-Apple-Client-Name"),
+                        Some(expected_name)
+                    );
                     let mut response = rtsp::Response::to(&request, 200);
                     let mut ended = false;
                     if step == 0 {
@@ -1180,9 +1214,18 @@ mod tests {
                 }
                 store.len()
             });
-            let waiting = PinPairing::begin(endpoint, controller, Duration::from_secs(3))
+            let waiting = if pin == "1234" {
+                PinPairing::begin_with_client_name(
+                    endpoint,
+                    controller,
+                    Duration::from_secs(3),
+                    expected_name,
+                )
                 .await
-                .unwrap();
+            } else {
+                PinPairing::begin(endpoint, controller, Duration::from_secs(3)).await
+            }
+            .unwrap();
             let result = waiting.finish(pin).await;
             let registered = peer.await.unwrap();
             if pin == "1234" {
@@ -1200,6 +1243,18 @@ mod tests {
     #[tokio::test]
     async fn invalid_pin_pairing_parameters_fail_before_connecting() {
         let controller = PairIdentity::from_seed("controller", &[1; 32]);
+        for name in ["", " ", "sender\r\nInjected: yes"] {
+            assert!(
+                PinPairing::begin_with_client_name(
+                    "127.0.0.1:7000".parse().unwrap(),
+                    controller.clone(),
+                    Duration::from_secs(1),
+                    name
+                )
+                .await
+                .is_err()
+            );
+        }
         assert!(
             PinPairing::begin(
                 "127.0.0.1:0".parse().unwrap(),

@@ -142,8 +142,14 @@ impl Rtsp {
         self.pair_request("/pair-verify", body, "3").await
     }
 
-    pub(crate) async fn pin_post(&mut self, path: &str, body: Vec<u8>) -> Result<rtsp::Response> {
-        self.pair_request(path, body, "3").await
+    pub(crate) async fn pin_post(
+        &mut self,
+        path: &str,
+        body: Vec<u8>,
+        client_name: &str,
+    ) -> Result<rtsp::Response> {
+        self.pair_request_with_name(path, body, "3", Some(client_name))
+            .await
     }
 
     async fn pair_request(
@@ -152,10 +158,23 @@ impl Rtsp {
         body: Vec<u8>,
         hkp: &str,
     ) -> Result<rtsp::Response> {
+        self.pair_request_with_name(path, body, hkp, None).await
+    }
+
+    async fn pair_request_with_name(
+        &mut self,
+        path: &str,
+        body: Vec<u8>,
+        hkp: &str,
+        client_name: Option<&str>,
+    ) -> Result<rtsp::Response> {
         let mut req = rtsp::Request::new("POST", path, "HTTP/1.1");
         req.headers.insert("User-Agent", "AirPlay/320.20");
         req.headers.insert("Connection", "keep-alive");
         req.headers.insert("X-Apple-HKP", hkp);
+        if let Some(name) = client_name {
+            req.headers.insert("X-Apple-Client-Name", name);
+        }
         req.headers
             .insert("Content-Type", "application/octet-stream");
         req.body = body;

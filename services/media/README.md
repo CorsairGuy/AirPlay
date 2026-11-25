@@ -227,6 +227,10 @@ pair-verify (HKP3), без нового PIN/pair-setup. При ошибке пр
 `PinPairing::begin(endpoint, controller.clone(), timeout).await?`: он запускает
 показ кода и возвращает незавершённый обмен. После ввода пользователем кода
 вызовите `pending.finish(&pin).await?` и сохраните проверенные credentials.
+Чтобы передать имя приложения в заголовке PIN-сопряжения, используйте
+`PinPairing::begin_with_client_name(endpoint, controller, timeout, name)`;
+обычный `begin` использует имя `AirPlay`. Поддержка конкретной версии tvOS
+на реальном устройстве пока не проверена.
 Приложение сохраняет свою identity и `accessory_id()/accessory_public_key()`;
 библиотека не читает файлы и не выбирает PIN сама. Drop незавершённого обмена
 закрывает соединение. Вывод окна на iPhone через MRP — отдельный слой.

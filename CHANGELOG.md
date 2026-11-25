@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- PIN pairing sends `X-Apple-Client-Name` on the initial and setup requests; callers can supply a display name or use the existing API's `AirPlay` default. Hardware validation with Apple TV remains outstanding.
 - Added an opt-in HLS VOD path: bounded HTTP(S) fetch and FFmpeg demux feed decoded frames to a host-provided `FrameSink`; AirPlay `/play`, V2 `/rate`, and `/stop` handlers are available with the `hls` feature. Live refresh, audio, pause, seek, and capability advertisement remain unsupported.
 - Moved output-selection precedence and logical-to-physical resolution into `services/coordinator`. MRP output-context decoding and its request queue now sit under the application's `remote` component; the serialized worker applies coordinator decisions to discovered, authorized media sessions.
 - Discovery now owns the validated logical/physical output snapshot; `media::tx::SessionPool` exposes only physical session membership and operations. Coordinator runtime state and plan application use discovery/session backend interfaces, avoiding coordinator-to-media/discovery dependencies; the app remains responsible for authorization and session preparation.
