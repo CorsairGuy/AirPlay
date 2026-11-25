@@ -9,6 +9,7 @@
 - Remote control: MRP SendCommand now deduplicates retransmitted request identifiers (bounded to 64 IDs) without suppressing real repeats under a new identifier, and event-channel loss detaches the remote without replaying queued commands. Legacy DACP remains a separate protocol path, not aliased to MRP. Protocol tests only; no hardware remote was available.
 - RTP receive (S13): duplicate packets no longer overwrite the queued payload, and packets at or before the played-through timestamp are not requeued. The bounded 4096-packet buffer and resync deadline are covered by new tests. TX-side retransmission is still absent; no hardware audio check was performed.
 - Sender latency: an externally configurable LatencyPolicy now intersects the requested delay with the receiver SETUP latencyMin/latencyMax, rejects contradictory or non-overlapping ranges, and supports a bounded pre-RECORD initial buffer. This is calculated latency, not a measured acoustic delay; NTP/PTP is unchanged.
+- Sender metadata: a MetadataHandle now carries title, artist, album, artwork (set/clear) and progress into the existing RTSP control loop as DMAP, image and text SET_PARAMETER requests, with validation before sending. Verified by protocol tests only; no Apple TV or speaker was available.
 
 - HLS seek clears buffered audio; multichannel HLS audio is rejected rather than silently dropping channels. A replacement buffered-audio connection must deliver an authenticated packet before replacing the active reader; replay protection remains outside this change.
 

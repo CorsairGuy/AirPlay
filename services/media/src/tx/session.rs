@@ -55,6 +55,86 @@ impl Volume {
     }
 }
 
+/// Обложка в обновлении трека: не менять, заменить или очистить старую.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Artwork {
+    #[default]
+    Unchanged,
+    Set {
+        mime: String,
+        data: Vec<u8>,
+    },
+    Clear,
+}
+
+/// Метаданные, которые sender отправляет приёмнику существующими
+/// SET_PARAMETER-запросами: DMAP (название/исполнитель/альбом), обложка и
+/// progress. Позиция — в кадрах 44,1 кГц, как в `progress:` AirPlay.
+pub const MAX_ARTWORK_BYTES: usize = 16 * 1024 * 1024;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TrackMetadata {
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub artwork: Artwork,
+    /// Текущая позиция и длительность в кадрах; progress шлётся только
+    /// когда известны оба значения.
+    pub position_frames: Option<u64>,
+    pub duration_frames: Option<u64>,
+}
+
+impl TrackMetadata {
+    fn validate(&self) -> Result<()> {
+        for value in [&self.title, &self.artist, &self.album]
+            .into_iter()
+            .flatten()
+        {
+            if value.len() > 4096 || value.chars().any(char::is_control) {
+                bail!("metadata text is invalid or too long");
+            }
+        }
+        if self.duration_frames == Some(0) {
+            bail!("metadata duration must be nonzero");
+        }
+        if self
+            .position_frames
+            .zip(self.duration_frames)
+            .is_some_and(|(position, duration)| position > duration)
+        {
+            bail!("metadata position exceeds duration");
+        }
+        if let Artwork::Set { mime, data } = &self.artwork {
+            if data.is_empty() || data.len() > MAX_ARTWORK_BYTES {
+                bail!("artwork size is outside allowed range");
+            }
+            if !matches!(mime.as_str(), "image/jpeg" | "image/png") {
+                bail!("artwork must be JPEG or PNG");
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Клон, который можно держать во время `Session::run`: сессия забирает себя,
+/// а метаданные и смена трека идут через этот канал.
+#[derive(Clone)]
+pub struct MetadataHandle {
+    updates: watch::Sender<Option<TrackMetadata>>,
+}
+
+impl MetadataHandle {
+    /// `None` завершает публикацию: новые обновления не отправляются.
+    pub fn set(&self, metadata: Option<TrackMetadata>) -> Result<()> {
+        if let Some(metadata) = &metadata {
+            metadata.validate()?;
+        }
+        self.updates
+            .send(metadata)
+            .map_err(|_| anyhow!("receiver session ended"))
+    }
+}
+
 /// Caller-supplied identity; no model impersonation or hardware-specific name is
 /// hidden in transport defaults. Device ID must be a stable, unique adapter ID.
 #[derive(Clone, Debug)]
@@ -401,6 +481,7 @@ pub struct Session {
     _event_task: Option<Task>,
     peers: Option<PtpPeerControl>,
     peer_changes: Option<PeerChanges>,
+    metadata: watch::Sender<Option<TrackMetadata>>,
 }
 
 /// Requested peer state and the last RTSP-accepted update, not proof of native
@@ -520,6 +601,11 @@ impl Session {
     }
     pub fn initial_volume(&self) -> Volume {
         self.config.volume
+    }
+    pub fn metadata_handle(&self) -> MetadataHandle {
+        MetadataHandle {
+            updates: self.metadata.clone(),
+        }
     }
     pub(crate) fn shutdown_deadline(&self) -> Duration {
         self.config.request_timeout + Duration::from_secs(3)
@@ -851,6 +937,7 @@ impl Session {
         } else {
             (None, None)
         };
+        let (metadata, _) = watch::channel(None);
         Ok(Self {
             config,
             rtsp: Some(rtsp),
@@ -862,6 +949,7 @@ impl Session {
             _event_task: event_task,
             peers,
             peer_changes,
+            metadata,
         })
     }
 
@@ -916,6 +1004,7 @@ impl Session {
                 Some(self.config.volume)
             },
             self.peer_changes.take(),
+            self.metadata.subscribe(),
         )));
         let result = tokio::select! {
             result = self.stream(&mut audio, &mut stop, progress.as_ref()) => result,
@@ -1046,11 +1135,13 @@ async fn control_owner(
     mut stop: watch::Receiver<bool>,
     mut current: Option<Volume>,
     mut peers: Option<PeerChanges>,
+    mut metadata: watch::Receiver<Option<TrackMetadata>>,
 ) -> Result<u64> {
     let mut updates = 0;
     let mut requested = false;
     let mut volume_open = true;
     let mut peers_open = peers.is_some();
+    let mut metadata_open = true;
     let mut feedback = tokio::time::interval_at(
         tokio::time::Instant::now() + Duration::from_secs(2),
         Duration::from_secs(2),
@@ -1098,6 +1189,17 @@ async fn control_owner(
                     Err(_) => volume_open = false,
                 }
             }
+            changed = metadata.changed(), if metadata_open => {
+                match changed {
+                    Ok(()) => {
+                        let track = metadata.borrow_and_update().clone();
+                        if let Some(track) = track {
+                            publish_metadata(&mut rtsp, &track).await?;
+                        }
+                    }
+                    Err(_) => metadata_open = false,
+                }
+            }
             _ = feedback.tick() => {
                 rtsp.request("POST", Some("/feedback"), Vec::new(), None, &[]).await?;
             }
@@ -1111,6 +1213,69 @@ async fn control_owner(
     .await
     .context("receiver TEARDOWN deadline exceeded")??;
     Ok(updates)
+}
+
+/// DMAP-тело `mlit` с непустыми полями трека. Неизвестные приёмнику теги
+/// игнорируются, поэтому дополнительные поля не обязательны.
+fn dmap_metadata(track: &TrackMetadata) -> Vec<u8> {
+    let mut items = Vec::new();
+    for (tag, value) in [
+        ("minm", &track.title),
+        ("asar", &track.artist),
+        ("asal", &track.album),
+    ] {
+        if let Some(value) = value {
+            items.extend_from_slice(tag.as_bytes());
+            items.extend_from_slice(&(value.len() as u32).to_be_bytes());
+            items.extend_from_slice(value.as_bytes());
+        }
+    }
+    let mut body = Vec::with_capacity(items.len() + 8);
+    body.extend_from_slice(b"mlit");
+    body.extend_from_slice(&(items.len() as u32).to_be_bytes());
+    body.extend_from_slice(&items);
+    body
+}
+
+fn progress_text(track: &TrackMetadata) -> Option<String> {
+    track
+        .position_frames
+        .zip(track.duration_frames)
+        .map(|(position, duration)| format!("progress: 0/{position}/{duration}\r\n"))
+}
+
+/// Запросы одного обновления: DMAP, обложка и progress. Вынесено из сокета,
+/// чтобы протокольные тела можно было проверить без приёмника.
+fn metadata_requests(track: &TrackMetadata) -> Vec<(Option<&'static str>, Vec<u8>)> {
+    let mut requests = Vec::new();
+    if track.title.is_some() || track.artist.is_some() || track.album.is_some() {
+        requests.push((Some("application/x-dmap-tagged"), dmap_metadata(track)));
+    }
+    match &track.artwork {
+        Artwork::Unchanged => {}
+        Artwork::Set { mime, data } => requests.push((
+            Some(if mime == "image/png" {
+                "image/png"
+            } else {
+                "image/jpeg"
+            }),
+            data.clone(),
+        )),
+        // Пустой JPEG-запрос — явная очистка обложки, а не «нет изменений».
+        Artwork::Clear => requests.push((Some("image/jpeg"), Vec::new())),
+    }
+    if let Some(progress) = progress_text(track) {
+        requests.push((Some("text/parameters"), progress.into_bytes()));
+    }
+    requests
+}
+
+async fn publish_metadata(rtsp: &mut Rtsp, track: &TrackMetadata) -> Result<()> {
+    for (content_type, body) in metadata_requests(track) {
+        rtsp.request("SET_PARAMETER", None, body, content_type, &[])
+            .await?;
+    }
+    Ok(())
 }
 
 fn dictionary(items: Vec<(&str, plist::Value)>) -> plist::Value {
@@ -1500,7 +1665,15 @@ mod tests {
         let placeholder = Volume::db(-30.0).unwrap();
         let (volume, changes) = watch::channel(placeholder);
         let (stop, stopped) = watch::channel(false);
-        let owner = tokio::spawn(control_owner(rtsp, changes, stopped, None, None));
+        let (_metadata, no_metadata) = watch::channel(None);
+        let owner = tokio::spawn(control_owner(
+            rtsp,
+            changes,
+            stopped,
+            None,
+            None,
+            no_metadata,
+        ));
         assert!(
             timeout(Duration::from_millis(230), received.recv())
                 .await
@@ -1580,7 +1753,9 @@ mod tests {
             listener.local_addr().unwrap(),
             Identity::new("test", "test"),
         );
+        let (metadata, _keep_metadata) = watch::channel(None);
         let session = Session {
+            metadata,
             rtsp: Some(Rtsp::new(
                 Connection::new(client),
                 "rtsp://test/1".into(),
@@ -1763,5 +1938,98 @@ mod latency_tests {
             SessionConfig::new("127.0.0.1:7000".parse().unwrap(), Identity::new("s", "s"));
         config.latency_policy = policy;
         assert!(config.validate().is_err());
+    }
+}
+
+#[cfg(test)]
+mod metadata_tests {
+    use super::*;
+
+    fn track() -> TrackMetadata {
+        TrackMetadata {
+            title: Some("Песня".into()),
+            artist: Some("Артист".into()),
+            album: Some("Альбом".into()),
+            ..Default::default()
+        }
+    }
+
+    fn tag(body: &[u8], tag: &[u8; 4]) -> Option<Vec<u8>> {
+        let mut at = 8; // mlit + длина
+        while at + 8 <= body.len() {
+            let name = &body[at..at + 4];
+            let len = u32::from_be_bytes(body[at + 4..at + 8].try_into().unwrap()) as usize;
+            let value = body.get(at + 8..at + 8 + len)?.to_vec();
+            if name == tag {
+                return Some(value);
+            }
+            at += 8 + len;
+        }
+        None
+    }
+
+    #[test]
+    fn dmap_carries_title_artist_and_album() {
+        let requests = metadata_requests(&track());
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].0, Some("application/x-dmap-tagged"));
+        let body = &requests[0].1;
+        assert_eq!(&body[..4], b"mlit");
+        assert_eq!(tag(body, b"minm").as_deref(), Some("Песня".as_bytes()));
+        assert_eq!(tag(body, b"asar").as_deref(), Some("Артист".as_bytes()));
+        assert_eq!(tag(body, b"asal").as_deref(), Some("Альбом".as_bytes()));
+    }
+
+    #[test]
+    fn artwork_sets_and_clears_but_unchanged_is_silent() {
+        let mut update = track();
+        update.title = None;
+        update.artist = None;
+        update.album = None;
+        update.artwork = Artwork::Set {
+            mime: "image/png".into(),
+            data: vec![1, 2, 3],
+        };
+        let requests = metadata_requests(&update);
+        assert_eq!(requests, [(Some("image/png"), vec![1, 2, 3])]);
+        update.artwork = Artwork::Clear;
+        assert_eq!(
+            metadata_requests(&update),
+            [(Some("image/jpeg"), Vec::new())]
+        );
+        update.artwork = Artwork::Unchanged;
+        assert!(metadata_requests(&update).is_empty());
+    }
+
+    #[test]
+    fn progress_uses_airplay_frame_triple() {
+        let mut update = track();
+        update.position_frames = Some(88_200);
+        update.duration_frames = Some(441_000);
+        let requests = metadata_requests(&update);
+        assert_eq!(requests.last().unwrap().1, b"progress: 0/88200/441000\r\n");
+    }
+
+    #[test]
+    fn invalid_metadata_is_rejected_before_sending() {
+        let (tx, _rx) = watch::channel(None);
+        let handle = MetadataHandle { updates: tx };
+        let mut bad = track();
+        bad.artwork = Artwork::Set {
+            mime: "image/gif".into(),
+            data: vec![1],
+        };
+        assert!(handle.set(Some(bad)).is_err());
+        let mut bad = track();
+        bad.position_frames = Some(10);
+        bad.duration_frames = Some(5);
+        assert!(handle.set(Some(bad)).is_err());
+        let mut bad = track();
+        bad.artwork = Artwork::Set {
+            mime: "image/jpeg".into(),
+            data: vec![0; MAX_ARTWORK_BYTES + 1],
+        };
+        assert!(handle.set(Some(bad)).is_err());
+        assert!(handle.set(Some(track())).is_ok());
     }
 }
