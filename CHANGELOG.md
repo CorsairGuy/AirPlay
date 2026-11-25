@@ -7,6 +7,7 @@
 - MRP card: a reconnecting controller now receives the current track snapshot on subscribe instead of waiting for the next sender event; added tests for artwork replacement/cleanup, pause/resume and reconnect. Verified with the test client only, not an iPhone.
 - Reconnect (S3/S4/S6): dropping a session without TEARDOWN now clears the sender group and card state, so an abrupt disconnect or network change no longer leaves a stale gid; added a reconnect test that opens a new SETUP on the same context. No automatic reconnect or Station route changes; long half-open socket detection remains with the OS.
 - Remote control: MRP SendCommand now deduplicates retransmitted request identifiers (bounded to 64 IDs) without suppressing real repeats under a new identifier, and event-channel loss detaches the remote without replaying queued commands. Legacy DACP remains a separate protocol path, not aliased to MRP. Protocol tests only; no hardware remote was available.
+- RTP receive (S13): duplicate packets no longer overwrite the queued payload, and packets at or before the played-through timestamp are not requeued. The bounded 4096-packet buffer and resync deadline are covered by new tests. TX-side retransmission is still absent; no hardware audio check was performed.
 
 - HLS seek clears buffered audio; multichannel HLS audio is rejected rather than silently dropping channels. A replacement buffered-audio connection must deliver an authenticated packet before replacing the active reader; replay protection remains outside this change.
 

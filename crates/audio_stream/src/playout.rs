@@ -105,6 +105,9 @@ struct State {
     latency_offset_ns: i64,
     /// Растёт при перемотке и смене якоря: поток вывода начинает заново.
     epoch: u64,
+    /// Самая поздняя метка, которую вывод уже прошёл (или выбросил).
+    /// Пакет с более ранней меткой опоздал и не должен звучать заново.
+    played_through: Option<i64>,
     stopped: bool,
 }
 
@@ -119,6 +122,7 @@ impl Playout {
             Mutex::new(State {
                 format,
                 latency_offset_ns: cfg.latency_offset_ns,
+                played_through: None,
                 ..State::default()
             }),
             Condvar::new(),
@@ -147,6 +151,13 @@ impl Playout {
         let mut s = self.lock();
         if s.stopped {
             // Сессия закрыта, а подключение ещё живёт: не копим пакеты в никуда.
+            return;
+        }
+        let ext = s.unwrap.peek(timestamp);
+        // Дубль или пакет, который вывод уже прошёл: первый вариант уже
+        // прозвучал (или был выброшен), повторять его нельзя.
+        if s.packets.contains_key(&ext) || s.played_through.is_some_and(|played| ext <= played) {
+            debug!(ext, "пакет уже играл или повторён, отброшен");
             return;
         }
         let ext = s.unwrap.extend(timestamp);
@@ -384,6 +395,7 @@ impl Output {
                 self.unknown_ssrc = Some(first_ssrc);
             }
             s.packets.remove(&first_ts);
+            s.played_through = Some(first_ts);
             return Some(Vec::new());
         };
         self.unknown_ssrc = None;
@@ -429,6 +441,10 @@ impl Output {
                 break;
             }
             s.packets.remove(&ts);
+            s.played_through = Some(ts);
+        }
+        if s.played_through.is_none_or(|played| played < cursor) {
+            s.played_through = Some(cursor - 1);
         }
 
         let mut out = match s.packets.range(..=cursor).next_back() {
@@ -436,6 +452,7 @@ impl Output {
                 let ssrc = p.ssrc;
                 let payload = std::mem::take(&mut s.packets.get_mut(&ts)?.payload);
                 s.packets.remove(&ts);
+                s.played_through = Some(ts);
                 let pcm = self.decode(format, ssrc, &payload);
                 let skip = ((cursor - ts) as usize * CHANNELS).min(pcm.len());
                 pcm[skip..].to_vec()
@@ -534,5 +551,68 @@ impl Output {
             self.pcm.resize(frames * CHANNELS, 0);
         }
         std::mem::take(&mut self.pcm)
+    }
+}
+
+#[cfg(test)]
+mod s13_tests {
+    use super::*;
+
+    fn playout() -> Playout {
+        Playout::start(
+            Config {
+                device: "null".into(),
+                ..Default::default()
+            },
+            Arc::new(clock::NoTime),
+            None,
+        )
+    }
+
+    #[test]
+    fn duplicate_packet_keeps_the_first_payload() {
+        let p = playout();
+        p.push(1000, 0x1600_0000, vec![1, 2, 3]);
+        p.push(1000, 0x1600_0000, vec![9, 9, 9]);
+        assert_eq!(p.buffered_packets(), 1);
+        let s = p.lock();
+        let packet = s.packets.values().next().unwrap();
+        assert_eq!(packet.payload, [1, 2, 3]);
+    }
+
+    #[test]
+    fn reordered_packets_are_stored_in_timestamp_order() {
+        let p = playout();
+        for ts in [3000u32, 1000, 2000] {
+            p.push(ts, 0x1600_0000, vec![ts as u8]);
+        }
+        let s = p.lock();
+        let order: Vec<i64> = s.packets.keys().copied().collect();
+        assert_eq!(order, [1000, 2000, 3000]);
+        drop(s);
+        assert_eq!(p.buffered_packets(), 3);
+    }
+
+    #[test]
+    fn late_packet_after_playhead_is_not_requeued() {
+        let p = playout();
+        p.lock().played_through = Some(2000);
+        p.push(1000, 0x1600_0000, vec![1]);
+        p.push(2000, 0x1600_0000, vec![2]);
+        assert_eq!(p.buffered_packets(), 0);
+        p.push(2001, 0x1600_0000, vec![3]);
+        assert_eq!(p.buffered_packets(), 1);
+    }
+
+    #[test]
+    fn queue_stays_bounded_when_sender_runs_ahead() {
+        let p = playout();
+        for ts in 0..(MAX_BUFFERED_PACKETS as u32 + 16) {
+            p.push(ts * 1024, 0x1600_0000, vec![1]);
+        }
+        assert_eq!(p.buffered_packets(), MAX_BUFFERED_PACKETS);
+        let s = p.lock();
+        let first = *s.packets.keys().next().unwrap();
+        assert!(first > 0, "старые пакеты должны быть выброшены");
     }
 }
