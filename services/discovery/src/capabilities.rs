@@ -61,8 +61,13 @@ pub enum RefusalCode {
     ScreenUnsupported,
     /// Нужен пароль RAOP, которого отправитель не умеет.
     PasswordRequired,
-    /// Подходящий профиль известен, но отправителя для него нет в сборке.
+    /// Подходящий профиль известен, но его отправитель экспериментальный и не
+    /// включён в выбор: совместимость с устройствами не подтверждена.
     SenderUnavailable,
+    /// Каталог не разрешил идентификатор получателя (неизвестен или неоднозначен).
+    OutputNotResolved,
+    /// Несколько обнаруженных устройств объявляют один и тот же идентификатор.
+    AmbiguousMatch,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -468,22 +473,65 @@ pub fn devices(table: &ServiceTable) -> Vec<Device> {
         .collect()
 }
 
-/// Устройство по идентификатору записи: `deviceid`, `pi`, полное имя или
-/// имя экземпляра в каталоге выходов.
-pub fn device_by_id(table: &ServiceTable, id: &str) -> Option<Device> {
+/// Идентификаторы, которые запись объявляет о себе: `psi`, `pi`, `deviceid`.
+fn declared_ids(service: &ResolvedService) -> [Option<&str>; 3] {
+    [
+        service.get_property_val_str("psi"),
+        service.get_property_val_str("pi"),
+        service.get_property_val_str("deviceid"),
+    ]
+}
+
+/// Сравнение объявленного идентификатора с запрошенным: MAC сравнивается без
+/// разделителей и в любом регистре, остальные значения — как есть.
+fn same_id(declared: &str, id: &str) -> bool {
+    declared.eq_ignore_ascii_case(id)
+        || mac(declared)
+            .zip(mac(id))
+            .is_some_and(|(declared, wanted)| declared == wanted)
+}
+
+/// Все устройства, к которым относится идентификатор. Каталог выходов выбирает
+/// `psi`, а идентичность устройства строится по `deviceid`/`pi`, поэтому
+/// совпадение ищется и по объявленным полям записи, а не только по строке
+/// идентичности. Несколько совпадений — это неоднозначность, а не «первое».
+fn matching_devices(table: &ServiceTable, id: &str) -> Vec<Device> {
     let mac_id = mac(id).map(|mac| format!("mac:{mac}"));
-    devices(table).into_iter().find(|device| {
-        device.identity.eq_ignore_ascii_case(id)
-            || mac_id
-                .as_deref()
-                .is_some_and(|key| device.identity.eq_ignore_ascii_case(key))
-            || device
-                .identity
-                .eq_ignore_ascii_case(&format!("deviceid:{id}"))
-            || device.identity.eq_ignore_ascii_case(&format!("pi:{id}"))
-            || device.identity.eq_ignore_ascii_case(&format!("psi:{id}"))
-            || device.names.iter().any(|name| name == id)
-    })
+    records_by_device(table)
+        .into_iter()
+        .filter_map(|(identity, records)| {
+            let device = device(identity, &records);
+            let identity_matches = device.identity.eq_ignore_ascii_case(id)
+                || mac_id
+                    .as_deref()
+                    .is_some_and(|key| device.identity.eq_ignore_ascii_case(key))
+                || device
+                    .identity
+                    .eq_ignore_ascii_case(&format!("deviceid:{id}"))
+                || device.identity.eq_ignore_ascii_case(&format!("pi:{id}"))
+                || device.identity.eq_ignore_ascii_case(&format!("psi:{id}"));
+            let matches = identity_matches
+                || device.names.iter().any(|name| name == id)
+                || records.iter().any(|service| {
+                    declared_ids(service)
+                        .into_iter()
+                        .flatten()
+                        .any(|declared| same_id(declared, id))
+                });
+            matches.then_some(device)
+        })
+        .collect()
+}
+
+/// Устройство по идентификатору записи: `deviceid`, `psi`, `pi`, полное имя
+/// или имя экземпляра в каталоге выходов. Неоднозначный идентификатор
+/// возвращает `None`: угадывать одно из устройств нельзя.
+pub fn device_by_id(table: &ServiceTable, id: &str) -> Option<Device> {
+    let mut matches = matching_devices(table, id);
+    if matches.len() != 1 {
+        return None;
+    }
+    matches.pop()
 }
 
 /// Выбор профиля для устройства из каталога: каталог остаётся владельцем
@@ -494,16 +542,26 @@ pub fn select_for_output(
     uid: &str,
     want: Want,
 ) -> Selection {
-    let Ok(route) = catalog.resolve(uid) else {
-        return refuse(RefusalCode::NoAirPlayRecord, "получатель не найден");
+    let route = match catalog.resolve(uid) {
+        Ok(route) => route,
+        Err(error) => {
+            return refuse(
+                RefusalCode::OutputNotResolved,
+                &format!("получатель не разрешён каталогом: {error}"),
+            );
+        }
     };
-    let Some(device) = device_by_id(table, &route.uid) else {
-        return refuse(
+    match matching_devices(table, &route.uid).as_slice() {
+        [device] => select(device, want),
+        [] => refuse(
             RefusalCode::CapabilitiesUnknown,
             "для получателя нет resolved-записи; профиль неизвестен",
-        );
-    };
-    select(&device, want)
+        ),
+        _ => refuse(
+            RefusalCode::AmbiguousMatch,
+            "несколько обнаруженных устройств объявляют этот идентификатор; профиль не выбран",
+        ),
+    }
 }
 
 fn refuse(code: RefusalCode, reason: &str) -> Selection {
@@ -760,7 +818,7 @@ mod tests {
     }
 
     #[test]
-    fn raop_only_device_is_refused_because_no_raop_sender_is_built() {
+    fn raop_only_device_is_refused_naming_the_existing_experimental_sender() {
         let table = table(vec![record(
             mdns::RAOP,
             "AABBCCDDEEFF@Старая колонка",
@@ -775,6 +833,8 @@ mod tests {
             Selection::Refuse(refusal) => {
                 assert_eq!(refusal.code, RefusalCode::NoAirPlayRecord);
                 assert!(refusal.reason.contains("_raop"));
+                // Отказ должен сообщать о статусе, не раскрывая имя модуля пользователю.
+                assert!(refusal.reason.contains("не подключён"));
             }
             other => panic!("unexpected selection: {other:?}"),
         }
@@ -807,7 +867,10 @@ mod tests {
         device.capabilities.pairing.password_required = Some(false);
         device.capabilities.features = Some(SCREEN | AUDIO);
         match select(&device, Want::Screen) {
-            Selection::Refuse(refusal) => assert_eq!(refusal.code, RefusalCode::SenderUnavailable),
+            Selection::Refuse(refusal) => {
+                assert_eq!(refusal.code, RefusalCode::SenderUnavailable);
+                assert!(refusal.reason.contains("зеркалирования"));
+            }
             other => panic!("unexpected selection: {other:?}"),
         }
     }
@@ -875,5 +938,137 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// Каталог выбирает `psi`, а идентичность устройства строится по
+    /// `deviceid`. Выбор профиля обязан находить то же устройство по обоим
+    /// идентификаторам, а не отказывать из-за разных ключей.
+    #[test]
+    fn psi_identifier_from_catalog_resolves_to_the_device_identified_by_mac() {
+        use crate::catalog::{self, Advertisement};
+        use std::collections::BTreeMap;
+
+        let psi = "9F1C2F0A-1111-2222-3333-444455556666";
+        let table = table(vec![record(
+            mdns::AIRPLAY,
+            "Гостиная",
+            "appletv.local.",
+            "192.0.2.10",
+            7000,
+            &[
+                ("deviceid", "AA:BB:CC:DD:EE:FF"),
+                ("psi", psi),
+                ("features", "0x200,0x0"),
+            ],
+        )]);
+        let txt: BTreeMap<String, String> = [
+            ("deviceid", "AA:BB:CC:DD:EE:FF"),
+            ("psi", psi),
+            ("features", "0x200,0x0"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.into(), value.into()))
+        .collect();
+        let catalog = catalog::build(
+            vec![Advertisement {
+                name: "Гостиная".into(),
+                endpoint: ([192, 0, 2, 10], 7000).into(),
+                txt,
+            }],
+            &[],
+        )
+        .unwrap();
+        let uid = catalog.routes()[0].uid.clone();
+        assert_eq!(uid, psi);
+        assert!(matches!(
+            select_for_output(&table, &catalog, &uid, Want::Audio),
+            Selection::Start {
+                profile: Profile::AirPlay2RealtimeAudio,
+                ..
+            }
+        ));
+        assert!(matches!(
+            select_for_output(&table, &catalog, "AA:BB:CC:DD:EE:FF", Want::Audio),
+            Selection::Start { .. }
+        ));
+        assert!(device_by_id(&table, &uid.to_ascii_lowercase()).is_some());
+    }
+
+    /// Записи одного устройства на разных портах сохраняют оба порта: порт
+    /// `_raop` не подменяет порт `_airplay` и наоборот.
+    #[test]
+    fn records_on_different_ports_keep_both_endpoints() {
+        let table = table(vec![
+            record(
+                mdns::AIRPLAY,
+                "Кухня",
+                "speaker.local.",
+                "192.0.2.10",
+                7000,
+                &[("deviceid", "AA:BB:CC:DD:EE:FF"), ("features", "0x200,0x0")],
+            ),
+            record(
+                mdns::RAOP,
+                "AABBCCDDEEFF@Кухня",
+                "speaker.local.",
+                "192.0.2.10",
+                5000,
+                &[("ch", "2"), ("sr", "44100")],
+            ),
+        ]);
+        let devices = devices(&table);
+        assert_eq!(devices.len(), 1);
+        let device = &devices[0];
+        let ports: Vec<u16> = device
+            .endpoints
+            .iter()
+            .map(|endpoint| endpoint.port())
+            .collect();
+        assert_eq!(ports, [5000, 7000]);
+        assert!(matches!(
+            select(device, Want::Audio),
+            Selection::Start { .. }
+        ));
+    }
+
+    /// Неизвестный каталогу идентификатор — свой отказ, а не «нет _airplay».
+    #[test]
+    fn unresolved_catalog_identifier_has_its_own_refusal() {
+        use crate::catalog;
+
+        let table = table(vec![apple_tv()]);
+        let catalog = catalog::build(vec![], &[]).unwrap();
+        match select_for_output(&table, &catalog, "неизвестный", Want::Audio) {
+            Selection::Refuse(refusal) => {
+                assert_eq!(refusal.code, RefusalCode::OutputNotResolved)
+            }
+            other => panic!("unexpected selection: {other:?}"),
+        }
+    }
+
+    /// Общее имя у двух устройств не должно превращаться в выбор «первого».
+    #[test]
+    fn ambiguous_name_is_not_resolved_to_the_first_device() {
+        let table = table(vec![
+            record(
+                mdns::AIRPLAY,
+                "Кухня",
+                "one.local.",
+                "192.0.2.10",
+                7000,
+                &[("deviceid", "AA:BB:CC:DD:EE:01"), ("features", "0x200,0x0")],
+            ),
+            record(
+                mdns::AIRPLAY,
+                "Кухня",
+                "two.local.",
+                "192.0.2.11",
+                7000,
+                &[("deviceid", "AA:BB:CC:DD:EE:02"), ("features", "0x200,0x0")],
+            ),
+        ]);
+        assert_eq!(devices(&table).len(), 2);
+        assert!(device_by_id(&table, "Кухня").is_none());
+        assert!(device_by_id(&table, "AA:BB:CC:DD:EE:01").is_some());
     }
 }
