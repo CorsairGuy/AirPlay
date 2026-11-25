@@ -1,0 +1,3 @@
+GET /x RTSP/1.0
+NoColonHere
+

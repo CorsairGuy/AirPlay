@@ -643,6 +643,7 @@ mod tests {
             photo: None,
             mrp: None,
             session_group: Default::default(),
+            session_group_owner: Default::default(),
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();

@@ -48,6 +48,7 @@ pub struct Context {
     pub mrp: Option<MrpService>,
     /// `groupUUID` текущей сессии отправителя: идёт в `gid`, как у shairport-sync.
     pub session_group: std::sync::Mutex<Option<String>>,
+    pub session_group_owner: std::sync::Mutex<Option<u64>>,
     /// Приём фотографий; `None` — профиль выключен и `/photo` отвечает 501.
     /// Возможность не объявляется в TXT до проверки с iPhone.
     pub photo: Option<Arc<crate::photo::Service>>,
@@ -150,6 +151,7 @@ impl Context {
             remote: Default::default(),
             mrp: None,
             session_group: Default::default(),
+            session_group_owner: Default::default(),
             photo: None,
         }
     }
@@ -157,8 +159,18 @@ impl Context {
 
 /// Сессия отправителя сообщает о начале и конце группы объявлению и карточке.
 impl SessionGroup for Context {
-    fn set_group(&self, group: Option<String>) {
-        self.set_session_group(group);
+    fn set_group(&self, owner: u64, group: Option<String>) {
+        let mut current = self
+            .session_group_owner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if group.is_some() {
+            *current = Some(owner);
+            self.set_session_group(group);
+        } else if *current == Some(owner) {
+            *current = None;
+            self.set_session_group(None);
+        }
     }
 }
 
@@ -205,6 +217,12 @@ impl Session {
     #[cfg(test)]
     fn encrypted(&self) -> bool {
         self.channel.is_some()
+    }
+
+    /// Есть недочитанное сообщение: заголовок или тело пришли не целиком.
+    /// По этому признаку [`super::serve`] ограничивает ожидание хвоста.
+    pub fn pending_request(&self) -> bool {
+        !self.wire.is_empty() || !self.plain.is_empty()
     }
 
     /// Принимает байты из сокета, дописывает в `out` то, что нужно отправить.
@@ -529,6 +547,7 @@ mod tests {
             remote: Default::default(),
             mrp: None,
             session_group: Default::default(),
+            session_group_owner: Default::default(),
             photo: None,
             player: Arc::new(Player::new(
                 audio_stream::Config {
@@ -1455,6 +1474,40 @@ mod tests {
         assert_eq!(*ctx.session_group.lock().unwrap(), None);
     }
 
+    #[test]
+    fn old_sender_cannot_clear_new_senders_group() {
+        let context = ctx();
+        let body = |name: &str| {
+            let mut data = plist::Dictionary::new();
+            data.insert("timingProtocol".into(), "PTP".into());
+            data.insert("groupUUID".into(), name.into());
+            let mut output = Vec::new();
+            plist::Value::Dictionary(data)
+                .to_writer_binary(&mut output)
+                .unwrap();
+            output
+        };
+        let mut first = Client::new(context.clone());
+        let mut second = Client::new(context.clone());
+        assert_eq!(
+            first.call("SETUP", "rtsp://x/1", &[], body("first")).status,
+            200
+        );
+        assert_eq!(
+            second
+                .call("SETUP", "rtsp://x/1", &[], body("second"))
+                .status,
+            200
+        );
+        drop(first);
+        assert_eq!(
+            *context.session_group.lock().unwrap(),
+            Some("second".into())
+        );
+        drop(second);
+        assert_eq!(*context.session_group.lock().unwrap(), None);
+    }
+
     #[derive(Default)]
     struct PhotoLog(std::sync::Mutex<Vec<String>>);
 
@@ -1602,6 +1655,140 @@ mod tests {
         assert_eq!(
             log.0.lock().unwrap().last().map(String::as_str),
             Some("clear")
+        );
+    }
+
+    /// Испорченные параметры потока: sr=0 раньше ронял поток вывода делением
+    /// на ноль, spf=0 останавливал курсор, короткий shk отвергался.
+    #[tokio::test]
+    async fn setup_rejects_impossible_stream_parameters() {
+        use plist::{Dictionary, Value};
+
+        fn body(sr: u64, spf: u64, ss: u64, shk: Vec<u8>) -> Vec<u8> {
+            let mut s = Dictionary::new();
+            s.insert("type".into(), Value::Integer(96.into()));
+            s.insert("ct".into(), Value::Integer(1.into()));
+            s.insert("sr".into(), Value::Integer(sr.into()));
+            s.insert("spf".into(), Value::Integer(spf.into()));
+            s.insert("ss".into(), Value::Integer(ss.into()));
+            s.insert("shk".into(), Value::Data(shk));
+            let mut d = Dictionary::new();
+            d.insert("streams".into(), Value::Array(vec![s.into()]));
+            let mut out = Vec::new();
+            Value::Dictionary(d).to_writer_binary(&mut out).unwrap();
+            out
+        }
+
+        let context = ctx();
+        let mut client = Client::new(context.clone());
+        for (sr, spf, ss) in [
+            (0, 352, 16),
+            (4_294_967_296, 352, 16),
+            (44_100, 0, 16),
+            (44_100, 100_000, 16),
+            (44_100, 352, 272),
+            (44_100, 352, 17),
+        ] {
+            let response = client.call("SETUP", "rtsp://x/1", &[], body(sr, spf, ss, vec![1; 32]));
+            assert_eq!(response.status, 500, "sr={sr} spf={spf} ss={ss}");
+            assert_eq!(context.player.active_packets(), None);
+        }
+
+        for len in [0usize, 16, 31, 33, 64] {
+            let response = client.call(
+                "SETUP",
+                "rtsp://x/1",
+                &[],
+                body(44_100, 352, 16, vec![2; len]),
+            );
+            assert_eq!(response.status, 500, "shk длиной {len}");
+            assert_eq!(context.player.active_packets(), None);
+        }
+
+        // Рабочий набор после отказов проходит как раньше.
+        let response = client.call(
+            "SETUP",
+            "rtsp://x/1",
+            &[],
+            body(44_100, 352, 16, vec![3; 32]),
+        );
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            client
+                .call("TEARDOWN", "rtsp://x/1", &[], Vec::new())
+                .status,
+            200
+        );
+    }
+
+    /// Тело с глубокой вложенностью plist: до ограничения разбор снимал
+    /// стек потока вместе со всем процессом, теперь — обычный отказ.
+    #[test]
+    fn setup_rejects_deeply_nested_plist_without_crashing() {
+        let mut body = String::from("<?xml version=\"1.0\"?><plist version=\"1.0\"><dict>");
+        body.push_str(&"<array>".repeat(1000));
+        body.push_str(&"</array>".repeat(1000));
+        body.push_str("</dict></plist>");
+        assert!(body.len() < rtsp::MAX_BODY);
+        let mut client = Client::new(ctx());
+        let response = client.call("SETUP", "rtsp://x/1", &[], body.into_bytes());
+        assert_eq!(response.status, 400);
+        // Соединение живо: следующий запрос обрабатывается.
+        assert_eq!(
+            client.call("OPTIONS", "rtsp://x/1", &[], Vec::new()).status,
+            200
+        );
+    }
+
+    /// Класс из shairport 5.5.1: `timingPeerInfo.Addresses` не того типа или
+    /// с мусором. Нестроковые элементы пропускаются, список ограничен; и
+    /// отсутствие `timingPeerInfo` не ломает сессию.
+    #[test]
+    fn setup_tolerates_malformed_timing_peer_info() {
+        use plist::{Dictionary, Value};
+
+        fn session_body(peer: Value) -> Vec<u8> {
+            let mut d = Dictionary::new();
+            d.insert("timingProtocol".into(), "PTP".into());
+            d.insert("timingPeerInfo".into(), peer);
+            let mut out = Vec::new();
+            Value::Dictionary(d).to_writer_binary(&mut out).unwrap();
+            out
+        }
+
+        let mut addresses: Vec<Value> = vec![
+            Value::Integer(7.into()),
+            Value::Dictionary(Dictionary::new()),
+            "not-an-ip".into(),
+            "0.0.0.0".into(),
+            "::".into(),
+            "192.168.1.10".into(),
+        ];
+        addresses.extend((0..1000).map(|i| format!("10.1.{}.{}", i / 256, i % 256).into()));
+        let mut peer = Dictionary::new();
+        peer.insert("Addresses".into(), Value::Array(addresses));
+        peer.insert("ID".into(), "peer".into());
+
+        let mut client = Client::new(ctx());
+        for value in [
+            Value::Dictionary(peer),
+            "строка".into(),
+            Value::Integer(1.into()),
+        ] {
+            let response = client.call("SETUP", "rtsp://x/1", &[], session_body(value));
+            assert_eq!(response.status, 200);
+            let reply = plist::from_bytes::<Value>(&response.body).unwrap();
+            assert!(
+                reply.as_dictionary().unwrap()["timingPeerInfo"]
+                    .as_dictionary()
+                    .is_some_and(|d| d.contains_key("Addresses"))
+            );
+        }
+        assert_eq!(
+            client
+                .call("TEARDOWN", "rtsp://x/1", &[], Vec::new())
+                .status,
+            200
         );
     }
 }

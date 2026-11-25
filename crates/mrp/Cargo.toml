@@ -10,6 +10,7 @@ publish = false
 
 [dependencies]
 hex.workspace = true
+rtsp.workspace = true
 plist.workspace = true
 rand.workspace = true
 sha2.workspace = true

@@ -1322,6 +1322,7 @@ dependencies = [
  "hex",
  "plist",
  "rand 0.8.8",
+ "rtsp",
  "sha2",
  "thiserror 2.0.21",
 ]
@@ -1926,6 +1927,7 @@ dependencies = [
 name = "rtsp"
 version = "0.1.0"
 dependencies = [
+ "plist",
  "thiserror 2.0.21",
 ]
 

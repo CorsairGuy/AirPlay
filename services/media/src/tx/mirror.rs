@@ -371,6 +371,9 @@ impl MirrorSession {
         record: &[u8],
         ntp_timestamp: u64,
     ) -> Result<()> {
+        if record.is_empty() || record.len() > 1024 * 1024 {
+            bail!("invalid video configuration size");
+        }
         let mut header = [0u8; VIDEO_HEADER_LEN];
         header[..4].copy_from_slice(&(record.len() as u32).to_le_bytes());
         header[4] = 0x01;
@@ -378,8 +381,9 @@ impl MirrorSession {
         header[6] = codec.format_option();
         header[7] = 0x01;
         header[8..16].copy_from_slice(&ntp_timestamp.to_le_bytes());
+        self.write_video(&header, record).await?;
         self.video_config = Some((codec, record.to_vec(), ntp_timestamp));
-        self.write_video(&header, record).await
+        Ok(())
     }
 
     /// Отправляет кадр AVCC (NAL с 4-байтовой длиной). `timeline` — ноль для
@@ -392,18 +396,22 @@ impl MirrorSession {
         keyframe: bool,
         avcc: &[u8],
     ) -> Result<()> {
-        if avcc.is_empty() {
-            bail!("empty video frame");
+        if avcc.is_empty() || avcc.len() > 16 * 1024 * 1024 {
+            bail!("invalid video frame size");
         }
         if timeline != 0 {
             bail!("PTP timeline is not supported by the mirroring sender");
         }
+        let nonce = self.video_nonce;
+        self.video_nonce = nonce
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("video nonce exhausted"))?;
         let sealed;
         let payload: &[u8] = match self.video_key {
             Some(key) => {
                 sealed = crypto::aead::seal(
                     &key,
-                    &self.video_nonce.to_le_bytes(),
+                    &nonce.to_le_bytes(),
                     &video_header(
                         avcc.len() + crypto::aead::TAG_LEN,
                         ntp_timestamp,
@@ -418,10 +426,6 @@ impl MirrorSession {
         };
         let header = video_header(payload.len(), ntp_timestamp, timeline, keyframe);
         self.write_video(&header, payload).await?;
-        self.video_nonce = self
-            .video_nonce
-            .checked_add(1)
-            .ok_or_else(|| anyhow!("video nonce exhausted"))?;
         Ok(())
     }
 
@@ -431,15 +435,18 @@ impl MirrorSession {
         let mut header = [0u8; VIDEO_HEADER_LEN];
         header[4] = 0x02;
         header[6] = 0x1e;
-        self.video.write_all(&header).await?;
-        Ok(())
+        self.write_video(&header, &[]).await
     }
 
     /// Один уже сжатый кадр звука (AAC-ELD или ALAC) в RTP.
     pub async fn send_audio_frame(&mut self, rtp_time: u32, encoded: &[u8]) -> Result<()> {
-        if encoded.is_empty() {
-            bail!("empty audio frame");
+        if encoded.is_empty() || encoded.len() > 65_000 {
+            bail!("invalid audio frame size");
         }
+        let nonce = self.audio_nonce;
+        self.audio_nonce = nonce
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("audio nonce exhausted"))?;
         let mut header = [0u8; 12];
         header[0] = 0x80;
         header[1] = AUDIO_PAYLOAD_TYPE;
@@ -448,20 +455,16 @@ impl MirrorSession {
         // SSRC = 0, как у отправителей зеркалирования.
         let sealed = crypto::aead::seal(
             &self.audio_key,
-            &self.audio_nonce.to_le_bytes(),
+            &nonce.to_le_bytes(),
             &header[4..12],
             encoded,
         );
         let mut packet = Vec::with_capacity(12 + sealed.len() + 8);
         packet.extend_from_slice(&header);
         packet.extend_from_slice(&sealed);
-        packet.extend_from_slice(&self.audio_nonce.to_le_bytes());
+        packet.extend_from_slice(&nonce.to_le_bytes());
         self.audio.send(&packet).await?;
         self.audio_seq = self.audio_seq.wrapping_add(1);
-        self.audio_nonce = self
-            .audio_nonce
-            .checked_add(1)
-            .ok_or_else(|| anyhow!("audio nonce exhausted"))?;
         Ok(())
     }
 
@@ -509,8 +512,17 @@ impl MirrorSession {
     }
 
     async fn write_video(&mut self, header: &[u8; VIDEO_HEADER_LEN], payload: &[u8]) -> Result<()> {
-        self.video.write_all(header).await?;
-        self.video.write_all(payload).await?;
+        if self.stopped {
+            bail!("mirror session is stopped");
+        }
+        if let Err(error) = self.video.write_all(header).await {
+            self.stopped = true;
+            return Err(error.into());
+        }
+        if let Err(error) = self.video.write_all(payload).await {
+            self.stopped = true;
+            return Err(error.into());
+        }
         Ok(())
     }
 

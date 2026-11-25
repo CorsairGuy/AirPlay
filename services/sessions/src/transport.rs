@@ -5,6 +5,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -65,7 +66,13 @@ pub async fn serve_connection(
     let mut buf = vec![0u8; 16 * 1024];
     let mut out = Vec::new();
     loop {
-        let n = stream.read(&mut buf).await?;
+        let n = read_more(
+            &mut stream,
+            &mut buf,
+            session.pending_request(),
+            Duration::from_secs(60),
+        )
+        .await?;
         if n == 0 {
             return Ok(());
         }
@@ -74,5 +81,40 @@ pub async fn serve_connection(
             stream.write_all(&out).await?;
             out.clear();
         }
+    }
+}
+
+async fn read_more<S: tokio::io::AsyncRead + Unpin>(
+    stream: &mut S,
+    buf: &mut [u8],
+    partial: bool,
+    deadline: Duration,
+) -> std::io::Result<usize> {
+    if partial {
+        tokio::time::timeout(deadline, stream.read(buf)).await?
+    } else {
+        stream.read(buf).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn only_partial_requests_are_timed_out() {
+        let (mut client, mut server) = tokio::io::duplex(64);
+        let mut buf = [0u8; 64];
+        let error = read_more(&mut server, &mut buf, true, Duration::from_millis(20))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        client.write_all(b"next").await.unwrap();
+        assert_eq!(
+            read_more(&mut server, &mut buf, false, Duration::from_millis(20))
+                .await
+                .unwrap(),
+            4
+        );
     }
 }

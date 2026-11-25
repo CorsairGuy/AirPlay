@@ -118,4 +118,38 @@ mod tests {
     fn truncated_input_is_an_error() {
         assert!(Tlv8::decode(&[STATE, 5, 1]).is_err());
     }
+
+    /// Любой обрез действительного сообщения — ошибка или короткий разбор,
+    /// но не паника и не выход за границу значения.
+    #[test]
+    fn every_truncation_is_handled() {
+        let wire = Tlv8::new()
+            .with(STATE, [1])
+            .with(PUBLIC_KEY, vec![7; 300])
+            .with(SIGNATURE, vec![3; 70])
+            .encode();
+        for cut in 0..wire.len() {
+            let _ = Tlv8::decode(&wire[..cut]);
+        }
+    }
+
+    #[test]
+    fn empty_and_oversized_values_are_bounded() {
+        // Пустое значение сохраняется как есть и переживает перекодирование.
+        let tlv = Tlv8::decode(&[STATE, 0]).unwrap();
+        assert_eq!(tlv.state().unwrap(), 0);
+        assert_eq!(Tlv8::decode(&tlv.encode()).unwrap(), tlv);
+
+        // State длиннее 4 байт не превращается в число.
+        let long = Tlv8::decode(&[STATE, 5, 1, 2, 3, 4, 5]).unwrap();
+        assert!(long.state().is_err());
+
+        // 255-байтовый кусок — не конец сообщения: следующий тип читается.
+        let mut wire = vec![5, 255];
+        wire.extend_from_slice(&[0xAA; 255]);
+        wire.extend_from_slice(&[6, 1, 2]);
+        let tlv = Tlv8::decode(&wire).unwrap();
+        assert_eq!(tlv.get(ENCRYPTED_DATA).unwrap().len(), 255);
+        assert_eq!(tlv.state().unwrap(), 2);
+    }
 }

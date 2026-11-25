@@ -5,6 +5,8 @@
 
 use std::fmt::Write as _;
 
+pub mod plist;
+
 /// Предел на заголовки одного сообщения.
 pub const MAX_HEAD: usize = 16 * 1024;
 /// Предел на тело одного сообщения.
@@ -46,7 +48,16 @@ impl Headers {
     fn content_length(&self) -> Result<usize, Error> {
         match self.get("Content-Length") {
             None => Ok(0),
-            Some(v) => v.trim().parse().map_err(|_| Error::BadHeader),
+            // Только десятичные цифры: `parse` для usize принял бы ещё
+            // знак плюс, а "-1", "0x10" и переполнение — нет; отказываем
+            // всем недесятичным записям одинаково.
+            Some(v) => {
+                let v = v.trim();
+                if v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()) {
+                    return Err(Error::BadHeader);
+                }
+                v.parse().map_err(|_| Error::BadHeader)
+            }
         }
     }
 }
@@ -286,5 +297,101 @@ mod tests {
                 format!("RTSP/1.0 200 OK\r\nContent-Length: {length}\r\n\r\n").into_bytes();
             assert_eq!(decode_response(&mut buf), Err(Error::BodyTooLong));
         }
+    }
+
+    /// Классы ошибок из разбора Content-Length: отрицательное, мусор,
+    /// переполнение, знак плюс. Ни одно не должно паниковать или тянуть
+    /// бесконечное ожидание тела.
+    #[test]
+    fn malformed_content_length_is_rejected() {
+        for value in [
+            "-1",
+            "1e9",
+            "12x",
+            "",
+            "+12",
+            "18446744073709551616",
+            "0x10",
+        ] {
+            let mut buf =
+                format!("SETUP / RTSP/1.0\r\nContent-Length: {value}\r\n\r\n").into_bytes();
+            assert_eq!(
+                decode_request(&mut buf),
+                Err(Error::BadHeader),
+                "Content-Length: {value:?}"
+            );
+        }
+        // Пробелы вокруг числа допустимы.
+        let mut buf = b"POST / RTSP/1.0\r\nContent-Length:  2 \r\n\r\nhi".to_vec();
+        let req = decode_request(&mut buf).unwrap().unwrap();
+        assert_eq!(req.body, b"hi");
+    }
+
+    /// Повторный Content-Length не должен давать двойное чтение тела:
+    /// длина берётся из первого заголовка, как и раньше.
+    #[test]
+    fn duplicate_content_length_uses_the_first() {
+        let mut buf =
+            b"POST /x RTSP/1.0\r\nContent-Length: 2\r\nContent-Length: 4\r\n\r\nabcd".to_vec();
+        let req = decode_request(&mut buf).unwrap().unwrap();
+        assert_eq!(req.body, b"ab");
+        assert_eq!(buf, b"cd");
+    }
+
+    #[test]
+    fn pipelined_and_half_sent_requests() {
+        let mut buf = Vec::new();
+        for cseq in 1..=20 {
+            buf.extend_from_slice(format!("GET /info RTSP/1.0\r\nCSeq: {cseq}\r\n\r\n").as_bytes());
+        }
+        let mut got = 0;
+        while decode_request(&mut buf).unwrap().is_some() {
+            got += 1;
+        }
+        assert_eq!(got, 20);
+        assert!(buf.is_empty());
+
+        // Заголовок целиком, тело — нет: ждём, буфер не теряется.
+        let mut buf = b"POST /x RTSP/1.0\r\nContent-Length: 10\r\n\r\nabc".to_vec();
+        assert_eq!(decode_request(&mut buf), Ok(None));
+        assert_eq!(buf.len(), 43);
+        buf.extend_from_slice(b"defghij");
+        assert_eq!(
+            decode_request(&mut buf).unwrap().unwrap().body,
+            b"abcdefghij"
+        );
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn malformed_start_lines_and_headers_are_errors() {
+        for head in [
+            &b"\r\n\r\n"[..],
+            &b"GET\r\n\r\n"[..],
+            &b"GET /x\r\n\r\n"[..],
+        ] {
+            let mut buf = head.to_vec();
+            assert!(decode_request(&mut buf).is_err(), "{head:?}");
+        }
+        let mut no_colon = b"GET /x RTSP/1.0\r\nNoColonHere\r\n\r\n".to_vec();
+        assert_eq!(decode_request(&mut no_colon), Err(Error::BadHeader));
+        // Ответ с двумя полями стартовой строки разбирается (reason пустой).
+        let mut buf = b"RTSP/1.0 200\r\n\r\n".to_vec();
+        let resp = decode_response(&mut buf).unwrap().unwrap();
+        assert_eq!((resp.status, resp.reason.as_str()), (200, ""));
+    }
+
+    #[test]
+    fn head_size_boundary_and_non_utf8_are_rejected() {
+        // Терминатор ровно на границе MAX_HEAD ещё принимается.
+        let mut buf = vec![b'a'; MAX_HEAD - 4];
+        buf.extend_from_slice(b"\r\n\r\n");
+        assert!(matches!(decode_request(&mut buf), Err(Error::BadStartLine)));
+        let mut buf = vec![b'a'; MAX_HEAD + 1];
+        buf.extend_from_slice(b"\r\n\r\n");
+        assert_eq!(decode_request(&mut buf), Err(Error::HeadTooLong));
+
+        let mut buf = b"GET /x RTSP/1.0\r\nX: \xff\xfe\r\n\r\n".to_vec();
+        assert_eq!(decode_request(&mut buf), Err(Error::BadHeader));
     }
 }

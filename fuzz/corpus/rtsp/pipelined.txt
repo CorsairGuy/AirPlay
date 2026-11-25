@@ -1,0 +1,15 @@
+GET /info RTSP/1.0
+CSeq: 1
+
+GET /info RTSP/1.0
+CSeq: 2
+
+GET /info RTSP/1.0
+CSeq: 3
+
+GET /info RTSP/1.0
+CSeq: 4
+
+GET /info RTSP/1.0
+CSeq: 5
+

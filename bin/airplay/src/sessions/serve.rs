@@ -262,6 +262,7 @@ pub async fn start(opts: Options) -> Result<Receiver> {
         remote: opts.remote,
         mrp,
         session_group: Default::default(),
+        session_group_owner: Default::default(),
         photo: opts.photo.map(sessions::photo::Service::new),
     });
     if opts.mdns {

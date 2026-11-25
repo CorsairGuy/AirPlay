@@ -80,7 +80,9 @@ fn options(
             width: 1920,
             height: 1080,
             fps: 60,
+            ..Default::default()
         },
+        photo: None,
         remote: Default::default(),
         mrp: serve::Mrp::Off,
         events: std::sync::Arc::new(events::NoEvents),

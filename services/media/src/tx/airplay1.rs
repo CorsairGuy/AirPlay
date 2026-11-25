@@ -206,7 +206,7 @@ impl Session {
         let setup = session
             .request("SETUP", &uri, &[("Transport", &transport)], &[])
             .await?;
-        if let Some(server_port) = setup
+        let server_port = setup
             .headers
             .get("Transport")
             .and_then(|value| {
@@ -216,10 +216,8 @@ impl Session {
             })
             .and_then(|value| value.parse::<u16>().ok())
             .filter(|port| *port != 0)
-        {
-            session.audio_target =
-                SocketAddr::new(session.config.receiver.address.ip(), server_port);
-        }
+            .context("RAOP SETUP response has no valid server_port")?;
+        session.audio_target = SocketAddr::new(session.config.receiver.address.ip(), server_port);
         session.request("RECORD", &uri, &[], &[]).await?;
         session.recorded = true;
         Ok(session)
@@ -263,7 +261,8 @@ impl Session {
         req.body = body.to_vec();
         let mut wire = Vec::new();
         req.encode(&mut wire);
-        timeout(self.config.request_timeout, self.rtsp.write_all(&wire))
+        let deadline = tokio::time::Instant::now() + self.config.request_timeout;
+        tokio::time::timeout_at(deadline, self.rtsp.write_all(&wire))
             .await
             .context("RAOP request deadline")??;
         let mut buffer = Vec::new();
@@ -274,7 +273,7 @@ impl Session {
             {
                 break response;
             }
-            let n = timeout(self.config.request_timeout, self.rtsp.read(&mut chunk))
+            let n = tokio::time::timeout_at(deadline, self.rtsp.read(&mut chunk))
                 .await
                 .context("RAOP response deadline")??;
             if n == 0 {

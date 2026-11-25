@@ -120,8 +120,7 @@ pub struct Display {
     pub rotation: u32,
     /// `overscanned`: отдаём ли картинку с запасом под обрезку.
     pub overscanned: bool,
-    /// `displays[].features`: биты возможностей дисплея. По умолчанию —
-    /// значение, которое сообщает Apple TV (0xE).
+    /// `displays[].features`: биты возможностей дисплея. По умолчанию 2.
     pub features: u64,
 }
 
@@ -139,7 +138,7 @@ impl Default for Display {
             refresh_rate: 60.0,
             rotation: 0,
             overscanned: false,
-            features: Self::APPLE_TV_FEATURES,
+            features: 2,
         }
     }
 }

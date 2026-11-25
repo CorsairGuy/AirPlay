@@ -209,7 +209,7 @@ impl LatencyPolicy {
         self.validate()?;
         let receiver_min = receiver_min.unwrap_or(11_025);
         let receiver_max = receiver_max.unwrap_or(88_200);
-        if receiver_min == 0 || receiver_min > receiver_max || receiver_max > 88_200 {
+        if receiver_min > receiver_max {
             bail!("invalid receiver latency range");
         }
         let low = self.min_frames.max(receiver_min);
@@ -1897,6 +1897,8 @@ mod latency_tests {
     #[test]
     fn desired_latency_is_clamped_to_receiver_range() {
         let policy = LatencyPolicy::default();
+        let zero = policy.resolve(22_050, Some(0), Some(120_000)).unwrap();
+        assert_eq!(zero.frames, 22_050);
         let fast = policy.resolve(22_050, Some(5_000), Some(11_025)).unwrap();
         assert_eq!(fast.frames, 11_025);
         let slow = policy.resolve(22_050, Some(44_100), Some(88_200)).unwrap();

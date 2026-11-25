@@ -66,6 +66,7 @@ pub trait Sink: Send + Sync {
 struct Cache {
     entries: VecDeque<(String, Photo)>,
     bytes: usize,
+    displayed: Option<String>,
 }
 
 impl Cache {
@@ -73,6 +74,7 @@ impl Cache {
         Self {
             entries: VecDeque::new(),
             bytes: 0,
+            displayed: None,
         }
     }
 
@@ -98,6 +100,7 @@ impl Cache {
     fn clear(&mut self) {
         self.entries.clear();
         self.bytes = 0;
+        self.displayed = None;
     }
 }
 
@@ -127,6 +130,9 @@ impl Service {
         {
             let mut cache = self.lock();
             cache.insert(photo.clone());
+            if !cache_only {
+                cache.displayed = Some(photo.asset.clone());
+            }
         }
         if !cache_only {
             self.sink.display(&photo);
@@ -140,18 +146,29 @@ impl Service {
             photo.transition = transition.map(str::to_owned);
         }
         // Показанный кадр остаётся в кэше: следующий переход может вернуться.
-        self.lock().insert(photo.clone());
+        {
+            let mut cache = self.lock();
+            cache.insert(photo.clone());
+            cache.displayed = Some(photo.asset.clone());
+        }
         self.sink.display(&photo);
         Ok(())
     }
 
     pub fn remove(&self, asset: &str) -> bool {
-        if self.lock().remove(asset).is_some() {
+        let (removed, was_displayed) = {
+            let mut cache = self.lock();
+            let removed = cache.remove(asset).is_some();
+            let was_displayed = removed && cache.displayed.as_deref() == Some(asset);
+            if was_displayed {
+                cache.displayed = None;
+            }
+            (removed, was_displayed)
+        };
+        if was_displayed {
             self.sink.clear();
-            true
-        } else {
-            false
         }
+        removed
     }
 
     pub fn clear(&self) {
@@ -361,5 +378,17 @@ mod tests {
         assert!(service.put("big", None, &big, true).is_err());
         assert_eq!(service.cached(), MAX_CACHED);
         assert!(service.cached_bytes() <= MAX_CACHE_BYTES);
+    }
+
+    #[test]
+    fn removing_preloaded_photo_does_not_clear_displayed_photo() {
+        let log = Arc::new(Log::default());
+        let service = Service::new(log.clone());
+        service.put("shown", None, &jpeg(10, 10), false).unwrap();
+        service.put("next", None, &jpeg(20, 20), true).unwrap();
+        assert!(service.remove("next"));
+        assert_eq!(*log.0.lock().unwrap(), ["display shown 10x10"]);
+        assert!(service.remove("shown"));
+        assert_eq!(*log.0.lock().unwrap(), ["display shown 10x10", "clear"]);
     }
 }

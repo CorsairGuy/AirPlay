@@ -61,7 +61,7 @@
 
 - `device::Display`: `refresh_rate: f64`, `rotation: u32`,
   `overscanned: bool`, `features: u64`; `Default` — 1920x1080, 60 к/с,
-  60 Гц, без поворота и overscan, `features = 0x0E` (наблюдённое значение
+  60 Гц, без поворота и overscan, `features = 2`; альтернативное `0x0E` (наблюдённое значение
   Apple TV; раньше было жёстко 2).
 - `/info` → `displays[0]`: полный набор ключей Apple TV, включая
   `widthPhysical`/`heightPhysical = 0`; `features` берётся из профиля.
@@ -128,8 +128,6 @@ macOS, `curl` `/info` (model, sourceVersion, features, displays) и провер
   разрешения, ни переподключение аппаратно не проверены.
 - Влияние конкретных полей `/info` на появление extended-режима — гипотеза,
   основанная на наблюдаемых дампах и поведении UxPlay/Wormhole.
-- Значение `displays[].features` по умолчанию изменено с 2 на 0x0E. Это
-  приближает профиль к Apple TV, но если изменится поведение iOS-сессий,
-  вернуть прежнее значение можно флагом `--display-features 2`.
+- Значение `displays[].features` по умолчанию сохранено равным 2; вариант Apple TV `0x0E` включается флагом `--display-features 0xE` и требует проверки на устройстве.
 - Декодирование H.265 зависит от сборки с `ffmpeg`; приём и передача кадров
   от этого не зависят.

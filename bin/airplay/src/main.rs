@@ -589,16 +589,15 @@ mod tests {
         assert_eq!(options.model, "AppleTV3,2");
     }
 
-    /// По умолчанию объявляем такой же дисплей, как Apple TV в наблюдённом
-    /// `/info`: число битов дисплея 0xE, 60 Гц, без поворота и overscan.
+    /// Сохраняем ранее проверенную маску дисплея и стандартную геометрию.
     #[test]
-    fn display_defaults_match_apple_tv_descriptor() {
+    fn display_defaults_preserve_existing_profile() {
         let d = device::Display::default();
         assert_eq!((d.width, d.height, d.fps), (1920, 1080, 60));
         assert_eq!(d.refresh_rate, 60.0);
         assert_eq!(d.rotation, 0);
         assert!(!d.overscanned);
-        assert_eq!(d.features, 0x0E);
+        assert_eq!(d.features, 2);
     }
 
     #[cfg(feature = "mirroring")]
