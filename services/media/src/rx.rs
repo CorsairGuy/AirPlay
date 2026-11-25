@@ -1225,46 +1225,24 @@ async fn next_command(
 }
 
 fn realtime_format(s: &Dictionary) -> Result<Format, String> {
-    let sample_rate = sample_rate(s)?;
-    let frames = uint(s, "spf").unwrap_or(352);
-    // `frames_per_packet` участвует в арифметике меток: 0 — это цикл без
-    // продвижения курсора, гигантское значение — переполнение.
-    if !(1..=8192).contains(&frames) {
-        return Err(format!("недопустимый размер пакета spf={frames}"));
-    }
-    let frames = frames as u32;
-    let bits = uint(s, "ss").unwrap_or(16);
-    if bits > 32 {
-        return Err(format!("недопустимая битность ss={bits}"));
-    }
-    let bits = bits as u8;
-    let codec = match uint(s, "ct").unwrap_or(2) {
-        1 if bits == 16 => Codec::Pcm {
-            frames_per_packet: frames,
-        },
-        1 => return Err(format!("PCM с ss={bits}: ожидается 16 бит")),
-        2 if matches!(bits, 16 | 20 | 24 | 32) => Codec::Alac {
-            bit_depth: bits,
-            frames_per_packet: frames,
-        },
-        2 => return Err(format!("ALAC с ss={bits}")),
-        4 => Codec::Aac,
-        8 => return Err("AAC-ELD пока не поддерживается".into()),
-        other => return Err(format!("неизвестный кодек ct={other}")),
-    };
+    let advertisement = codec::matrix::Advertisement::from_fields(
+        uint(s, "ct"),
+        uint(s, "ss"),
+        uint(s, "sr"),
+        uint(s, "spf"),
+    );
+    let mut format = codec::matrix::format(advertisement).map_err(codec::matrix::Rejection::reason)?;
     let channels = uint(s, "ch").unwrap_or(2);
-    if !matches!(channels, 1 | 2 | 6 | 8) || (matches!(codec, Codec::Aac) && channels > 2) {
+    if !matches!(channels, 1 | 2 | 6 | 8) || (matches!(format.codec, Codec::Aac) && channels > 2) {
         return Err(format!("неподдерживаемое число каналов ch={channels}"));
     }
-    Ok(Format {
-        codec,
-        sample_rate,
-        channels: channels as u8,
-    })
+    format.channels = channels as u8;
+    Ok(format)
 }
 
 /// Частота дискретизации из SETUP: ноль или абсурдное значение дали бы
 /// деление на ноль в планировщике вывода.
+#[cfg(feature = "mirroring")]
 fn sample_rate(s: &Dictionary) -> Result<u32, String> {
     let rate = uint(s, "sr").unwrap_or(44_100);
     if !(8_000..=384_000).contains(&rate) {
@@ -1619,6 +1597,7 @@ mod tests {
 #[cfg(test)]
 mod realtime_state_tests {
     use super::*;
+    use codec::Codec;
     use std::time::Duration;
     #[derive(Default)]
     struct States(Mutex<Vec<bool>>);
