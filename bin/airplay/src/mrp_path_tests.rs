@@ -1,9 +1,10 @@
 //! Same backend/data over TCP bridge versus in-process duplex; localhost only.
 use crate::{
     card::Card,
-    remote::{self, MrpService, Remote},
+    remote::{MrpService, Remote},
 };
 use crypto::{Channel, kdf::ControlKeys};
+use media::control::bridge;
 use mrp::{
     frame::{Decoder, Frame},
     messages::Device,
@@ -18,7 +19,7 @@ use tokio::{
 async fn probe(service: MrpService, fragmented: bool) -> Node {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let server = tokio::spawn(remote::bridge(
+    let server = tokio::spawn(bridge(
         listener,
         addr.ip(),
         ControlKeys::accessory_data(&[42; 32], 7),
@@ -119,7 +120,7 @@ async fn same_card_device_info_survives_bridge_and_duplex_paths() {
             backend.serve(socket).await.unwrap();
         });
         let tcp = probe(MrpService::Bridge(addr), fragmented).await;
-        let direct = probe(MrpService::Card(card.clone()), fragmented).await;
+        let direct = probe(MrpService::Handler(card.clone()), fragmented).await;
         assert_eq!(
             tcp, direct,
             "same identity/feed differ by backend transport"

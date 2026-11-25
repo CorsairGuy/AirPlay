@@ -4,7 +4,10 @@ use coordinator::outputs::ReceiverEndpoint;
 use media::tx::{Session, pool::SessionPool};
 use std::future::Future;
 
+pub mod output_worker;
 pub mod preparer;
+pub mod session;
+pub mod transport;
 
 /// Application supplies authentication/configuration. Dropping this future
 /// must release pending pairing resources; do not detach network work here.

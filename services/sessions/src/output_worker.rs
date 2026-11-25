@@ -1,9 +1,5 @@
 //! Application adapter that applies coordinator selection to prepared sessions.
 //! No Station paths or capture policy.
-use crate::{
-    remote::output_control::{OutputRequest, VolumeBackend},
-    remote::output_selection,
-};
 use ::coordinator::{
     outputs::{self, ReceiverEndpoint, SelectionPlan},
     runtime::{ApplyResult, PhysicalSessionBackend, Runtime},
@@ -13,11 +9,15 @@ use ::discovery::catalog::OutputCatalog;
 use ::media::tx::Session;
 use ::media::tx::pool::SessionPool;
 use anyhow::Result;
+use remote::{
+    output_control::{OutputRequest, VolumeBackend},
+    output_selection,
+};
 use std::{collections::BTreeMap, sync::Arc};
 use tokio::sync::{mpsc, watch};
 
+pub use crate::SessionPreparer;
 pub use ::coordinator::runtime::Snapshot;
-pub use sessions::SessionPreparer;
 pub type AppliedSelection =
     ApplyResult<::media::tx::pool::SessionHandle, Result<::media::tx::StreamStats>>;
 
@@ -28,7 +28,7 @@ async fn stopped(stop: &mut watch::Receiver<bool>) {
         }
     }
 }
-pub(super) fn plan_selection(
+pub fn plan_selection(
     pool: &SessionPool,
     runtime: &Runtime,
     catalog: &OutputCatalog,
@@ -142,7 +142,7 @@ impl PhysicalSessionBackend<::media::tx::Session> for PoolBackend<'_> {
     }
 }
 
-pub(super) async fn apply_selection(
+pub async fn apply_selection(
     runtime: &mut Runtime,
     pool: &mut SessionPool,
     plan: SelectionPlan,
@@ -420,7 +420,7 @@ mod tests {
     #[tokio::test]
     async fn reconciliation_failure_ends_worker_and_publishes_empty_error_state() {
         let (_source, audio) = tokio::sync::broadcast::channel(4);
-        let (_control, requests) = crate::coordinator::output_control::OutputControl::channel(4);
+        let (_control, requests) = remote::output_control::OutputControl::channel(4);
         let (updates, state) = watch::channel(Snapshot::default());
         let (_stop, stopped) = watch::channel(false);
         tokio::time::timeout(
@@ -459,7 +459,7 @@ mod tests {
     #[tokio::test]
     async fn selection_configuration_is_rejected_before_authentication() {
         let (_source, audio) = tokio::sync::broadcast::channel(4);
-        let (control, requests) = crate::coordinator::output_control::OutputControl::channel(4);
+        let (control, requests) = remote::output_control::OutputControl::channel(4);
         let (updates, _) = watch::channel(Snapshot::default());
         let (stop, stopped) = watch::channel(false);
         let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -490,7 +490,7 @@ mod tests {
     #[tokio::test]
     async fn live_discovery_changes_are_used_without_restarting_worker() {
         let (_source, audio) = tokio::sync::broadcast::channel(4);
-        let (control, requests) = crate::coordinator::output_control::OutputControl::channel(4);
+        let (control, requests) = remote::output_control::OutputControl::channel(4);
         let (updates, _) = watch::channel(Snapshot::default());
         let (stop, stopped) = watch::channel(false);
         let (discovery, catalogs) = watch::channel(Arc::new(OutputCatalog::new(vec![]).unwrap()));
@@ -559,7 +559,7 @@ mod tests {
     #[tokio::test]
     async fn controller_disconnect_cancels_prepare_and_next_request_still_works() {
         let (_source, audio) = tokio::sync::broadcast::channel(4);
-        let (control, requests) = crate::coordinator::output_control::OutputControl::channel(4);
+        let (control, requests) = remote::output_control::OutputControl::channel(4);
         let (updates, mut state) = watch::channel(Snapshot::default());
         let (stop, stopped) = watch::channel(false);
         let dropped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -595,7 +595,7 @@ mod tests {
     #[tokio::test]
     async fn stop_cancels_pending_prepare_and_releases_reply() {
         let (_source, audio) = tokio::sync::broadcast::channel(4);
-        let (control, requests) = crate::coordinator::output_control::OutputControl::channel(4);
+        let (control, requests) = remote::output_control::OutputControl::channel(4);
         let (updates, _) = watch::channel(Snapshot::default());
         let (stop, stopped) = watch::channel(false);
         let dropped = Arc::new(std::sync::atomic::AtomicUsize::new(0));

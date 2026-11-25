@@ -5,14 +5,14 @@ use tokio::sync::{mpsc, oneshot};
 
 #[derive(Clone)]
 pub struct OutputControl(mpsc::Sender<OutputRequest>);
-pub(crate) trait VolumeBackend {
+pub trait VolumeBackend {
     fn set_routes(
         &self,
         catalog: &::discovery::catalog::OutputCatalog,
         levels: &[(String, ::media::tx::Volume)],
     ) -> anyhow::Result<()>;
 }
-pub(crate) type VolumeOperation =
+pub type VolumeOperation =
     Box<dyn FnOnce(&dyn VolumeBackend, &::discovery::catalog::OutputCatalog) -> u64 + Send>;
 struct Completion(Option<Box<dyn FnOnce(u64) + Send>>);
 impl Completion {
@@ -34,17 +34,17 @@ impl Drop for Completion {
 }
 pub struct OutputRequest {
     pub body: Node,
-    pub authorization: Option<crate::identity::route_pairing::AuthorizationContext>,
+    pub authorization: Option<identity::route_pairing::AuthorizationContext>,
     pub volume: Option<(String, f32)>,
     pub batch: Option<Vec<(String, f32)>>,
-    pub(crate) operation: Option<VolumeOperation>,
+    pub operation: Option<VolumeOperation>,
     after: Option<Completion>,
     /// Reply with the actual MRP error code after applying the operation.
     /// Check is_closed()/closed() to cancel pending pairing on controller loss.
     pub reply: oneshot::Sender<u64>,
 }
 impl OutputRequest {
-    pub(crate) fn after_result(&mut self, callback: impl FnOnce(u64) + Send + 'static) {
+    pub fn after_result(&mut self, callback: impl FnOnce(u64) + Send + 'static) {
         let previous = self.after.take();
         self.after = Some(Completion::new(Box::new(move |code| {
             if let Some(previous) = previous {
@@ -73,14 +73,15 @@ impl OutputControl {
         let (tx, rx) = mpsc::channel(capacity.clamp(1, 64));
         (Self(tx), rx)
     }
-    #[cfg(test)]
-    pub(crate) fn submit(&self, body: Node) -> Result<oneshot::Receiver<u64>, ()> {
-        self.submit_authorized(body, None)
+    /// Поставить простой запрос без громкости; ответ — код MRP.
+    /// `None` — очередь переполнена или уже закрыта.
+    pub fn submit(&self, body: Node) -> Option<oneshot::Receiver<u64>> {
+        self.submit_authorized(body, None).ok()
     }
     pub(crate) fn submit_authorized(
         &self,
         body: Node,
-        authorization: Option<crate::identity::route_pairing::AuthorizationContext>,
+        authorization: Option<identity::route_pairing::AuthorizationContext>,
     ) -> Result<oneshot::Receiver<u64>, ()> {
         let (reply, result) = oneshot::channel();
         self.0

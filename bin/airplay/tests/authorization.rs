@@ -1,11 +1,18 @@
 //! Full MRP selection/PIN/worker path. Loopback RTSP and null audio only.
-use super::*;
-use ::discovery::catalog::{OutputCatalog, OutputRoute, ReceiverEndpoint};
-use ::media::tx::pool::SessionPool;
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+//!
+//! Cross-crate integration test: the receiver session comes from `sessions`,
+//! the MRP card/worker from `remote`, and neither crate needs the other's
+//! test build.
+use discovery::catalog::{OutputCatalog, OutputRoute, ReceiverEndpoint};
+use media::tx::pool::{SessionPool, SessionState};
+use remote::mrp_service::control::Control;
+use remote::mrp_service::model::{self, Feed, Identity, f};
+use remote::mrp_service::server::connection;
+use remote::wire::Node;
+use std::{sync::Arc, time::Duration};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::watch;
+use uuid::Uuid;
 
 async fn message(
     client: &mut tokio::io::DuplexStream,
@@ -52,7 +59,7 @@ async fn selection_pin(disconnect: bool) {
         // PIN setup, then persistent pair-verify/media on a new connection.
         for _ in 0..if disconnect { 1 } else { 3 } {
             let (socket, peer) = listener.accept().await.unwrap();
-            connections.spawn(crate::sessions::serve::serve_connection(
+            connections.spawn(sessions::transport::serve_connection(
                 socket,
                 receiver.clone(),
                 peer,
@@ -63,16 +70,16 @@ async fn selection_pin(disconnect: bool) {
         }
     });
     let directory = std::env::temp_dir().join(format!("airplay-wire-pin-{}", Uuid::new_v4()));
-    let store = Arc::new(crate::identity::sender_store::SenderStore::open(&directory).unwrap());
+    let store = Arc::new(identity::sender_store::SenderStore::open(&directory).unwrap());
     let mut config = ::media::tx::SessionConfig::new(
         address,
         ::media::tx::Identity::new("wire-controller", "test"),
     );
     config.preserve_receiver_volume = true;
-    let preparer = crate::sessions::preparer::StoredSessionPreparer::new(
+    let preparer = sessions::preparer::StoredSessionPreparer::new(
         config,
         store.clone(),
-        crate::sessions::preparer::AuthenticationPolicy::InteractivePinForUnpaired,
+        sessions::preparer::AuthenticationPolicy::InteractivePinForUnpaired,
     );
     let catalog = Arc::new(
         OutputCatalog::new(vec![OutputRoute {
@@ -87,11 +94,11 @@ async fn selection_pin(disconnect: bool) {
         }])
         .unwrap(),
     );
-    let (control, requests) = crate::coordinator::output_control::OutputControl::channel(4);
+    let (control, requests) = remote::output_control::OutputControl::channel(4);
     let (_pcm, packets) = tokio::sync::broadcast::channel(4);
-    let (updates, state) = watch::channel(crate::coordinator::output_worker::Snapshot::default());
+    let (updates, state) = watch::channel(sessions::output_worker::Snapshot::default());
     let (stop, stopped) = watch::channel(false);
-    let worker = tokio::spawn(crate::coordinator::output_worker::run(
+    let worker = tokio::spawn(sessions::output_worker::run(
         SessionPool::new(packets),
         requests,
         catalog,
@@ -109,7 +116,7 @@ async fn selection_pin(disconnect: bool) {
             group: "local-group".into(),
         },
         feed_rx,
-        Control::new(feed, crate::remote::Remote::new()).with_outputs(control),
+        Control::new(feed, media::control::Remote::new()).with_outputs(control),
     ));
     let selection = model::envelope(
         "MODIFY_OUTPUT_CONTEXT_REQUEST_MESSAGE",
@@ -213,7 +220,7 @@ async fn selection_pin(disconnect: bool) {
         .unwrap();
     drop(store);
     assert!(
-        crate::identity::sender_store::SenderStore::open(&directory)
+        identity::sender_store::SenderStore::open(&directory)
             .unwrap()
             .get("physical")
             .unwrap()
@@ -224,7 +231,6 @@ async fn selection_pin(disconnect: bool) {
 
 #[tokio::test]
 async fn receiver_control_failure_keeps_other_session_and_media_epoch_alive() {
-    use ::media::tx::pool::SessionState;
     let mut servers = Vec::new();
     let mut sessions = Vec::new();
     for id in ["first", "second"] {
@@ -232,7 +238,7 @@ async fn receiver_control_failure_keeps_other_session_and_media_epoch_alive() {
         let address = listener.local_addr().unwrap();
         servers.push(tokio::spawn(async move {
             let (socket, peer) = listener.accept().await.unwrap();
-            crate::sessions::serve::serve_connection(socket, receiver_context(false), peer).await
+            sessions::transport::serve_connection(socket, receiver_context(false), peer).await
         }));
         let mut config =
             ::media::tx::SessionConfig::new(address, ::media::tx::Identity::new(id, "test"));
@@ -315,45 +321,36 @@ async fn receiver_control_failure_keeps_other_session_and_media_epoch_alive() {
         .unwrap();
 }
 
-fn receiver_context(require_pin: bool) -> Arc<crate::sessions::session::Context> {
+fn receiver_context(require_pin: bool) -> Arc<sessions::session::Context> {
     let identity = pair::Identity::from_seed("pin-wire-receiver", &[37; 32]);
-    let receiver = Arc::new(crate::sessions::session::Context {
-        device: device::DeviceInfo {
-            name: "PIN loopback".into(),
-            device_id: "02:00:00:00:00:37".into(),
-            model: "AirPlay".into(),
-            accessory_type: None,
-            features: device::Features::AUDIO_RECEIVER,
-            status_flags: 4,
-            pairing_id: identity.pairing_id.clone(),
-            public_key: identity.public_key(),
-            source_version: "366.0".into(),
-            display: None,
-            audio_only_ui: false,
-            group: None,
-            pgid: "00000000-0000-4000-8000-000000000000".into(),
-            enclosure_color: None,
-        },
+    let device = device::DeviceInfo {
+        name: "PIN loopback".into(),
+        device_id: "02:00:00:00:00:37".into(),
+        model: "AirPlay".into(),
+        accessory_type: None,
+        features: device::Features::AUDIO_RECEIVER,
+        status_flags: 4,
+        pairing_id: identity.pairing_id.clone(),
+        public_key: identity.public_key(),
+        source_version: "366.0".into(),
+        display: None,
+        audio_only_ui: false,
+        group: None,
+        pgid: "00000000-0000-4000-8000-000000000000".into(),
+        enclosure_color: None,
+    };
+    Arc::new(sessions::session::Context::for_test(
         identity,
-        store: Box::new(pair::MemoryStore::default()),
-        pin: "4821".into(),
+        device,
+        Box::new(pair::MemoryStore::default()),
+        "4821",
         require_pin,
-        mdns: Mutex::new(None),
-        port: 0,
-        #[cfg(feature = "mirroring")]
-        mirror: None,
-        #[cfg(feature = "hls")]
-        hls: None,
-        remote: Default::default(),
-        mrp: None,
-        session_group: Default::default(),
-        player: Arc::new(crate::media::rx::Player::new(
+        Arc::new(media::rx::Player::new(
             audio_stream::Config {
                 device: "null".into(),
                 ..Default::default()
             },
             timesync::TimeSync::idle(37),
         )),
-    });
-    receiver
+    ))
 }

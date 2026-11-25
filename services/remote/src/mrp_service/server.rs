@@ -1,4 +1,4 @@
-use crate::remote::mrp_service::{
+use crate::mrp_service::{
     control::Control,
     model::{self, Feed, Identity, f, kind},
     schema,
@@ -92,7 +92,7 @@ fn dispatch_output_authorized(
     control: &Control,
     tx: &mpsc::Sender<Output>,
     pending: &mut tokio::task::JoinSet<()>,
-    authorization: Option<crate::identity::route_pairing::AuthorizationContext>,
+    authorization: Option<identity::route_pairing::AuthorizationContext>,
 ) -> Result<bool> {
     if message.number(f("ProtocolMessage", "type"))
         != Some(kind("MODIFY_OUTPUT_CONTEXT_REQUEST_MESSAGE") as u64)
@@ -472,7 +472,7 @@ pub async fn connection(
     let (tx, rx) = mpsc::channel(64);
     let writer = tokio::spawn(writer(write, rx));
     let (pin_out, mut pin_messages) = mpsc::channel(4);
-    let authorization = crate::identity::route_pairing::ControllerAuthorization::new(pin_out);
+    let authorization = identity::route_pairing::ControllerAuthorization::new(pin_out);
     let mut buffer = Vec::new();
     let mut chunk = [0u8; 16384];
     let mut subscribed = false;
@@ -480,10 +480,7 @@ pub async fn connection(
     let opened = std::time::Instant::now();
     let mut last = 0u64;
     let mut pending = tokio::task::JoinSet::new();
-    println!(
-        "{} MRP connection opened",
-        crate::remote::mrp_service::stamp::now()
-    );
+    println!("{} MRP connection opened", crate::mrp_service::stamp::now());
     let result:Result<()>=async{loop{tokio::select!{
   Some(message)=pin_messages.recv()=>{tx.send(Output::Messages(vec![Node::parse(&message.encode())?])).await?;},
   count=read.read(&mut chunk)=>{let count=count?;if count==0{break}buffer.extend_from_slice(&chunk[..count]);while buffer.len()>=32{
@@ -508,7 +505,7 @@ pub async fn connection(
     };
     eprintln!(
         "{} MRP connection closed after {}s (last message type={last}): {reason}",
-        crate::remote::mrp_service::stamp::now(),
+        crate::mrp_service::stamp::now(),
         opened.elapsed().as_secs()
     );
     result
@@ -532,9 +529,6 @@ pub async fn run(
     }
 }
 #[cfg(test)]
-#[path = "authorization_tests.rs"]
-mod authorization_tests;
-#[cfg(test)]
 mod tests {
     use super::*;
     #[test]
@@ -544,12 +538,12 @@ mod tests {
     }
     #[tokio::test]
     async fn group_slider_scales_local_and_remote_and_recovers_after_zero() {
-        use crate::remote::mrp_service::model::RemoteOutput;
+        use crate::mrp_service::model::RemoteOutput;
         let identity = Identity {
             device: "local".into(),
             group: "group".into(),
         };
-        let remote = crate::remote::Remote::new();
+        let remote = media::control::Remote::new();
         let mut commands = remote.attach(1);
         let initial = Feed {
             volume: 0.1,
@@ -562,7 +556,7 @@ mod tests {
             ..Default::default()
         };
         let (feed, _) = watch::channel(initial);
-        let (backend, mut requests) = crate::coordinator::output_control::OutputControl::channel(4);
+        let (backend, mut requests) = crate::output_control::OutputControl::channel(4);
         let control = Control::new(feed.clone(), remote).with_outputs(backend);
         let (tx, mut replies) = mpsc::channel(4);
         let mut pending = tokio::task::JoinSet::new();
@@ -577,8 +571,8 @@ mod tests {
                     .unwrap()
             );
             let request = requests.recv().await.unwrap();
-            let backend = crate::coordinator::output_control::testing::Backend::default();
-            crate::coordinator::output_control::testing::execute(request, &backend);
+            let backend = crate::output_control::testing::Backend::default();
+            crate::output_control::testing::execute(request, &backend);
             let recorded = backend.0.lock().unwrap();
             assert_eq!(recorded[0].len(), 1);
             assert_eq!(recorded[0][0].0, "pod");
@@ -590,7 +584,7 @@ mod tests {
             );
             drop(recorded);
             pending.join_next().await.unwrap().unwrap();
-            let crate::remote::Command::Volume(local) = commands.recv().await.unwrap() else {
+            let media::control::Command::Volume(local) = commands.recv().await.unwrap() else {
                 panic!("wrong local command")
             };
             assert!((local - target / 3.0).abs() < 1e-6);
@@ -615,7 +609,7 @@ mod tests {
     }
     #[tokio::test]
     async fn remote_volume_routes_without_changing_local_or_other_output() {
-        use crate::remote::mrp_service::model::RemoteOutput;
+        use crate::mrp_service::model::RemoteOutput;
         let identity = Identity {
             device: "local".into(),
             group: "local-group".into(),
@@ -631,9 +625,9 @@ mod tests {
             ..Default::default()
         };
         let (feed, _) = watch::channel(before.clone());
-        let (backend, mut requests) = crate::coordinator::output_control::OutputControl::channel(4);
+        let (backend, mut requests) = crate::output_control::OutputControl::channel(4);
         let control =
-            Control::new(feed.clone(), crate::remote::Remote::new()).with_outputs(backend);
+            Control::new(feed.clone(), media::control::Remote::new()).with_outputs(backend);
         let (tx, mut replies) = mpsc::channel(4);
         let mut pending = tokio::task::JoinSet::new();
         let mut body = Node::default();
@@ -717,11 +711,11 @@ mod tests {
     #[tokio::test]
     async fn output_request_carries_only_its_connection_authorization_context() {
         let (feed, _) = watch::channel(Feed::default());
-        let (backend, mut requests) = crate::coordinator::output_control::OutputControl::channel(2);
-        let control = Control::new(feed, crate::remote::Remote::new()).with_outputs(backend);
+        let (backend, mut requests) = crate::output_control::OutputControl::channel(2);
+        let control = Control::new(feed, media::control::Remote::new()).with_outputs(backend);
         let (tx, _replies) = mpsc::channel(4);
         let (out, _pin_messages) = mpsc::channel(4);
-        let owner = crate::identity::route_pairing::ControllerAuthorization::new(out);
+        let owner = identity::route_pairing::ControllerAuthorization::new(out);
         let mut pending = tokio::task::JoinSet::new();
         let message = model::envelope(
             "MODIFY_OUTPUT_CONTEXT_REQUEST_MESSAGE",
@@ -751,8 +745,8 @@ mod tests {
     #[tokio::test]
     async fn queued_output_reply_preserves_request_id_and_disconnect_cancels_wait() {
         let (feed, _) = watch::channel(Feed::default());
-        let (backend, mut requests) = crate::coordinator::output_control::OutputControl::channel(2);
-        let control = Control::new(feed, crate::remote::Remote::new()).with_outputs(backend);
+        let (backend, mut requests) = crate::output_control::OutputControl::channel(2);
+        let control = Control::new(feed, media::control::Remote::new()).with_outputs(backend);
         let (tx, mut replies) = mpsc::channel(4);
         let mut pending = tokio::task::JoinSet::new();
         let message = model::envelope(
@@ -788,8 +782,8 @@ mod tests {
     #[tokio::test]
     async fn full_output_worker_queue_fails_without_blocking_reader() {
         let (feed, _) = watch::channel(Feed::default());
-        let (backend, _requests) = crate::coordinator::output_control::OutputControl::channel(1);
-        let control = Control::new(feed, crate::remote::Remote::new()).with_outputs(backend);
+        let (backend, _requests) = crate::output_control::OutputControl::channel(1);
+        let control = Control::new(feed, media::control::Remote::new()).with_outputs(backend);
         let (tx, mut replies) = mpsc::channel(4);
         let mut pending = tokio::task::JoinSet::new();
         let message = model::envelope(
@@ -817,7 +811,7 @@ mod tests {
         };
         let feed = Feed::default();
         let (updates, _) = watch::channel(feed.clone());
-        let control = Control::new(updates, crate::remote::Remote::new());
+        let control = Control::new(updates, media::control::Remote::new());
         for (body, expected) in [
             (
                 Node::default()

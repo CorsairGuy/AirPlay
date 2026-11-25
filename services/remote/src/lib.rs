@@ -8,7 +8,13 @@
 //! Приёмник `airplay` делает это сам (метаданные и пульт отправителя), на
 //! станции — airplay_mrp из своих источников.
 
+pub mod card;
+pub mod card_transport;
+pub mod continuous_control;
 pub mod model;
+pub mod mrp_service;
+pub mod output_control;
+pub mod output_selection;
 pub mod schema;
 pub mod stamp;
 pub mod wire;

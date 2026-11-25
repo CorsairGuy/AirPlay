@@ -1,6 +1,6 @@
 [package]
 name = "sessions"
-description = "AirPlay session preparation and authorization policy."
+description = "AirPlay session handling: RTSP, pairing, receiver transport and output worker."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,19 +8,36 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[features]
+default = []
+mirroring = ["dep:mirror", "media/mirroring"]
+hls = ["media/hls"]
+
 [dependencies]
 anyhow.workspace = true
+clock.workspace = true
 coordinator.workspace = true
+crypto.workspace = true
+device.workspace = true
+discovery.workspace = true
 identity.workspace = true
+mdns.workspace = true
 media.workspace = true
+mirror = { workspace = true, optional = true }
 mrp.workspace = true
 pair.workspace = true
+remote.workspace = true
 rtsp.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 uuid = { version = "1", features = ["v4", "v5"] }
 
 [dev-dependencies]
-clock.workspace = true
+audio_stream.workspace = true
+hex.workspace = true
+plist.workspace = true
+rtp.workspace = true
+timesync.workspace = true
 
 [lints]
 workspace = true

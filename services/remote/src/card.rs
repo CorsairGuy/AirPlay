@@ -8,19 +8,19 @@
 
 use std::sync::Arc;
 
-pub use crate::remote::mrp_service::model::Profile as CardProfile;
+pub use crate::mrp_service::model::Profile as CardProfile;
 use mrp::messages::Device;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::watch;
 
-use crate::remote::Remote;
-use crate::remote::mrp_service::{
+use crate::mrp_service::{
     control::Control,
     model::{Cover, Feed, Identity, Profile, Route},
     server,
 };
 use ::media::events::{Events, Metadata, Progress};
+use media::control::Remote;
 
 /// Источник в терминах станции: у неё «airplay» — входящий AirPlay.
 const SOURCE: &str = "airplay";
@@ -31,8 +31,8 @@ pub struct Card {
     remote: Remote,
     /// Программа, которая встраивает приёмник, получает события как обычно.
     inner: Arc<dyn Events>,
-    outputs: Option<crate::coordinator::output_control::OutputControl>,
-    groups: Arc<crate::remote::mrp_service::control::GroupControlState>,
+    outputs: Option<crate::output_control::OutputControl>,
+    groups: Arc<crate::mrp_service::control::GroupControlState>,
     source: crate::continuous_control::SourceControl,
 }
 
@@ -93,7 +93,7 @@ impl Card {
     /// manufacture membership from a requested selection. Advertise only volume
     /// capabilities the owner actually routes (remote volume routing is separate).
     pub fn set_outputs(&self, descriptors: Vec<mrp::wire::Node>) -> anyhow::Result<()> {
-        use crate::remote::mrp_service::{model::RemoteOutput, wire::Node};
+        use crate::mrp_service::{model::RemoteOutput, wire::Node};
         use mrp::schema::field::AVOutputDeviceDescriptor as fields;
         anyhow::ensure!(descriptors.len() <= 64, "too many output descriptors");
         let mut outputs = std::collections::BTreeMap::new();
@@ -108,7 +108,7 @@ impl Card {
                 "invalid output UID"
             );
             anyhow::ensure!(
-                !crate::remote::mrp_service::model::same_uid(&uid, &self.identity.device),
+                !crate::mrp_service::model::same_uid(&uid, &self.identity.device),
                 "remote descriptor duplicates local output"
             );
             let volume = if descriptor.get(fields::volume).is_some() {
@@ -145,7 +145,7 @@ impl Card {
         device: Device,
         remote: Remote,
         inner: Arc<dyn Events>,
-        outputs: crate::coordinator::output_control::OutputControl,
+        outputs: crate::output_control::OutputControl,
     ) -> Arc<Self> {
         Self::create(device, remote, inner, Some(outputs), None)
     }
@@ -156,7 +156,7 @@ impl Card {
         device: Device,
         remote: Remote,
         inner: Arc<dyn Events>,
-        outputs: Option<crate::coordinator::output_control::OutputControl>,
+        outputs: Option<crate::output_control::OutputControl>,
         profile: Profile,
     ) -> anyhow::Result<Arc<Self>> {
         profile.validate()?;
@@ -167,7 +167,7 @@ impl Card {
         device: Device,
         remote: Remote,
         inner: Arc<dyn Events>,
-        outputs: Option<crate::coordinator::output_control::OutputControl>,
+        outputs: Option<crate::output_control::OutputControl>,
         profile: Option<Profile>,
     ) -> Arc<Self> {
         // ВРЕМЕННЫЙ ОПЫТ: подмена данных карточки переменными окружения,
@@ -395,6 +395,24 @@ fn image_info(data: &[u8]) -> Option<(&'static str, u32, u32)> {
     None
 }
 
+/// Канал потока 130 отдаёт открытый MRP карточке приёмника.
+impl media::control::MrpHandler for Card {
+    fn serve(
+        self: Arc<Self>,
+        io: tokio::io::DuplexStream,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+        Box::pin(async move {
+            if let Err(error) = Card::serve(self, io).await {
+                tracing::debug!("MRP: карточка: {error}");
+            }
+        })
+    }
+
+    fn route(&self, group: Option<String>) {
+        Card::route(self, group);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -419,35 +437,22 @@ mod tests {
             Arc::new(::media::events::NoEvents),
         );
         let info = |card: &Card| {
-            crate::remote::mrp_service::model::device_info(
-                &card.identity,
-                &card.feed.borrow(),
-                None,
-            )
-            .nested(crate::remote::mrp_service::schema::extension(
-                crate::remote::mrp_service::model::kind("DEVICE_INFO_MESSAGE"),
-            ))
-            .unwrap()
+            crate::mrp_service::model::device_info(&card.identity, &card.feed.borrow(), None)
+                .nested(crate::mrp_service::schema::extension(
+                    crate::mrp_service::model::kind("DEVICE_INFO_MESSAGE"),
+                ))
+                .unwrap()
         };
         assert_eq!(
-            info(&a).string(crate::remote::mrp_service::model::f(
-                "DeviceInfoMessage",
-                "name"
-            )),
+            info(&a).string(crate::mrp_service::model::f("DeviceInfoMessage", "name")),
             Some("one")
         );
         assert_eq!(
-            info(&b).string(crate::remote::mrp_service::model::f(
-                "DeviceInfoMessage",
-                "name"
-            )),
+            info(&b).string(crate::mrp_service::model::f("DeviceInfoMessage", "name")),
             Some("two")
         );
         assert_eq!(
-            info(&a).string(crate::remote::mrp_service::model::f(
-                "DeviceInfoMessage",
-                "modelID"
-            )),
+            info(&a).string(crate::mrp_service::model::f("DeviceInfoMessage", "modelID")),
             Some("GenericAudio")
         );
         let mut profile = Profile::from_device(&device("compat"));
@@ -463,9 +468,9 @@ mod tests {
         )
         .unwrap();
         let feed = compat.feed.borrow();
-        let path = crate::remote::mrp_service::model::path(&compat.identity, &feed, false);
+        let path = crate::mrp_service::model::path(&compat.identity, &feed, false);
         let player = path
-            .nested(crate::remote::mrp_service::model::f("PlayerPath", "player"))
+            .nested(crate::mrp_service::model::f("PlayerPath", "player"))
             .unwrap();
         let expected = uuid::Uuid::new_v5(
             &uuid::Uuid::NAMESPACE_URL,
@@ -473,7 +478,7 @@ mod tests {
         )
         .to_string();
         assert_eq!(
-            player.string(crate::remote::mrp_service::model::f(
+            player.string(crate::mrp_service::model::f(
                 "NowPlayingPlayer",
                 "identifier"
             )),
@@ -519,15 +524,12 @@ mod tests {
         let previous = card.feed.borrow().clone();
         card.set_outputs(vec![remote(0.3)]).unwrap();
         let current = card.feed.borrow().clone();
-        let changes = crate::remote::mrp_service::model::topology_updates(
-            &card.identity,
-            &previous,
-            &current,
-        );
+        let changes =
+            crate::mrp_service::model::topology_updates(&card.identity, &previous, &current);
         assert_eq!(changes.len(), 1);
         assert_eq!(
             changes[0].number(1),
-            Some(crate::remote::mrp_service::model::kind("VOLUME_DID_CHANGE_MESSAGE") as u64)
+            Some(crate::mrp_service::model::kind("VOLUME_DID_CHANGE_MESSAGE") as u64)
         );
         assert_eq!(
             current.outputs[0].descriptor.string(3),
@@ -540,7 +542,7 @@ mod tests {
         assert!(card.set_outputs(vec![invalid]).is_err());
         assert_eq!(*card.feed.borrow(), current);
         card.set_outputs(vec![]).unwrap();
-        let removed = crate::remote::mrp_service::model::topology_updates(
+        let removed = crate::mrp_service::model::topology_updates(
             &card.identity,
             &current,
             &card.feed.borrow(),

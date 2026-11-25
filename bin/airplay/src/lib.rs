@@ -6,11 +6,11 @@
 //! `video::DecodingSink` и своим `video::FrameSink`), затем вызывают
 //! [`serve::run`].
 
-pub mod card;
-pub mod card_transport;
-pub mod continuous_control;
 pub use ::media::events;
 pub use ::media::output::local_process;
+pub use ::remote::card;
+pub use ::remote::card_transport;
+pub use ::remote::continuous_control;
 pub use discovery;
 pub use discovery::{catalog as discovery_catalog, feed as discovery_feed};
 pub use identity;

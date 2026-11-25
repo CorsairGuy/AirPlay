@@ -1,10 +1,9 @@
 //! Media receiving, transmission and local output components.
+pub mod control;
 pub mod events;
-pub mod tx;
-pub mod rx {
-    pub use audio_stream;
-    #[cfg(feature = "mirroring")]
-    pub use mirror;
-}
+#[cfg(feature = "hls")]
+pub mod hls;
 pub mod output;
+pub mod rx;
+pub mod tx;
 pub use codec;

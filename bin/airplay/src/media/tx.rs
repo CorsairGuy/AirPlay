@@ -619,7 +619,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let receiver = tokio::spawn(async move {
             let (stream, peer) = listener.accept().await.unwrap();
-            crate::sessions::serve::serve_connection(stream, context, peer).await
+            ::sessions::transport::serve_connection(stream, context, peer).await
         });
         let (_stop, stopped) = watch::channel(false);
         let mut pcm = Vec::new();
