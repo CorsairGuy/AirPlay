@@ -218,6 +218,101 @@ pub fn unsubscribe(event_name: &str, xid: u32) -> Value {
     )
 }
 
+/// Предел координат тачпада: обе оси в диапазоне `0..=1000`, начало — левый
+/// верхний угол (pyatv, `docs/documentation/protocols.md`).
+pub const TOUCHPAD_MAX: i64 = 1000;
+
+/// Фазы касания в `_hidT._tPh`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TouchPhase {
+    Press,
+    Hold,
+    Release,
+    Click,
+}
+
+impl TouchPhase {
+    pub fn value(self) -> i64 {
+        match self {
+            Self::Press => 1,
+            Self::Hold => 3,
+            Self::Release => 4,
+            Self::Click => 5,
+        }
+    }
+}
+
+/// Открытие тачпада: приёмник отвечает идентификатором устройства касания.
+/// Размер в запросе — `Double`, как в захватах pyatv.
+pub fn touch_start(xid: u32) -> Value {
+    request(
+        "_touchStart",
+        Value::object(vec![
+            ("_height", Value::Double(TOUCHPAD_MAX as f64)),
+            ("_width", Value::Double(TOUCHPAD_MAX as f64)),
+            ("_tFl", Value::Int(0)),
+        ]),
+        xid,
+    )
+}
+
+pub fn touch_stop(xid: u32) -> Value {
+    request("_touchStop", Value::empty_object(), xid)
+}
+
+/// Событие касания. `_t = 1` (event), но `_x` присутствует — так его присылают
+/// захваты pyatv, в отличие от [`event`] без идентификатора обмена.
+/// `ns` — наносекунды с момента установления соединения. Координаты вне
+/// `0..=1000` прижимаются к границе, а не отбрасываются.
+pub fn touch(x: i64, y: i64, phase: TouchPhase, ns: u64, xid: u32) -> Value {
+    let x = x.clamp(0, TOUCHPAD_MAX);
+    let y = y.clamp(0, TOUCHPAD_MAX);
+    Value::object(vec![
+        ("_i", Value::Str("_hidT".into())),
+        ("_t", Value::Int(EVENT)),
+        (
+            "_c",
+            Value::object(vec![
+                ("_ns", Value::Int(ns as i64)),
+                ("_tFg", Value::Int(1)),
+                ("_tPh", Value::Int(phase.value())),
+                ("_cx", Value::Int(x)),
+                ("_cy", Value::Int(y)),
+            ]),
+        ),
+        ("_x", Value::Int(xid as i64)),
+    ])
+}
+
+/// Тап: нажатие и отпускание Select плюс событие `Click` в правом нижнем углу.
+/// Возвращает три значения; идентификаторы обмена идут подряд от `xid`.
+pub fn tap(xid: u32, ns: u64) -> [Value; 3] {
+    [
+        hid(true, HidCommand::Select, xid),
+        hid(false, HidCommand::Select, xid.wrapping_add(1)),
+        touch(
+            TOUCHPAD_MAX,
+            TOUCHPAD_MAX,
+            TouchPhase::Click,
+            ns,
+            xid.wrapping_add(2),
+        ),
+    ]
+}
+
+/// Точки свайпа от `from` к `to` включительно (`steps` — число промежутков,
+/// не считая начальной). Промежуточные округляются, концы сохраняются.
+pub fn swipe_points(from: (i64, i64), to: (i64, i64), steps: u32) -> Vec<(i64, i64)> {
+    let steps = steps.max(1) as i64;
+    let mut points = Vec::with_capacity(steps as usize + 1);
+    for step in 0..=steps {
+        let x = from.0 + (to.0 - from.0) * step / steps;
+        let y = from.1 + (to.1 - from.1) * step / steps;
+        points.push((x.clamp(0, TOUCHPAD_MAX), y.clamp(0, TOUCHPAD_MAX)));
+    }
+    points
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,6 +389,86 @@ mod tests {
             content.get("_sid").and_then(Value::as_int),
             Some(0xDEAD_BEEF)
         );
+    }
+
+    #[test]
+    fn touch_event_has_phases_and_coordinates() {
+        let value = touch(120, 980, TouchPhase::Hold, 7_130_181_240_917, 9);
+        assert_eq!(value.get("_i").and_then(Value::as_str), Some("_hidT"));
+        assert_eq!(value.get("_t").and_then(Value::as_int), Some(EVENT));
+        assert_eq!(value.get("_x").and_then(Value::as_int), Some(9));
+        let content = value.get("_c").unwrap();
+        assert_eq!(content.get("_tFg").and_then(Value::as_int), Some(1));
+        assert_eq!(content.get("_tPh").and_then(Value::as_int), Some(3));
+        assert_eq!(content.get("_cx").and_then(Value::as_int), Some(120));
+        assert_eq!(content.get("_cy").and_then(Value::as_int), Some(980));
+        assert_eq!(
+            content.get("_ns").and_then(Value::as_int),
+            Some(7_130_181_240_917)
+        );
+    }
+
+    #[test]
+    fn touch_phases_match_the_wire_values() {
+        assert_eq!(TouchPhase::Press.value(), 1);
+        assert_eq!(TouchPhase::Hold.value(), 3);
+        assert_eq!(TouchPhase::Release.value(), 4);
+        assert_eq!(TouchPhase::Click.value(), 5);
+    }
+
+    #[test]
+    fn touch_coordinates_are_clamped() {
+        for (x, y) in [(-5, 5000), (5000, -5)] {
+            let content = touch(x, y, TouchPhase::Press, 0, 1);
+            let content = content.get("_c").unwrap();
+            let cx = content.get("_cx").and_then(Value::as_int).unwrap();
+            let cy = content.get("_cy").and_then(Value::as_int).unwrap();
+            assert!((0..=TOUCHPAD_MAX).contains(&cx));
+            assert!((0..=TOUCHPAD_MAX).contains(&cy));
+        }
+    }
+
+    #[test]
+    fn touch_start_declares_a_thousand_unit_pad() {
+        let value = touch_start(5);
+        assert_eq!(value.get("_i").and_then(Value::as_str), Some("_touchStart"));
+        let content = value.get("_c").unwrap();
+        assert_eq!(content.get("_width"), Some(&Value::Double(1000.0)));
+        assert_eq!(content.get("_height"), Some(&Value::Double(1000.0)));
+        assert_eq!(content.get("_tFl").and_then(Value::as_int), Some(0));
+        assert_eq!(
+            touch_stop(5).get("_i").and_then(Value::as_str),
+            Some("_touchStop")
+        );
+    }
+
+    #[test]
+    fn tap_is_select_down_up_and_click() {
+        let [down, up, click] = tap(10, 1);
+        assert_eq!(
+            down.get("_c").unwrap().get("_hBtS").and_then(Value::as_int),
+            Some(1)
+        );
+        assert_eq!(
+            up.get("_c").unwrap().get("_hBtS").and_then(Value::as_int),
+            Some(2)
+        );
+        assert_eq!(up.get("_x").and_then(Value::as_int), Some(11));
+        assert_eq!(click.get("_x").and_then(Value::as_int), Some(12));
+        let content = click.get("_c").unwrap();
+        assert_eq!(content.get("_tPh").and_then(Value::as_int), Some(5));
+        assert_eq!(content.get("_cx").and_then(Value::as_int), Some(1000));
+        assert_eq!(content.get("_cy").and_then(Value::as_int), Some(1000));
+    }
+
+    #[test]
+    fn swipe_points_hit_both_ends() {
+        let points = swipe_points((500, 800), (100, 200), 4);
+        assert_eq!(points.len(), 5);
+        assert_eq!(points[0], (500, 800));
+        assert_eq!(*points.last().unwrap(), (100, 200));
+        assert_eq!(points[2], (300, 500));
+        assert_eq!(swipe_points((0, 0), (0, 0), 0).len(), 2);
     }
 
     #[test]

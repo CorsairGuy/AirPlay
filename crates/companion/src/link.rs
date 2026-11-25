@@ -58,6 +58,20 @@ impl Link {
         Ok((xid, self.send(FrameType::Encrypted, &value)?))
     }
 
+    /// Событие касания `_hidT` с новым `_x`: `_t = 1`, но не запрос, поэтому
+    /// ответа не ждём. `ns` — наносекунды с начала соединения.
+    pub fn touch(
+        &mut self,
+        x: i64,
+        y: i64,
+        phase: crate::commands::TouchPhase,
+        ns: u64,
+    ) -> Result<(u32, Vec<u8>), Error> {
+        let xid = self.next_xid();
+        let value = commands::touch(x, y, phase, ns, xid);
+        Ok((xid, self.send(FrameType::Encrypted, &value)?))
+    }
+
     pub fn feed(&mut self, data: &[u8]) {
         self.codec.feed(data);
     }
@@ -101,6 +115,26 @@ mod tests {
         let value = Link::payload(&frame).unwrap();
         assert_eq!(value.get("_x").and_then(Value::as_int), Some(xid as i64));
         assert_eq!(value.get("_i").and_then(Value::as_str), Some("_hidC"));
+        assert!(link.poll().unwrap().is_none());
+    }
+
+    #[test]
+    fn touch_goes_out_as_one_encrypted_event_frame() {
+        use crate::commands::TouchPhase;
+        let mut link = Link::plain();
+        let (xid, wire) = link.touch(500, 250, TouchPhase::Press, 42).unwrap();
+        assert_eq!(wire[0], FrameType::Encrypted.byte());
+        let length = u32::from_be_bytes([0, wire[1], wire[2], wire[3]]) as usize;
+        assert_eq!(length, wire.len() - 4);
+        link.feed(&wire);
+        let frame = link.poll().unwrap().unwrap();
+        let value = Link::payload(&frame).unwrap();
+        assert_eq!(value.get("_x").and_then(Value::as_int), Some(xid as i64));
+        assert_eq!(value.get("_i").and_then(Value::as_str), Some("_hidT"));
+        assert_eq!(
+            value.get("_t").and_then(Value::as_int),
+            Some(commands::EVENT)
+        );
         assert!(link.poll().unwrap().is_none());
     }
 
