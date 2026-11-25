@@ -199,7 +199,7 @@ impl Session {
             )
             .await?;
         let transport = format!(
-            "RTP/AVP/UDP;unicast;interleaved=0-1;mode=record;control_port={};timing_port={}",
+            "RTP/AVP/UDP;unicast;mode=record;control_port={};timing_port={}",
             session.audio.local_addr()?.port(),
             session.audio.local_addr()?.port()
         );
@@ -232,7 +232,7 @@ impl Session {
             Codec::Alac => {
                 "a=rtpmap:96 AppleLossless\r\na=fmtp:96 352 0 16 40 10 14 2 255 0 0 44100\r\n"
             }
-            Codec::Pcm => "a=rtpmap:96 L16\r\na=fmtp:96 channels=2;rate=44100\r\n",
+            Codec::Pcm => "a=rtpmap:96 L16/44100/2\r\n",
         };
         format!(
             "v=0\r\n\

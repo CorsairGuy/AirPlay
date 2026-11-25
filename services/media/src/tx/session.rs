@@ -163,8 +163,8 @@ impl Identity {
 pub struct LatencyPolicy {
     pub min_frames: u32,
     pub max_frames: u32,
-    /// Дополнительная пауза перед RECORD, чтобы приёмник успел набрать буфер.
-    pub initial_buffer: Duration,
+    /// Пауза перед RECORD; данные до RECORD не отправляются и буфер не заполняется.
+    pub pre_record_delay: Duration,
 }
 
 impl Default for LatencyPolicy {
@@ -172,7 +172,7 @@ impl Default for LatencyPolicy {
         Self {
             min_frames: 11_025,
             max_frames: 88_200,
-            initial_buffer: Duration::ZERO,
+            pre_record_delay: Duration::ZERO,
         }
     }
 }
@@ -184,7 +184,7 @@ pub struct NegotiatedLatency {
     pub frames: u32,
     pub receiver_min: u32,
     pub receiver_max: u32,
-    pub initial_buffer: Duration,
+    pub pre_record_delay: Duration,
 }
 
 impl LatencyPolicy {
@@ -192,8 +192,8 @@ impl LatencyPolicy {
         if self.min_frames == 0 || self.min_frames > self.max_frames || self.max_frames > 88_200 {
             bail!("invalid sender latency range");
         }
-        if self.initial_buffer > frames_duration(self.max_frames as u64) {
-            bail!("initial buffer exceeds latency range");
+        if self.pre_record_delay > frames_duration(self.max_frames as u64) {
+            bail!("pre-RECORD delay exceeds latency range");
         }
         Ok(())
     }
@@ -218,12 +218,12 @@ impl LatencyPolicy {
             bail!("no common latency range with receiver");
         }
         let frames = desired_frames.clamp(low, high);
-        let initial_buffer = self.initial_buffer.min(frames_duration(frames as u64));
+        let pre_record_delay = self.pre_record_delay.min(frames_duration(frames as u64));
         Ok(NegotiatedLatency {
             frames,
             receiver_min,
             receiver_max,
-            initial_buffer,
+            pre_record_delay,
         })
     }
 }
@@ -880,8 +880,8 @@ impl Session {
                     render_frames,
                 )?)
             };
-            if !negotiated.initial_buffer.is_zero() {
-                sleep(negotiated.initial_buffer).await;
+            if !negotiated.pre_record_delay.is_zero() {
+                sleep(negotiated.pre_record_delay).await;
             }
             rtsp.request("RECORD", None, Vec::new(), None, &[]).await?;
             rtsp.request(
@@ -1923,15 +1923,15 @@ mod latency_tests {
     }
 
     #[test]
-    fn initial_buffer_is_bounded_by_negotiated_latency() {
+    fn pre_record_delay_is_bounded_by_negotiated_latency() {
         let policy = LatencyPolicy {
             min_frames: 11_025,
             max_frames: 88_200,
-            initial_buffer: Duration::from_millis(1_500),
+            pre_record_delay: Duration::from_millis(1_500),
         };
         let negotiated = policy.resolve(11_025, Some(11_025), Some(88_200)).unwrap();
-        assert!(negotiated.initial_buffer <= frames_duration(11_025));
-        assert_eq!(negotiated.initial_buffer, frames_duration(11_025));
+        assert!(negotiated.pre_record_delay <= frames_duration(11_025));
+        assert_eq!(negotiated.pre_record_delay, frames_duration(11_025));
     }
 
     #[test]

@@ -13,6 +13,77 @@ use airplay::{audio_stream, device, events, timesync};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn airplay1_sender_and_receiver_exchange_pcm() {
+    use media::tx::airplay1::{Codec, Receiver, Session, SessionConfig};
+    use std::sync::{Arc, Mutex};
+
+    struct Capture(Arc<Mutex<Vec<i16>>>);
+    impl airplay::audio::Sink for Capture {
+        fn sample_rate(&self) -> u32 {
+            44_100
+        }
+        fn write(&mut self, samples: &[i16]) -> std::io::Result<()> {
+            self.0.lock().unwrap().extend_from_slice(samples);
+            std::thread::sleep(Duration::from_secs_f64(
+                samples.len() as f64 / 2.0 / 44_100.0,
+            ));
+            Ok(())
+        }
+        fn delay_frames(&mut self) -> u32 {
+            0
+        }
+        fn stop(&mut self) {}
+    }
+
+    let dir = TempDir::new("ap1-loopback");
+    let port = free_port();
+    let samples = Arc::new(Mutex::new(Vec::new()));
+    let output = samples.clone();
+    let mut opts = options(
+        "AP1",
+        dir.path(),
+        port,
+        "AirPlay",
+        timesync::TimeSync::idle(1),
+    );
+    opts.audio.sink = Some(airplay::audio::SinkFactory::new(move |_, _| {
+        Ok(Box::new(Capture(output.clone())) as Box<dyn airplay::audio::Sink>)
+    }));
+    let receiver = serve::start(opts).await.unwrap();
+    let target = Receiver {
+        name: "AP1".into(),
+        address: ([127, 0, 0, 1], port).into(),
+        pcm: true,
+        alac: false,
+        encryption: false,
+    };
+    let mut sender = Session::connect(SessionConfig::new(target, Codec::Pcm))
+        .await
+        .unwrap();
+    let pcm: Vec<u8> = (0..352).flat_map(|_| [0x03, 0xe8, 0xfc, 0x18]).collect();
+    for _ in 0..8 {
+        sender.send(&pcm).await.unwrap();
+    }
+    tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            if samples
+                .lock()
+                .unwrap()
+                .windows(2)
+                .any(|w| w == [1000, -1000])
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("AP1 sender PCM did not reach receiver output");
+    sender.finish().await.unwrap();
+    receiver.stop().await;
+}
+
 struct TempDir(PathBuf);
 
 impl TempDir {

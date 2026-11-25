@@ -298,6 +298,12 @@ impl Session {
             ("POST", "/pair-setup") => self.hap_setup(req),
             ("POST", "/pair-verify") if is_legacy_verify(req) => (self.legacy_verify(req), None),
             ("POST", "/pair-verify") => self.hap_verify(req),
+            ("ANNOUNCE", _) if self.ctx.require_pin && self.channel.is_none() => {
+                (Response::to(req, 403), None)
+            }
+            ("PUT" | "DELETE", "/photo") if self.ctx.require_pin && self.channel.is_none() => {
+                (Response::to(req, 403), None)
+            }
             ("PUT", "/photo") => (self.photo_put(req), None),
             ("DELETE", "/photo") => (self.photo_delete(req), None),
             ("GET", "/slideshow-features") => (self.slideshow_features(req), None),
@@ -305,7 +311,12 @@ impl Session {
                 if let Some(photo) = &self.ctx.photo {
                     photo.clear();
                 }
-                (Response::to(req, 200), None)
+                (
+                    self.media
+                        .handle(req)
+                        .unwrap_or_else(|| Response::to(req, 200)),
+                    None,
+                )
             }
             _ => {
                 if let Some(resp) = self.media.handle(req) {
@@ -1379,6 +1390,25 @@ mod tests {
     }
 
     #[test]
+    fn pin_only_mode_rejects_unpaired_raop_announce() {
+        let mut context = ctx();
+        Arc::get_mut(&mut context).unwrap().require_pin = true;
+        let mut client = Client::new(context);
+        let sdp = b"v=0\r\nm=audio 0 RTP/AVP 96\r\na=rtpmap:96 L16/44100/2\r\n".to_vec();
+        assert_eq!(
+            client
+                .call(
+                    "ANNOUNCE",
+                    "rtsp://x/1",
+                    &[("Content-Type", "application/sdp")],
+                    sdp
+                )
+                .status,
+            403
+        );
+    }
+
+    #[test]
     fn legacy_pairing() {
         let mut c = Client::new(ctx());
         let client = LegacyClient::new(Identity::from_seed("ctl", &[7; 32]));
@@ -1455,7 +1485,11 @@ mod tests {
             Vec::new(),
         );
         assert_eq!(setup.status, 200);
-        let transport = setup.headers.get("Transport").expect("Transport").to_owned();
+        let transport = setup
+            .headers
+            .get("Transport")
+            .expect("Transport")
+            .to_owned();
         let port = transport
             .split(';')
             .find_map(|p| p.strip_prefix("server_port="))
@@ -1463,7 +1497,10 @@ mod tests {
             .parse::<u16>()
             .unwrap();
         assert!(port > 0);
-        assert_eq!(c.call("RECORD", "rtsp://127.0.0.1/1", &[], vec![]).status, 200);
+        assert_eq!(
+            c.call("RECORD", "rtsp://127.0.0.1/1", &[], vec![]).status,
+            200
+        );
 
         let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         socket.connect(("127.0.0.1", port)).await.unwrap();
@@ -1520,7 +1557,10 @@ mod tests {
             Vec::new(),
         );
         assert_eq!(flush.status, 200);
-        assert_eq!(c.call("TEARDOWN", "rtsp://127.0.0.1/1", &[], vec![]).status, 200);
+        assert_eq!(
+            c.call("TEARDOWN", "rtsp://127.0.0.1/1", &[], vec![]).status,
+            200
+        );
         assert_eq!(context.player.active_packets(), None);
     }
 

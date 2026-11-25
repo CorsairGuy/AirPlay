@@ -30,9 +30,9 @@ use tracing::{debug, info, warn};
 
 use crate::control::{self, BPLIST, Command, MrpService, OCTETS, Remote};
 use crate::events::{Events, Metadata, NoEvents, Progress};
-use crate::raop::Raop;
 #[cfg(feature = "hls")]
 use crate::hls::HlsOptions;
+use crate::raop::Raop;
 
 /// Сколько байт отправитель может прислать вперёд в буферизованном потоке:
 /// 1 МиБ — около 30 с AAC 256 кбит/с.

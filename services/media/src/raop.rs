@@ -22,6 +22,8 @@ impl Raop {
     /// `ANNOUNCE` с `application/sdp`: разбираем формат и запоминаем его для
     /// `SETUP`. Неподдержанный кодек — 415, шифрованный профиль — 501.
     pub fn announce(&mut self, req: &Request) -> Response {
+        // A failed renegotiation must not reuse an earlier cleartext format.
+        self.format = None;
         if !req
             .headers
             .get("Content-Type")
@@ -194,22 +196,32 @@ fn parse_sdp(body: &[u8]) -> Result<Format, SdpError> {
                 .and_then(|f| f.split_whitespace().next())
                 .and_then(|n| n.parse().ok())
                 .unwrap_or(352);
-            if !(1..=4096).contains(&frames) || !(1..=2).contains(&channels) {
+            let sample_rate = rate.ok_or_else(|| SdpError::Codec("L16 без частоты".into()))?;
+            if !(1..=4096).contains(&frames)
+                || !(1..=2).contains(&channels)
+                || !(8_000..=192_000).contains(&sample_rate)
+            {
                 return Err(SdpError::Codec("неподдержанные параметры L16".into()));
             }
             Ok(Format {
                 codec: Codec::Pcm {
                     frames_per_packet: frames,
                 },
-                sample_rate: rate.ok_or_else(|| SdpError::Codec("L16 без частоты".into()))?,
+                sample_rate,
                 channels,
             })
         }
-        "mpeg4-generic" => Ok(Format {
-            codec: Codec::Aac,
-            sample_rate: rate.ok_or_else(|| SdpError::Codec("AAC без частоты".into()))?,
-            channels,
-        }),
+        "mpeg4-generic" => {
+            let sample_rate = rate.ok_or_else(|| SdpError::Codec("AAC без частоты".into()))?;
+            if !(8_000..=192_000).contains(&sample_rate) || !(1..=2).contains(&channels) {
+                return Err(SdpError::Codec("неподдержанные параметры AAC".into()));
+            }
+            Ok(Format {
+                codec: Codec::Aac,
+                sample_rate,
+                channels,
+            })
+        }
         other => Err(SdpError::Codec(format!("кодек {other}"))),
     }
 }
@@ -224,15 +236,16 @@ fn parse_transport(value: &str) -> Result<(), TransportError> {
     if !lower.contains("rtp/avp") {
         return Err(TransportError::Malformed);
     }
-    if !lower.contains("udp") {
+    if lower.split(';').next().map(str::trim) != Some("rtp/avp/udp") {
         return Err(TransportError::Unsupported);
     }
     for param in lower.split(';').skip(1) {
-        if let Some((key, value)) = param.split_once('=')
-            && key.trim() == "mode"
-            && value.trim() != "record"
-        {
-            return Err(TransportError::Unsupported);
+        if let Some((key, value)) = param.split_once('=') {
+            if key.trim() == "interleaved"
+                || (key.trim() == "mode" && value.trim().trim_matches('"') != "record")
+            {
+                return Err(TransportError::Unsupported);
+            }
         }
     }
     Ok(())
@@ -303,19 +316,32 @@ a=rtpmap:96 AppleLossless\r\na=fmtp:96 352 0 16 40 10 14 2 255 0 0 44100\r\n";
             "a=et:1\r\n",
         ] {
             let sdp = format!("{ALAC}{attr}");
-            assert_eq!(parse_sdp(sdp.as_bytes()), Err(SdpError::Encrypted), "{attr}");
+            assert_eq!(
+                parse_sdp(sdp.as_bytes()),
+                Err(SdpError::Encrypted),
+                "{attr}"
+            );
         }
         // et:0 — открытый звук.
         assert!(parse_sdp(format!("{ALAC}a=et:0\r\n").as_bytes()).is_ok());
     }
 
     #[test]
+    fn rejected_announce_clears_previous_format() {
+        let mut raop = Raop::default();
+        let mut request = Request::new("ANNOUNCE", "rtsp://test/1", "RTSP/1.0");
+        request.headers.insert("Content-Type", "application/sdp");
+        request.body = ALAC.as_bytes().to_vec();
+        assert_eq!(raop.announce(&request).status, 200);
+        request.body = format!("{ALAC}a=rsaaeskey:AAAA\r\n").into_bytes();
+        assert_eq!(raop.announce(&request).status, 501);
+        assert!(raop.format.is_none());
+    }
+
+    #[test]
     fn unsupported_codec_and_malformed_sdp() {
         let mp3 = ALAC.replace("AppleLossless", "MPA/44100/2");
-        assert!(matches!(
-            parse_sdp(mp3.as_bytes()),
-            Err(SdpError::Codec(_))
-        ));
+        assert!(matches!(parse_sdp(mp3.as_bytes()), Err(SdpError::Codec(_))));
         let no_audio = ALAC.replace("m=audio", "m=video");
         assert_eq!(parse_sdp(no_audio.as_bytes()), Err(SdpError::Malformed));
         let channels = ALAC.replace("14 2 255", "14 6 255");
@@ -338,6 +364,14 @@ a=rtpmap:96 AppleLossless\r\na=fmtp:96 352 0 16 40 10 14 2 255 0 0 44100\r\n";
         assert_eq!(parse_transport(""), Err(TransportError::Malformed));
         assert_eq!(
             parse_transport("RTP/AVP/TCP;unicast;interleaved=0-1"),
+            Err(TransportError::Unsupported)
+        );
+        assert_eq!(
+            parse_transport("RTP/AVP/UDP;unicast;interleaved=0-1;mode=record"),
+            Err(TransportError::Unsupported)
+        );
+        assert_eq!(
+            parse_transport("RTP/AVP/TCP;unicast;description=udp"),
             Err(TransportError::Unsupported)
         );
         assert_eq!(
