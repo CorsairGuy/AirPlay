@@ -12,6 +12,7 @@
 | [GROUP-BUTTON-EXPERIMENTS.md](GROUP-BUTTON-EXPERIMENTS.md) | План эталонных захватов и экспериментов с групповой кнопкой |
 | ARCHITECTURE.md | Текущие слои, общие часы и перенос адаптера |
 | PROTOCOL.md | Профили и границы достоверности |
+| [FAIRPLAY-V2.md](FAIRPLAY-V2.md) | Что нужно для FairPlay v2, версия vs mode и план захвата с Mac |
 | AIRPLAY-WIRE-SPEC.md | Wire reference с закреплёнными источниками и датированными наблюдениями |
 | VALIDATION.md | Выполненные проверки и отсутствующие доказательства |
 | SESSION_PROFILES.md | Границы AP1/AP2/control/mirroring |

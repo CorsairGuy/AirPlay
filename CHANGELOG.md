@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- FairPlay v2 (`request[4] == 0x02`, macOS Music) is rejected with a distinct `UnsupportedV2` error instead of a generic version error, and the v3 path is covered by regression tests. v2 itself is not implemented: its SAP transform is only available as third-party derived constants, so the gap list, provenance and Mac capture plan live in `docs/FAIRPLAY-V2.md`.
 - PIN pairing sends `X-Apple-Client-Name` on the initial and setup requests; callers can supply a display name or use the existing API's `AirPlay` default. Hardware validation with Apple TV remains outstanding.
 - Added an opt-in HLS VOD path: bounded HTTP(S) fetch and FFmpeg demux feed decoded frames to a host-provided `FrameSink`; AirPlay `/play`, V2 `/rate`, and `/stop` handlers are available with the `hls` feature. Live refresh, audio, pause, seek, and capability advertisement remain unsupported.
 - Moved output-selection precedence and logical-to-physical resolution into `services/coordinator`. MRP output-context decoding and its request queue now sit under the application's `remote` component; the serialized worker applies coordinator decisions to discovered, authorized media sessions.
