@@ -609,6 +609,8 @@ mod tests {
             port: 0,
             #[cfg(feature = "mirroring")]
             mirror: None,
+            #[cfg(feature = "hls")]
+            hls: None,
             remote: Default::default(),
             mrp: None,
             session_group: Default::default(),

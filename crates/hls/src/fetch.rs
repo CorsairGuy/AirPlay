@@ -219,4 +219,56 @@ mod tests {
         );
         server.await.unwrap();
     }
+
+    #[cfg(feature = "ffmpeg")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn plays_vod_segment_through_ffmpeg() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingSink(Arc<AtomicUsize>);
+        impl video::FrameSink for CountingSink {
+            fn show(&mut self, _: video::Picture) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let playlist = b"#EXTM3U\n#EXTINF:0.4,\nsegment.ts\n#EXT-X-ENDLIST\n";
+            let segment = include_bytes!("../tests/fixtures/tiny.ts");
+            for body in [&playlist[..], &segment[..]] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                assert!(stream.read(&mut request).await.unwrap() > 0);
+                let header = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(header.as_bytes()).await.unwrap();
+                stream.write_all(body).await.unwrap();
+            }
+        });
+        let fetcher = Fetcher {
+            client: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .no_proxy()
+                .build()
+                .unwrap(),
+            in_flight: Arc::new(tokio::sync::Semaphore::new(1)),
+        };
+        let url = Url::parse(&format!("http://localhost:{port}/playlist.m3u8")).unwrap();
+        let frames = Arc::new(AtomicUsize::new(0));
+        fetcher
+            .play_vod(
+                &url,
+                u64::MAX,
+                video::VideoOptions::default(),
+                Box::new(CountingSink(frames.clone())),
+            )
+            .await
+            .unwrap();
+        assert_eq!(frames.load(Ordering::Relaxed), 2);
+        server.await.unwrap();
+    }
 }

@@ -33,8 +33,6 @@ fn decode_frames(
     let time_base = stream.time_base();
     let parameters = stream.parameters();
     let mut decoder = VideoDecoder::from_parameters(parameters, options)?;
-    drop(stream);
-
     let mut pacer = Pacer::new(true);
     let mut first_pts = None;
     let mut start_ns = None;

@@ -76,6 +76,10 @@ impl Url {
             return Err(Error::Credentials);
         }
         let host = parsed.host_str().ok_or(Error::MissingHost)?;
+        let host = host
+            .strip_prefix('[')
+            .and_then(|h| h.strip_suffix(']'))
+            .unwrap_or(host);
         if host.parse::<std::net::IpAddr>().is_ok_and(is_disallowed_ip) {
             return Err(Error::PrivateAddress);
         }
@@ -331,6 +335,10 @@ mod tests {
         );
         assert_eq!(
             Url::parse("http://127.0.0.1/x.m3u8").unwrap_err(),
+            Error::PrivateAddress
+        );
+        assert_eq!(
+            Url::parse("http://[::1]/x.m3u8").unwrap_err(),
             Error::PrivateAddress
         );
         assert_eq!(
