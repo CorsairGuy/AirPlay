@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Reject hostile RTSP input instead of trusting it: plist bodies are depth-checked before parsing (a 15 KB body with 1000 nested arrays crashed the process), `Content-Length` must be decimal and a stalled partial request is dropped after 60 s, `sr`/`spf`/`ss` and `timingPort` are range-checked (zero sample rate previously divided by zero in the output thread), and peer address lists are capped. Added regression tests and a synthetic fuzz corpus under `fuzz/`.
 - PIN pairing sends `X-Apple-Client-Name` on the initial and setup requests; callers can supply a display name or use the existing API's `AirPlay` default. Hardware validation with Apple TV remains outstanding.
 - Added an opt-in HLS VOD path: bounded HTTP(S) fetch and FFmpeg demux feed decoded frames to a host-provided `FrameSink`; AirPlay `/play`, V2 `/rate`, and `/stop` handlers are available with the `hls` feature. Live refresh, audio, pause, seek, and capability advertisement remain unsupported.
 - Moved output-selection precedence and logical-to-physical resolution into `services/coordinator`. MRP output-context decoding and its request queue now sit under the application's `remote` component; the serialized worker applies coordinator decisions to discovered, authorized media sessions.

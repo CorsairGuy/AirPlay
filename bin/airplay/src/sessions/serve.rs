@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use device::{DeviceInfo, Features};
@@ -14,6 +15,11 @@ use crate::identity::state;
 use crate::media::rx::Player;
 use crate::remote::MrpService;
 use crate::sessions::session::{Context, Session};
+
+/// Недочитанный запрос (заголовок и объявленный в `Content-Length` хвост)
+/// должен продвигаться хотя бы раз в это время. Полностью простаивающее
+/// соединение не ограничено: iPhone держит его между паузами.
+const PARTIAL_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub struct Options {
     pub name: String,
@@ -244,7 +250,8 @@ pub(crate) async fn serve_connection(
     let mut buf = vec![0u8; 16 * 1024];
     let mut out = Vec::new();
     loop {
-        let n = stream.read(&mut buf).await?;
+        let partial = session.pending_request();
+        let n = read_more(&mut stream, &mut buf, partial, PARTIAL_REQUEST_TIMEOUT).await?;
         if n == 0 {
             return Ok(());
         }
@@ -253,6 +260,30 @@ pub(crate) async fn serve_connection(
             stream.write_all(&out).await?;
             out.clear();
         }
+    }
+}
+
+/// Чтение из сокета: пока сообщение не дочитано, ждём не дольше `timeout`.
+/// Это отсекает соединение, объявившее большой `Content-Length` и замолчавшее,
+/// но не мешает паузам в обычной сессии.
+async fn read_more<S>(
+    stream: &mut S,
+    buf: &mut [u8],
+    partial: bool,
+    timeout: Duration,
+) -> std::io::Result<usize>
+where
+    S: tokio::io::AsyncRead + Unpin,
+{
+    if !partial {
+        return stream.read(buf).await;
+    }
+    match tokio::time::timeout(timeout, stream.read(buf)).await {
+        Ok(result) => result,
+        Err(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "недочитанный запрос: нет данных",
+        )),
     }
 }
 
@@ -267,4 +298,39 @@ fn clock_id(device_id: &str) -> u64 {
     }
     let eui = [mac[0], mac[1], mac[2], 0xFF, 0xFE, mac[3], mac[4], mac[5]];
     u64::from_be_bytes(eui)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+
+    #[tokio::test]
+    async fn a_partial_request_must_progress_or_the_read_times_out() {
+        let (mut client, mut server) = tokio::io::duplex(256);
+        let head = b"SETUP /x RTSP/1.0\r\nContent-Length: 100\r\n\r\nabc";
+        client.write_all(head).await.unwrap();
+        let mut buf = [0u8; 512];
+        assert_eq!(
+            read_more(&mut server, &mut buf, true, Duration::from_secs(1))
+                .await
+                .unwrap(),
+            head.len()
+        );
+        // Тело не пришло: ожидание хвоста ограничено.
+        let error = read_more(&mut server, &mut buf, true, Duration::from_millis(50))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+
+        // Простаивающее соединение без недочитанного запроса не ограничено:
+        // то, что придёт позже, дочитывается.
+        client.write_all(b"tail").await.unwrap();
+        assert_eq!(
+            read_more(&mut server, &mut buf, false, Duration::from_millis(50))
+                .await
+                .unwrap(),
+            4
+        );
+    }
 }

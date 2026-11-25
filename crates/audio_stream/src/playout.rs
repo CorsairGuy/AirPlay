@@ -161,7 +161,8 @@ impl Playout {
                     .next()
                     .and_then(|p| Format::from_ssrc(p.ssrc))
             })
-            .map_or(44_100, |f| f.sample_rate) as i64;
+            // 0 пришёл бы из испорченного SETUP; дальше делим на это число.
+            .map_or(44_100, |f| f.sample_rate.max(1)) as i64;
         let jump = match s.anchor {
             None => true,
             Some(old) if s.local_anchor => old.playing != anchor.playing,
@@ -340,7 +341,7 @@ impl Output {
         let anchor = s.anchor?;
         let (&first_ts, first) = s.packets.iter().next()?;
         let format = s.format.or_else(|| Format::from_ssrc(first.ssrc))?;
-        let rate = format.sample_rate;
+        let rate = format.sample_rate.max(1);
         self.ensure_sink(rate)?;
         let sink = self.sink.as_mut()?;
 
@@ -374,8 +375,8 @@ impl Output {
             return Some(Vec::new());
         }
 
-        // Старое уже не сыграть.
-        let frames_per_packet = format.frames_per_packet() as i64;
+        // Старое уже не сыграть. Ноль не должен зациклить курсор.
+        let frames_per_packet = format.frames_per_packet().max(1) as i64;
         let cursor = self.cursor.unwrap_or(due);
         while let Some((&ts, _)) = s.packets.iter().next() {
             if ts + frames_per_packet > cursor {
@@ -455,7 +456,7 @@ impl Output {
     }
 
     fn decode(&mut self, format: Format, ssrc: u32, payload: &[u8]) -> Vec<i16> {
-        let frames = format.frames_per_packet() as usize;
+        let frames = format.frames_per_packet().max(1) as usize;
         if self.decoder.as_ref().is_none_or(|(s, _)| *s != ssrc) {
             self.decoder = match Decoder::new(format) {
                 Ok(d) => {
@@ -479,5 +480,61 @@ impl Output {
             self.pcm.resize(frames * CHANNELS, 0);
         }
         std::mem::take(&mut self.pcm)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clock::NoTime;
+    use codec::Codec;
+
+    fn playout(format: Format) -> Playout {
+        Playout::start(
+            Config {
+                device: "null".into(),
+                ..Default::default()
+            },
+            Arc::new(NoTime),
+            Some(format),
+        )
+    }
+
+    /// Частота 0 из испорченного SETUP раньше делила на ноль при втором
+    /// якоре и убивала поток вывода; теперь пересчёт не падает.
+    #[test]
+    fn zero_sample_rate_does_not_panic_on_repeated_anchors() {
+        let playout = playout(Format {
+            codec: Codec::Pcm {
+                frames_per_packet: 352,
+            },
+            sample_rate: 0,
+            channels: 2,
+        });
+        for rtp in [0u32, 352, 704] {
+            playout.set_anchor(Anchor {
+                rtp,
+                network_ns: rtp as u64 * 1_000_000,
+                timeline: 7,
+                playing: true,
+            });
+        }
+        playout.stop();
+    }
+
+    /// Нулевой `frames_per_packet` не должен зацикливать очередь.
+    #[test]
+    fn zero_frames_per_packet_still_stops() {
+        let playout = playout(Format {
+            codec: Codec::Pcm {
+                frames_per_packet: 0,
+            },
+            sample_rate: 44_100,
+            channels: 2,
+        });
+        playout.push(0, 0x1600_0000, vec![0; 4096]);
+        playout.play_from(0);
+        playout.stop();
+        assert!(playout.buffered_packets() <= 1);
     }
 }

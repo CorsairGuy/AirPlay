@@ -590,18 +590,22 @@ impl Media {
             self.eiv = eiv.try_into().ok();
         }
         if timing == "NTP" {
-            let port = uint(body, "timingPort").unwrap_or(0) as u16;
-            match timesync::ntp::start(SocketAddr::new(self.remote, port)) {
-                Ok((local, clock, task)) => {
-                    self.tasks.push(task);
-                    self.ntp = Some(clock);
-                    #[cfg(feature = "hls")]
-                    {
-                        self.hls_v2_setup = port != 0;
+            let requested = uint(body, "timingPort").unwrap_or(0);
+            // Порт из сети: `as u16` завернул бы 65536+n в чужой порт.
+            match u16::try_from(requested) {
+                Ok(port) => match timesync::ntp::start(SocketAddr::new(self.remote, port)) {
+                    Ok((local, clock, task)) => {
+                        self.tasks.push(task);
+                        self.ntp = Some(clock);
+                        #[cfg(feature = "hls")]
+                        {
+                            self.hls_v2_setup = port != 0;
+                        }
+                        d.insert("timingPort".into(), Value::Integer(local.into()));
                     }
-                    d.insert("timingPort".into(), Value::Integer(local.into()));
-                }
-                Err(e) => warn!("NTP: {e}"),
+                    Err(e) => warn!("NTP: {e}"),
+                },
+                Err(_) => warn!(requested, "NTP: timingPort вне диапазона u16"),
             }
         }
         if timing == "PTP" {
@@ -715,7 +719,7 @@ impl Media {
     fn setup_mirror_audio(&mut self, s: &Dictionary, r: &mut Dictionary) -> Result<(), String> {
         let format = Format {
             codec: Codec::AacEld,
-            sample_rate: uint(s, "sr").unwrap_or(44_100) as u32,
+            sample_rate: sample_rate(s)?,
             channels: 2,
         };
         if let Err(e) = codec::Decoder::new(format) {
@@ -925,6 +929,13 @@ impl Media {
         let Some(d) = plist_dict(&req.body) else {
             return;
         };
+        // RTP-метка — 32 бита; большее значение молча завернулось бы.
+        if let Some(rtp) = uint(&d, "rtpTime")
+            && rtp > u32::MAX as u64
+        {
+            warn!(rtp, "SETRATEANCHORTIME: rtpTime не влезает в u32");
+            return;
+        }
         let rate = d
             .get("rate")
             .and_then(|v| {
@@ -961,10 +972,13 @@ impl Media {
         let Some(d) = plist_dict(&req.body) else {
             return;
         };
-        let Some(until) = uint(&d, "flushUntilTS") else {
+        // Метки — 32 бита, как и rtpTime.
+        let Some(until) = uint(&d, "flushUntilTS").filter(|t| *t <= u32::MAX as u64) else {
             return;
         };
-        let from = uint(&d, "flushFromTS").map(|t| t as u32);
+        let from = uint(&d, "flushFromTS")
+            .filter(|t| *t <= u32::MAX as u64)
+            .map(|t| t as u32);
         self.player
             .with(self.id, |s| s.playout().flush(from, until as u32));
     }
@@ -1033,17 +1047,29 @@ async fn next_command(
 }
 
 fn realtime_format(s: &Dictionary) -> Result<Format, String> {
-    let sample_rate = uint(s, "sr").unwrap_or(44_100) as u32;
-    let frames = uint(s, "spf").unwrap_or(352) as u32;
-    let bits = uint(s, "ss").unwrap_or(16) as u8;
+    let sample_rate = sample_rate(s)?;
+    let frames = uint(s, "spf").unwrap_or(352);
+    // `frames_per_packet` участвует в арифметике меток: 0 — это цикл без
+    // продвижения курсора, гигантское значение — переполнение.
+    if !(1..=8192).contains(&frames) {
+        return Err(format!("недопустимый размер пакета spf={frames}"));
+    }
+    let frames = frames as u32;
+    let bits = uint(s, "ss").unwrap_or(16);
+    if bits > 32 {
+        return Err(format!("недопустимая битность ss={bits}"));
+    }
+    let bits = bits as u8;
     let codec = match uint(s, "ct").unwrap_or(2) {
         1 if bits == 16 => Codec::Pcm {
             frames_per_packet: frames,
         },
-        2 => Codec::Alac {
+        1 => return Err(format!("PCM с ss={bits}: ожидается 16 бит")),
+        2 if matches!(bits, 16 | 20 | 24 | 32) => Codec::Alac {
             bit_depth: bits,
             frames_per_packet: frames,
         },
+        2 => return Err(format!("ALAC с ss={bits}")),
         4 => Codec::Aac,
         8 => return Err("AAC-ELD пока не поддерживается".into()),
         other => return Err(format!("неизвестный кодек ct={other}")),
@@ -1055,11 +1081,23 @@ fn realtime_format(s: &Dictionary) -> Result<Format, String> {
     })
 }
 
+/// Частота дискретизации из SETUP: ноль или абсурдное значение дали бы
+/// деление на ноль в планировщике вывода.
+fn sample_rate(s: &Dictionary) -> Result<u32, String> {
+    let rate = uint(s, "sr").unwrap_or(44_100);
+    if !(8_000..=384_000).contains(&rate) {
+        return Err(format!("недопустимая частота sr={rate}"));
+    }
+    Ok(rate as u32)
+}
+
+/// Тело RTSP → словарь plist. Разбор идёт через [`rtsp::plist`]: вложенность
+/// ограничена, иначе тело из сети снимает стек.
 fn plist_dict(body: &[u8]) -> Option<Dictionary> {
     if body.is_empty() {
         return None;
     }
-    plist::from_bytes::<Value>(body).ok()?.into_dictionary()
+    rtsp::plist::parse(body)?.into_dictionary()
 }
 
 fn write_plist(d: Dictionary) -> Vec<u8> {
@@ -1074,19 +1112,40 @@ fn uint(d: &Dictionary, key: &str) -> Option<u64> {
     d.get(key).and_then(Value::as_unsigned_integer)
 }
 
+/// Адреса из `timingPeerInfo.Addresses` и SETPEERSX. Нестроковые и
+/// неразбираемые элементы пропускаются (как и в shairport после 5.5.1),
+/// список ограничен и очищен от повторов: он приходит из сети и уходит
+/// в службу часов.
+const MAX_PEERS: usize = 32;
+
 fn addresses(d: &Dictionary) -> Vec<IpAddr> {
-    d.get("Addresses")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|a| a.as_string()?.parse().ok())
-        .collect()
+    let mut peers = Vec::new();
+    extend_peers(
+        &mut peers,
+        d.get("Addresses")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|a| a.as_string()?.parse().ok()),
+    );
+    peers
+}
+
+fn extend_peers(peers: &mut Vec<IpAddr>, candidates: impl IntoIterator<Item = IpAddr>) {
+    for ip in candidates {
+        if peers.len() >= MAX_PEERS {
+            return;
+        }
+        if !ip.is_unspecified() && !peers.contains(&ip) {
+            peers.push(ip);
+        }
+    }
 }
 
 /// Сколько в SETPEERS/SETPEERSX приёмников, кроме нас и отправителя.
 /// SETPEERS — плоский список адресов, SETPEERSX — участник на словарь.
 fn other_receivers(body: &[u8], sender: &[IpAddr]) -> usize {
-    let Ok(Value::Array(items)) = plist::from_bytes::<Value>(body) else {
+    let Some(Value::Array(items)) = rtsp::plist::parse(body) else {
         return 0;
     };
     let local: Vec<IpAddr> = if_addrs::get_if_addrs()
@@ -1111,15 +1170,18 @@ fn other_receivers(body: &[u8], sender: &[IpAddr]) -> usize {
 
 /// SETPEERS — массив адресов, SETPEERSX — массив словарей с `Addresses`.
 fn parse_peers(body: &[u8]) -> Vec<IpAddr> {
-    let Ok(Value::Array(items)) = plist::from_bytes::<Value>(body) else {
+    let Some(Value::Array(items)) = rtsp::plist::parse(body) else {
         return Vec::new();
     };
     let mut peers = Vec::new();
     for item in items {
         match item {
-            Value::String(s) => peers.extend(s.parse::<IpAddr>().ok()),
-            Value::Dictionary(d) => peers.extend(addresses(&d)),
+            Value::String(s) => extend_peers(&mut peers, s.parse::<IpAddr>().ok()),
+            Value::Dictionary(d) => extend_peers(&mut peers, addresses(&d)),
             _ => {}
+        }
+        if peers.len() >= MAX_PEERS {
+            break;
         }
     }
     peers
@@ -1145,6 +1207,91 @@ mod tests {
         let mut out = Vec::new();
         v.to_writer_binary(&mut out).unwrap();
         out
+    }
+
+    #[test]
+    fn addresses_are_bounded_and_cleaned() {
+        let mut items: Vec<Value> = vec![
+            Value::Integer(1.into()),
+            Value::Dictionary(Dictionary::new()),
+            "not-an-ip".into(),
+            "0.0.0.0".into(),
+            "::".into(),
+            "192.168.1.10".into(),
+            "192.168.1.10".into(),
+        ];
+        items.extend((0..1000).map(|i| format!("10.1.{}.{}", i / 256, i % 256).into()));
+        let mut d = Dictionary::new();
+        d.insert("Addresses".into(), Value::Array(items));
+        let peers = addresses(&d);
+        assert_eq!(peers.len(), MAX_PEERS);
+        assert_eq!(peers[0], "192.168.1.10".parse::<IpAddr>().unwrap());
+        assert!(!peers.iter().any(|ip| ip.is_unspecified()));
+
+        // `Addresses` не массив — пустой список, без паники.
+        for value in [
+            Value::String("192.168.1.10".into()),
+            Value::Integer(1.into()),
+            Value::Data(vec![1, 2, 3]),
+        ] {
+            let mut d = Dictionary::new();
+            d.insert("Addresses".into(), value);
+            assert!(addresses(&d).is_empty());
+        }
+        assert!(addresses(&Dictionary::new()).is_empty());
+    }
+
+    #[test]
+    fn peers_from_setpeers_are_bounded() {
+        let mut flat: Vec<Value> = vec!["192.168.1.10".into()];
+        flat.extend((0..100).map(|i| format!("10.2.0.{i}").into()));
+        let peers = parse_peers(&plist(Value::Array(flat)));
+        assert_eq!(peers.len(), MAX_PEERS);
+        assert_eq!(peers[0], "192.168.1.10".parse::<IpAddr>().unwrap());
+        assert!(parse_peers(b"garbage").is_empty());
+    }
+
+    #[test]
+    fn realtime_format_rejects_impossible_parameters() {
+        fn descriptor(fields: &[(&str, u64)]) -> Dictionary {
+            let mut d = Dictionary::new();
+            for (key, value) in fields {
+                d.insert((*key).into(), Value::Integer((*value).into()));
+            }
+            d
+        }
+        for (sr, spf, ss, ct) in [
+            (0u64, 352u64, 16u64, 1u64),
+            (4_294_967_296, 352, 16, 1),
+            (44_100, 0, 16, 1),
+            (44_100, 10_000, 16, 1),
+            (44_100, 352, 17, 1),
+            (44_100, 352, 272, 2),
+            (44_100, 352, 16, 8),
+        ] {
+            let d = descriptor(&[("sr", sr), ("spf", spf), ("ss", ss), ("ct", ct)]);
+            assert!(
+                realtime_format(&d).is_err(),
+                "sr={sr} spf={spf} ss={ss} ct={ct}"
+            );
+        }
+        let pcm = descriptor(&[("sr", 44_100), ("spf", 352), ("ss", 16), ("ct", 1)]);
+        let format = realtime_format(&pcm).unwrap();
+        assert_eq!(format.sample_rate, 44_100);
+        assert_eq!(
+            format.codec,
+            Codec::Pcm {
+                frames_per_packet: 352
+            }
+        );
+        let alac = descriptor(&[("sr", 48_000), ("spf", 352), ("ss", 24), ("ct", 2)]);
+        assert_eq!(
+            realtime_format(&alac).unwrap().codec,
+            Codec::Alac {
+                bit_depth: 24,
+                frames_per_packet: 352
+            }
+        );
     }
 
     #[test]

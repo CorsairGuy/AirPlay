@@ -68,13 +68,10 @@ impl Decoder {
 }
 
 fn decode_body(body: &[u8]) -> Result<Vec<Node>, Error> {
-    let value = Value::from_reader(std::io::Cursor::new(body)).map_err(|e| {
-        Error::Frame(if e.is_eof() {
-            "обрезанный plist"
-        } else {
-            "не plist"
-        })
-    })?;
+    // Тело приходит из сети: вложенный plist снимает стек, поэтому разбор
+    // идёт через ограничитель глубины `rtsp::plist`.
+    let value = rtsp::plist::parse(body)
+        .ok_or(Error::Frame("не plist или слишком глубокая вложенность"))?;
     let data = value
         .as_dictionary()
         .and_then(|d| d.get("params"))
