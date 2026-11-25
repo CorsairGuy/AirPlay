@@ -480,6 +480,17 @@ pub async fn connection(
     let mut chunk = [0u8; 16384];
     let mut subscribed = false;
     let mut previous = updates.borrow().clone();
+    // Настоящий приёмник объявляет себя сразу при открытии канала: клиент,
+    // который ждёт `DeviceInfo` до первого запроса (план v12, §6 п.2), иначе
+    // увидит карточку только после своей подписки. Ошибку отправки здесь не
+    // обрабатываем: если писатель уже умер, цикл ниже обнаружит это сам.
+    let _ = tx
+        .send(Output::Messages(vec![model::device_info(
+            &identity,
+            &previous,
+            None,
+        )]))
+        .await;
     let opened = std::time::Instant::now();
     let mut last = 0u64;
     let mut pending = tokio::task::JoinSet::new();
@@ -534,6 +545,26 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn announces_device_info_when_tunnel_opens() {
+        let identity = Identity { device: "local".into(), group: "group".into() };
+        let (feed, updates) = watch::channel(Feed::default());
+        let control = Control::new(feed, media::control::Remote::new());
+        let (server, mut client) = tokio::io::duplex(65536);
+        let task = tokio::spawn(connection(server, identity, updates, control));
+        let mut header = [0u8; 32];
+        tokio::time::timeout(tokio::time::Duration::from_secs(2), client.read_exact(&mut header)).await.unwrap().unwrap();
+        assert_eq!(&header[4..8], b"sync");
+        let len = u32::from_be_bytes(header[..4].try_into().unwrap()) as usize;
+        let mut body = vec![0; len - 32];
+        client.read_exact(&mut body).await.unwrap();
+        let plist = plist::Value::from_reader(std::io::Cursor::new(body)).unwrap();
+        let bytes = plist.as_dictionary().unwrap()["params"].as_dictionary().unwrap()["data"].as_data().unwrap();
+        let messages = wire::decode_packet(bytes).unwrap();
+        assert_eq!(messages[0].number(f("ProtocolMessage", "type")), Some(kind("DEVICE_INFO_MESSAGE") as u64));
+        drop(client);
+        task.await.unwrap().unwrap();
+    }
     #[test]
     fn headers_are_fixed_size() {
         assert_eq!(framed(b"rply", 17, &[]).len(), 32);
