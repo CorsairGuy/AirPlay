@@ -49,6 +49,8 @@ pub struct Options {
     pub volume_range_db: f32,
     /// `false` — громкость не применять, только сообщать в `events`.
     pub apply_volume: bool,
+    /// Внешний профиль устройства: модель, features, версия, экран, службы.
+    pub profile: Option<device::Profile>,
     /// `sourceVersion` в `/info` и Bonjour, например 366.0 или 550.10.
     pub source_version: String,
     /// `deviceEnclosureColor` в `/info`.
@@ -95,30 +97,50 @@ pub async fn run(opts: Options) -> Result<()> {
     let mirroring = opts.mirror.is_some();
     #[cfg(not(feature = "mirroring"))]
     let mirroring = false;
+    let profile = opts.profile.clone();
     let device = DeviceInfo {
-        name: opts.name.clone(),
+        name: profile
+            .as_ref()
+            .and_then(|p| p.name.clone())
+            .unwrap_or_else(|| opts.name.clone()),
         device_id: device_id.clone(),
-        model: opts.model,
-        accessory_type: opts.accessory_type,
-        features: opts.features.unwrap_or({
-            if mirroring {
-                Features::MIRROR_RECEIVER
-            } else {
-                Features::AUDIO_RECEIVER
-            }
-        }),
+        model: profile.as_ref().map_or(opts.model, |p| p.model.clone()),
+        accessory_type: profile
+            .as_ref()
+            .map_or(opts.accessory_type, |p| p.accessory_type),
+        features: profile.as_ref().map_or_else(
+            || {
+                opts.features.unwrap_or(if mirroring {
+                    Features::MIRROR_RECEIVER
+                } else {
+                    Features::AUDIO_RECEIVER
+                })
+            },
+            |p| p.features,
+        ),
         // Как у shairport на станции: «аудиокабель подключён» и доступ
         // по HomeKit (бит 10), 0x404.
-        status_flags: opts.status_flags.unwrap_or(0x404),
+        status_flags: profile
+            .as_ref()
+            .map_or(opts.status_flags.unwrap_or(0x404), |p| p.status_flags),
         pairing_id: identity.pairing_id.clone(),
         public_key: identity.public_key(),
-        source_version: opts.source_version,
-        display: mirroring.then_some(opts.display),
+        source_version: profile
+            .as_ref()
+            .map_or(opts.source_version, |p| p.source_version.clone()),
+        display: if mirroring {
+            profile.as_ref().map_or(Some(opts.display), |p| p.display)
+        } else {
+            None
+        },
         // Карточку «Сейчас играет» рисует служба MRP: без неё не обещаем.
-        audio_only_ui: opts.mrp != Mrp::Off,
+        audio_only_ui: opts.mrp != Mrp::Off && profile.as_ref().is_none_or(|p| p.audio_only_ui),
         group: None,
         pgid: random_pgid(),
-        enclosure_color: opts.enclosure_color,
+        enclosure_color: profile
+            .as_ref()
+            .map_or(opts.enclosure_color, |p| p.enclosure_color.clone()),
+        raop: profile.as_ref().is_none_or(|p| p.raop),
     };
 
     // [::] на Linux и macOS принимает и IPv4; на Windows сокет IPv6 отдельный,

@@ -53,20 +53,21 @@ pub struct Context {
 impl Context {
     pub fn services(&self) -> Vec<mdns::Service> {
         let device = self.device();
-        vec![
-            mdns::Service {
-                service_type: mdns::AIRPLAY,
-                instance: device.name.clone(),
-                port: self.port,
-                txt: device.airplay_txt(),
-            },
-            mdns::Service {
+        let mut services = vec![mdns::Service {
+            service_type: mdns::AIRPLAY,
+            instance: device.name.clone(),
+            port: self.port,
+            txt: device.airplay_txt(),
+        }];
+        if device.raop {
+            services.push(mdns::Service {
                 service_type: mdns::RAOP,
                 instance: device.raop_instance(),
                 port: self.port,
                 txt: device.raop_txt(),
-            },
-        ]
+            });
+        }
+        services
     }
 
     /// После первого сопряжения в режиме PIN меняются флаги: объявим заново.
@@ -437,6 +438,7 @@ mod tests {
                 group: None,
                 pgid: "00000000-0000-4000-8000-000000000000".into(),
                 enclosure_color: None,
+                raop: true,
             },
             identity,
             store: Box::new(MemoryStore::default()),
@@ -1292,6 +1294,15 @@ mod tests {
         let reply = c.call("POST", "/pair-verify", &[], client.verify1()).body;
         let (msg2, _) = client.verify2(&server_ed, &reply).unwrap();
         assert_eq!(c.call("POST", "/pair-verify", &[], msg2).status, 200);
+    }
+
+    #[test]
+    fn profile_can_leave_only_the_airplay_service() {
+        let mut ctx = ctx();
+        Arc::get_mut(&mut ctx).unwrap().device.raop = false;
+        let services = ctx.services();
+        assert_eq!(services.len(), 1);
+        assert_eq!(services[0].service_type, mdns::AIRPLAY);
     }
 
     #[test]
