@@ -150,36 +150,49 @@ pair::hap обеих сторон использует единый crypto::srp 
 
 Никаких запусков/переименований установленной Станции эта архитектурная схема не выполняет.
 
-## Полный реестр текущих Cargo-пакетов
+## Полный реестр Cargo-пакетов — сверено 2026-11-25
 
-| Путь | Пакет сейчас | Rust src файлов | Code lines* | Статус |
+Реестр собран из `Cargo.toml` и `find <пакет>/src -name '*.rs'`; предыдущая
+таблица (срез 13 ноября, 24 пакета, имена `ap_*`) заменена. Пакеты переименованы
+без `ap_`; `crates/sender` растворён в `services/media/src/tx`;
+`services/mediaremote` и `services/mediaserver` удалены; добавлены переходные
+`compat/ap_mrp` и `compat/ap_sender`.
+
+| Путь | Пакет | Rust src файлов | Строк в src | Статус |
 |---|---|---:|---:|---|
-| crates/audio | ap_audio | 3 | 421 | есть код; полнота см. STATUS |
-| crates/audio_stream | ap_audio_stream | 3 | 680 | есть код; полнота см. STATUS |
-| crates/base | ap_base | 1 | 0 | заглушка |
-| crates/capture | ap_capture | 1 | 0 | заглушка |
-| crates/clock | ap_clock | 13 | 3985 | есть код; полнота см. STATUS |
-| crates/codec | ap_codec | 4 | 619 | есть код; полнота см. STATUS |
-| crates/companion | ap_companion | 1 | 0 | заглушка |
-| crates/crypto | ap_crypto | 7 | 573 | есть код; полнота см. STATUS |
-| crates/device | ap_device | 1 | 323 | есть код; полнота см. STATUS |
-| crates/fairplay | ap_fairplay | 4 | 6610 | есть код; полнота см. STATUS |
-| crates/hls | ap_hls | 1 | 0 | bounded HTTP(S) VOD-to-FrameSink pipeline; AirPlay integration is opt-in in `airplay` |
-| crates/ipc | ap_ipc | 1 | 0 | заглушка |
-| crates/mdns | ap_mdns | 2 | 216 | есть код; полнота см. STATUS |
-| crates/mirror | ap_mirror | 2 | 312 | есть код; полнота см. STATUS |
-| crates/mrp | ap_mrp | 7 | 3323 | есть код; полнота см. STATUS |
-| crates/pair | ap_pair | 6 | 957 | есть код; полнота см. STATUS |
-| crates/rtp | ap_rtp | 3 | 585 | есть код; полнота см. STATUS |
-| crates/rtsp | ap_rtsp | 1 | 243 | есть код; полнота см. STATUS |
-| crates/sender | ap_sender | 14 | 5780 | есть код; полнота см. STATUS |
-| crates/video | ap_video | 3 | 377 | есть код; полнота см. STATUS |
-| services/mediaremote | mediaremote | 2 | 512 | есть код; полнота см. STATUS |
-| services/mediaserver | mediaserver | 1 | 0 | заглушка |
-| services/timesync | timesync | 9 | 3283 | есть код; полнота см. STATUS |
-| bin/airplay | airplay | 33 | 13512 | есть код; полнота см. STATUS |
+| crates/audio | audio | 3 | 527 | есть код; полнота см. STATUS |
+| crates/audio_stream | audio_stream | 3 | 813 | есть код; полнота см. STATUS |
+| crates/base | base | 1 | 1 | заглушка |
+| crates/capture | capture | 1 | 1 | заглушка |
+| crates/clock | clock | 12 | 4164 | есть код; полнота см. STATUS |
+| crates/codec | codec | 4 | 788 | есть код; полнота см. STATUS |
+| crates/companion | companion | 1 | 1 | заглушка |
+| crates/crypto | crypto | 7 | 697 | есть код; полнота см. STATUS |
+| crates/device | device | 1 | 424 | есть код; полнота см. STATUS |
+| crates/fairplay | fairplay | 4 | 7004 | есть код; FairPlay v2 отклоняется в sap.rs |
+| crates/hls | hls | 4 | 831 | opt-in HTTP(S) VOD -> FrameSink; live/audio/pause/seek нет |
+| crates/ipc | ipc | 1 | 1 | заглушка |
+| crates/mdns | mdns | 2 | 242 | есть код; полнота см. STATUS |
+| crates/mirror | mirror | 2 | 479 | есть код; полнота см. STATUS |
+| crates/mrp | mrp | 7 | 3543 | wire/schema/messages; вторая схема в services/remote |
+| crates/pair | pair | 6 | 1109 | есть код; полнота см. STATUS |
+| crates/rtp | rtp | 3 | 661 | есть код; полнота см. STATUS |
+| crates/rtsp | rtsp | 1 | 290 | есть код; полнота см. STATUS |
+| crates/video | video | 4 | 603 | есть код; полнота см. STATUS |
+| services/coordinator | coordinator | 6 | 963 | модель групп, resolver, runtime policy |
+| services/discovery | discovery | 4 | 743 | browse и валидированный snapshot |
+| services/identity | identity | 5 | 1393 | identity, trust, данные сопряжений |
+| services/media | media | 18 | 5910 | RX/TX, SessionPool, continuous, local output |
+| services/remote | remote | 6 | 3210 | активный MRP server/card runtime |
+| services/sessions | sessions | 2 | 308 | подготовка сессий и политика авторизации |
+| services/timesync | timesync | 10 | 3684 | PTP/NTP, общие часы, внешние источники |
+| bin/airplay | airplay | 29 | 10859 | daemon, CLI и карточка в одном бинарнике |
+| compat/ap_mrp | ap_mrp | 1 | 3 | только реэкспорт `mrp` |
+| compat/ap_sender | ap_sender | 1 | 12 | только реэкспорт `media::tx` |
 
-*Без пустых и отдельных comment lines; включает tests/generated data. Числа — инвентаризация, не число работающих служб.
+`Строк в src` — `wc -l` по всем `.rs` в `src`, включая комментарии, тесты и
+generated-таблицы; это инвентаризация, а не метрика полноты. 29 пакетов не
+означают 29 процессов: базовый deployment — один daemon `airplay`.
 
 
 ## Согласованное уточнение — 2026-11-13

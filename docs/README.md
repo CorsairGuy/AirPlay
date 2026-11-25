@@ -9,19 +9,25 @@
 | [TESTING.md](TESTING.md) | Единый чек-лист обоих репозиториев, текущий прогон и будущая приёмка |
 | ../README.md | Обзор и существующие команды |
 | [AGENT-PLAN-AP12-20261112-v12.md](AGENT-PLAN-AP12-20261112-v12.md) | Единый план AP1/AP2: D1–D99 с зарезервированными ID, L-1–L-100, OBS и тест-матрица |
+| [REFERENCE-AUDIT-20261125.md](REFERENCE-AUDIT-20261125.md) | Сверка внешних эталонов и релизов; не доказательство совместимости ядра |
 | [GROUP-BUTTON-EXPERIMENTS.md](GROUP-BUTTON-EXPERIMENTS.md) | План эталонных захватов и экспериментов с групповой кнопкой |
 | ARCHITECTURE.md | Текущие слои, общие часы и перенос адаптера |
 | PROTOCOL.md | Профили и границы достоверности |
 | AIRPLAY-WIRE-SPEC.md | Wire reference с закреплёнными источниками и датированными наблюдениями |
+| [MIRRORING-AIRPLAY2-RESEARCH.md](MIRRORING-AIRPLAY2-RESEARCH.md) | Исследование modern mirroring; не реализованная функция |
 | VALIDATION.md | Выполненные проверки и отсутствующие доказательства |
 | SESSION_PROFILES.md | Границы AP1/AP2/control/mirroring |
 | [PCM_HOST.md](PCM_HOST.md) | Библиотечная композиция raw tap → Card/PTP/local pipeline |
 | BUILD_PROFILES.md | Audio-only/default, границы feature и проверки |
+| [WINDOWS-TV.md](WINDOWS-TV.md) | Windows-профиль приёмника, launcher и критерии приёмки |
 | ROUTE_AUTHORIZATION.md | Connection-scoped PIN путь и проверки |
+| [SECURITY.md](SECURITY.md) | Политика границ экспериментальных транспортов и секретов |
 | CARD_UPDATES.md | История artwork/timeline/framing и ограничения UI |
+| [PICKER-DEVICE-CLASSES.md](PICKER-DEVICE-CLASSES.md) | Классы устройств AirPlay-пикера, model-маркеры и иконки |
 | RELAY_IPC.md | Существующий Unix IPC contract; не native group adoption |
 | AUDIO_RATE_ESTIMATOR.md | Измеритель аппаратной частоты; не автоматическая синхронизация |
 | STATION_MIGRATION_20261111.md | Хронология переносов, не текущий backlog |
+| [DOCUMENT_MIGRATION_20261112.md](DOCUMENT_MIGRATION_20261112.md) | Сверка старых черновиков и текущих документов |
 | HANDOFF.md | Продолжение работы и ограничения |
 | history/ | Старые обзоры, сохранённые для происхождения решений |
 | ../reference/ | Исторические исходники/черновики; не production implementation |

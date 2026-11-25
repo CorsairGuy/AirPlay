@@ -85,7 +85,7 @@ sudo RUST_LOG=info ./target/release/airplay --name "airplay"
 cargo test --workspace
 # независимый клиент: криптография, сопряжение и MRP pyatv против живого сервера
 pip install pyatv "srptools==1.0.1"
-cargo run -p airplay -- serve --port 7123 --pin 1234 --no-mdns --mrp --audio null &
+cargo run -p airplay -- --port 7123 --pin 1234 --no-mdns --mrp --audio null &
 python tests/interop/pyatv_client.py 127.0.0.1 7123 1234
 ```
 
