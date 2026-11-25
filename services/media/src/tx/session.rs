@@ -76,12 +76,87 @@ impl Identity {
     }
 }
 
+/// Внешняя политика задержки sender: допустимый диапазон, желаемая задержка и
+/// начальный буфер. Значения в кадрах 44,1 кГц. Расчёт — не измеренная
+/// акустическая задержка.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LatencyPolicy {
+    pub min_frames: u32,
+    pub max_frames: u32,
+    /// Дополнительная пауза перед RECORD, чтобы приёмник успел набрать буфер.
+    pub initial_buffer: Duration,
+}
+
+impl Default for LatencyPolicy {
+    fn default() -> Self {
+        Self {
+            min_frames: 11_025,
+            max_frames: 88_200,
+            initial_buffer: Duration::ZERO,
+        }
+    }
+}
+
+/// Итог согласования: задержка в кадрах внутри общего диапазона sender и
+/// приёмника. `receiver_*` сохранены для отчёта, а не для «измерения».
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NegotiatedLatency {
+    pub frames: u32,
+    pub receiver_min: u32,
+    pub receiver_max: u32,
+    pub initial_buffer: Duration,
+}
+
+impl LatencyPolicy {
+    fn validate(&self) -> Result<()> {
+        if self.min_frames == 0 || self.min_frames > self.max_frames || self.max_frames > 88_200 {
+            bail!("invalid sender latency range");
+        }
+        if self.initial_buffer > frames_duration(self.max_frames as u64) {
+            bail!("initial buffer exceeds latency range");
+        }
+        Ok(())
+    }
+
+    /// Пересечение диапазонов обязательно: иначе приёмник не сможет играть
+    /// с заявленной задержкой, и отправку начинать нельзя.
+    pub fn resolve(
+        &self,
+        desired_frames: u32,
+        receiver_min: Option<u32>,
+        receiver_max: Option<u32>,
+    ) -> Result<NegotiatedLatency> {
+        self.validate()?;
+        let receiver_min = receiver_min.unwrap_or(11_025);
+        let receiver_max = receiver_max.unwrap_or(88_200);
+        if receiver_min == 0 || receiver_min > receiver_max || receiver_max > 88_200 {
+            bail!("invalid receiver latency range");
+        }
+        let low = self.min_frames.max(receiver_min);
+        let high = self.max_frames.min(receiver_max);
+        if low > high {
+            bail!("no common latency range with receiver");
+        }
+        let frames = desired_frames.clamp(low, high);
+        let initial_buffer = self.initial_buffer.min(frames_duration(frames as u64));
+        Ok(NegotiatedLatency {
+            frames,
+            receiver_min,
+            receiver_max,
+            initial_buffer,
+        })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct SessionConfig {
     pub endpoint: SocketAddr,
     pub identity: Identity,
-    /// Receiver latency in 44.1kHz frames (250ms..2s for this stream format).
+    /// Желаемая задержка в кадрах 44,1 кГц; политика ограничивает её
+    /// диапазоном, согласованным с приёмником.
     pub latency_frames: u32,
+    /// Внешняя политика задержки: пределы и начальный буфер.
+    pub latency_policy: LatencyPolicy,
     pub volume: Volume,
     /// Leave the receiver's gain untouched until the caller publishes a volume
     /// revision. The initial watch value is a placeholder in this mode.
@@ -101,6 +176,7 @@ impl SessionConfig {
             endpoint,
             identity,
             latency_frames: 22_050,
+            latency_policy: LatencyPolicy::default(),
             volume: Volume(-30.0),
             preserve_receiver_volume: false,
             pairing: None,
@@ -117,8 +193,12 @@ impl SessionConfig {
         {
             bail!("receiver is not in PTP peer configuration");
         }
-        if !(11_025..=88_200).contains(&self.latency_frames) {
-            bail!("latency outside realtime stream limits");
+        self.latency_policy.validate()?;
+        if self.latency_frames == 0
+            || !(self.latency_policy.min_frames..=self.latency_policy.max_frames)
+                .contains(&self.latency_frames)
+        {
+            bail!("latency outside configured policy");
         }
         if self.request_timeout.is_zero() || self.request_timeout > Duration::from_secs(30) {
             bail!("request timeout must be positive and at most 30 seconds");
@@ -444,7 +524,7 @@ impl Session {
     pub(crate) fn shutdown_deadline(&self) -> Duration {
         self.config.request_timeout + Duration::from_secs(3)
     }
-    pub async fn connect(config: SessionConfig) -> Result<Self> {
+    pub async fn connect(mut config: SessionConfig) -> Result<Self> {
         config.validate()?;
         let stream = timeout(config.request_timeout, TcpStream::connect(config.endpoint))
             .await
@@ -638,8 +718,14 @@ impl Session {
                     ),
                     ("ct", plist::Value::Integer(1u64.into())),
                     ("isMedia", plist::Value::Boolean(true)),
-                    ("latencyMax", plist::Value::Integer(88_200u64.into())),
-                    ("latencyMin", plist::Value::Integer(11_025u64.into())),
+                    (
+                        "latencyMax",
+                        plist::Value::Integer((config.latency_policy.max_frames as u64).into()),
+                    ),
+                    (
+                        "latencyMin",
+                        plist::Value::Integer((config.latency_policy.min_frames as u64).into()),
+                    ),
                     ("shk", plist::Value::Data(shk.to_vec())),
                     (
                         "spf",
@@ -675,7 +761,15 @@ impl Session {
                 .ok_or_else(|| anyhow!("no data port in SETUP reply"))?;
             let control_port = optional_port(first.get("controlPort"))?
                 .ok_or_else(|| anyhow!("no control port in SETUP reply"))?;
-            let render_frames = receiver_render_frames(first.get("latencyMin"))?;
+            let receiver_min = receiver_render_frames(first.get("latencyMin"))?;
+            let receiver_max = receiver_max_frames(first.get("latencyMax"))?;
+            let negotiated = config.latency_policy.resolve(
+                config.latency_frames,
+                Some(receiver_min),
+                Some(receiver_max),
+            )?;
+            let render_frames = receiver_min;
+            config.latency_frames = negotiated.frames;
             let packetizer = if let Some(plan) = &config.ptp {
                 TargetPacketizer::Ptp(crate::tx::timing::PtpPacketizer::new(
                     plan.clone(),
@@ -694,6 +788,9 @@ impl Session {
                     render_frames,
                 )?)
             };
+            if !negotiated.initial_buffer.is_zero() {
+                sleep(negotiated.initial_buffer).await;
+            }
             rtsp.request("RECORD", None, Vec::new(), None, &[]).await?;
             rtsp.request(
                 "FLUSH",
@@ -1080,6 +1177,16 @@ fn receiver_render_frames(value: Option<&plist::Value>) -> Result<u32> {
             .as_unsigned_integer()
             .and_then(|n| u32::try_from(n).ok())
             .ok_or_else(|| anyhow!("invalid receiver latencyMin")),
+    }
+}
+
+fn receiver_max_frames(value: Option<&plist::Value>) -> Result<u32> {
+    match value {
+        None => Ok(88_200),
+        Some(value) => value
+            .as_unsigned_integer()
+            .and_then(|n| u32::try_from(n).ok())
+            .ok_or_else(|| anyhow!("invalid receiver latencyMax")),
     }
 }
 
@@ -1601,3 +1708,60 @@ mod tests {
 #[cfg(test)]
 #[path = "session_ptp_tests.rs"]
 mod ptp_tests;
+
+#[cfg(test)]
+mod latency_tests {
+    use super::*;
+
+    #[test]
+    fn desired_latency_is_clamped_to_receiver_range() {
+        let policy = LatencyPolicy::default();
+        let fast = policy.resolve(22_050, Some(5_000), Some(11_025)).unwrap();
+        assert_eq!(fast.frames, 11_025);
+        let slow = policy.resolve(22_050, Some(44_100), Some(88_200)).unwrap();
+        assert_eq!(slow.frames, 44_100);
+        assert_eq!((slow.receiver_min, slow.receiver_max), (44_100, 88_200));
+        let exact = policy.resolve(33_075, Some(11_025), Some(88_200)).unwrap();
+        assert_eq!(exact.frames, 33_075);
+    }
+
+    #[test]
+    fn unusable_or_contradictory_receiver_ranges_are_rejected() {
+        let policy = LatencyPolicy::default();
+        assert!(policy.resolve(22_050, Some(90_000), Some(100_000)).is_err());
+        assert!(policy.resolve(22_050, Some(20_000), Some(10_000)).is_err());
+        let narrow = LatencyPolicy {
+            min_frames: 30_000,
+            max_frames: 40_000,
+            ..Default::default()
+        };
+        assert!(narrow.resolve(35_000, Some(11_025), Some(22_050)).is_err());
+        assert!(narrow.resolve(35_000, Some(35_000), Some(40_000)).is_ok());
+    }
+
+    #[test]
+    fn initial_buffer_is_bounded_by_negotiated_latency() {
+        let policy = LatencyPolicy {
+            min_frames: 11_025,
+            max_frames: 88_200,
+            initial_buffer: Duration::from_millis(1_500),
+        };
+        let negotiated = policy.resolve(11_025, Some(11_025), Some(88_200)).unwrap();
+        assert!(negotiated.initial_buffer <= frames_duration(11_025));
+        assert_eq!(negotiated.initial_buffer, frames_duration(11_025));
+    }
+
+    #[test]
+    fn invalid_policy_is_rejected_before_connecting() {
+        let policy = LatencyPolicy {
+            min_frames: 40_000,
+            max_frames: 20_000,
+            ..Default::default()
+        };
+        assert!(policy.validate().is_err());
+        let mut config =
+            SessionConfig::new("127.0.0.1:7000".parse().unwrap(), Identity::new("s", "s"));
+        config.latency_policy = policy;
+        assert!(config.validate().is_err());
+    }
+}
