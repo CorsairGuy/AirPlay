@@ -19,14 +19,16 @@ use std::io::Cursor;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
+use pair::{Identity as PairIdentity, hap::ControllerSetup};
 use plist::Value;
 use rand::RngCore;
 use tokio::net::TcpStream;
+use tokio::time::timeout;
 
 use super::buffered::{AAC_FRAMES_PER_PACKET, StreamSetup};
 use super::buffered_link::{BufferedLink, StreamReply};
-use super::session::{PairingCredentials, verify_pairing};
+use super::session::{PairingCredentials, setup_proof, verify_pairing};
 use super::transport::{Connection, Rtsp};
 
 /// SSRC профиля AAC-LC 44,1 кГц стерео.
@@ -110,6 +112,45 @@ impl BufferedSession {
             config.request_timeout,
         );
         let (keys, _shared) = verify_pairing(&mut rtsp, credentials).await?;
+        rtsp.conn.encrypt(keys);
+        Self::start(rtsp, config).await
+    }
+
+    /// То же, но с transient-сопряжением по фиксированному PIN `3939` — так
+    /// же, как realtime `Session` без сохранённых ключей. Ничего не
+    /// сохраняет: ключи живут только в этом соединении.
+    pub async fn pair_transient(
+        stream: TcpStream,
+        uri: String,
+        device_id: &str,
+        config: BufferedConfig,
+    ) -> Result<Self> {
+        config.validate()?;
+        stream.set_nodelay(true)?;
+        let mut rng = rand::thread_rng();
+        let mut seed = [0u8; 32];
+        rng.fill_bytes(&mut seed);
+        let mut rtsp = Rtsp::new(
+            Connection::new(stream),
+            uri,
+            format!("{:016X}", rng.next_u64()),
+            rng.next_u32(),
+            config.request_timeout,
+        );
+        rtsp.pair_post("/pair-pin-start", Vec::new()).await?;
+        let pair = ControllerSetup::new(
+            PairIdentity::from_seed(device_id.to_owned(), &seed),
+            "3939",
+            true,
+        );
+        let m2 = rtsp.pair_post("/pair-setup", pair.m1()).await?;
+        let (pair, m3) = timeout(config.request_timeout, setup_proof(pair, m2.body))
+            .await
+            .context("срок доказательства сопряжения")??;
+        let m4 = rtsp.pair_post("/pair-setup", m3).await?;
+        let keys = pair
+            .check_m4(&m4.body)?
+            .ok_or_else(|| anyhow!("transient-сопряжение не выдало ключи канала"))?;
         rtsp.conn.encrypt(keys);
         Self::start(rtsp, config).await
     }
