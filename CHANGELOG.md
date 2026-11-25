@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Discovery слушает `_airplay._tcp` и `_raop._tcp` одной таблицей: записи одного устройства сохраняются раздельно, адрес обновляется на месте, удаление одного типа не снимает второй, а одинаковые имена на разных хостах не затирают друг друга. Новый слой возможностей разбирает TXT (features двумя словами, flags, model, srcvers, at, RAOP ch/sr/ft/et/pw) и выбирает профиль: AirPlay 2 realtime audio запускается только при известном бите звука, иначе возвращается причина отказа; неподдерживаемый поток не стартует. Realtime из TXT не выводится, PTP-движок и медиатранспорт не менялись. Проверено тестами и clippy; реальных AirPlay-устройств в окружении нет.
+
 - HLS seek clears buffered audio; multichannel HLS audio is rejected rather than silently dropping channels. A replacement buffered-audio connection must deliver an authenticated packet before replacing the active reader; replay protection remains outside this change.
 
 - Fixed audio receive defects that caused silence or a stuck session: realtime UDP datagrams were truncated at 2048 bytes (an ALAC 24-bit packet is 2156), a second buffered TCP connection was not accepted while the previous one stayed open, an unknown SSRC stalled playback permanently, the packet queue and the partial-packet buffer had no bound, `recv` errors spun a busy loop, and a failed decoder was recreated on every packet. End-to-end tests in `crates/audio_stream/tests/pcm.rs` send known AAC/PCM and compare the PCM that reaches the sink; the realtime path is covered with PCM because no ALAC encoder is available, so ALAC playback still needs an iPhone check.
