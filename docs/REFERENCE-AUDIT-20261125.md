@@ -12,6 +12,39 @@ default branch на момент проверки. Лицензия репози
 Результаты ранжируются по применимости; README и заявления авторов сами по себе
 не являются нашей аппаратной проверкой. Поиск не гарантирует полноту.
 
+### Сверка дополнительного обзора
+
+- [OpenAir](https://github.com/Antoinenz/OpenAir) заявляет RX-проверку на
+  Apple TV и Shairport Sync, но HomePod в его README отмечен как непроверенный.
+  Лицензия текущего репозитория — GPL-3.0, не заявленная в обзоре MIT.
+- [iMirror](https://github.com/prat3ik/iMirror/blob/main/NOTICE.md) описывает
+  проблему двух одновременных операций регистрации Android `NsdManager` и
+  сериализацию как своё исправление. Это наблюдение об API Android, не wire-факт
+  AirPlay и не доказанная проблема всех версий Android.
+- [Shairport 5.5.1](https://github.com/mikebrady/shairport-sync/releases/tag/5.5.1)
+  перечисляет некорректный `timingPeerInfo.Addresses` и короткий `shk` среди
+  security fixes; в обзоре они ошибочно приписаны 5.6. Наш RX в `media/rx.rs`
+  пропускает нестроковые адреса через `filter_map`, а ключ `shk` проверяет
+  преобразованием в `[u8; 32]`. Это статическое наблюдение, не fuzz-аудит.
+- Группа `SRP` в `crates/pair/src/hap.rs` выбирается через `rfc5054_3072()`
+  в обеих ролях. Это проверка выбора группы в коде, не подтверждение interop.
+- [airplay2-rs](https://github.com/lmcgartland/airplay2-rs) описывает yield
+  PTP (3 Sync и 2 Announce) и sync-пакеты PT=87 как собственный сценарий TX.
+  Не распространять конкретные значения на все устройства без захвата.
+  Документ об именах флагов содержит неоднозначности вокруг bit 26/30, а правило
+  `51 без 26` не считать доказанным для всех комбинаций и классов устройств.
+  В проверенном TV `0x527FFEE6,0x8300` оба бита 26 и 51 выключены.
+- [esp32-airplay2-surround](https://github.com/Kristian8606/esp32-airplay2-surround)
+  описывает один AirPlay gateway и собственную доставку к динамикам. Это не
+  доказательство AirPlay-группы с числом PTP peers выше восьми.
+- [AirBridge](https://github.com/alcxandros/AirBridge) — Windows-оболочка над
+  UxPlay/GStreamer; автор описывает отключение анонса аудио для сохранения
+  звука на iPhone и отдельный WebRTC обратный канал. Не считать этот канал
+  AirPlay TX; поведение профиля проверить отдельно на собственной технике.
+- `0x527FFEE6` как младшее слово встречается в [shairplay-rust](https://docs.rs/crate/shairplay/latest/source/AP2-STATUS.md),
+  но общий playfair/UxPlay provenance не делает реализации независимыми
+  подтверждениями wire-семантики или совместимости AP2 audio + video.
+
 **Высокий приоритет, обновление существующего эталона:** UxPlay 17 ноября
 слил [поддержку FairPlay v2](https://github.com/FDH2/UxPlay/pull/639),
 которую авторы связывают с macOS Music. Наш приёмник сейчас явно отклоняет
