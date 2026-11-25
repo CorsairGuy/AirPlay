@@ -152,6 +152,7 @@ pub fn reason(status: u16) -> &'static str {
         400 => "Bad Request",
         403 => "Forbidden",
         404 => "Not Found",
+        409 => "Conflict",
         470 => "Connection Authorization Required",
         500 => "Internal Server Error",
         501 => "Not Implemented",

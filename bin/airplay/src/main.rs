@@ -89,6 +89,9 @@ const USAGE: &str = "\
   --volume-range ДБ
                   на сколько дБ растянуть ползунок громкости (по умолчанию 30)
   --ignore-volume громкость не менять, только сообщать (её ведёт внешний микшер)
+  --reject-secondary
+                  не вытеснять играющего отправителя вторым: пока звук занят,
+                  новый SETUP получает 409 (по умолчанию новый вытесняет прежний)
   --source-version В
                   версия AirPlay в /info и Bonjour (по умолчанию 366.0)
   --features МАСКА маска возможностей (десятичная или 0x...)
@@ -156,6 +159,7 @@ fn parse_serve(args: &[String]) -> Result<serve::Options, String> {
         events: std::sync::Arc::new(media::events::NoEvents),
         volume_range_db: 30.0,
         apply_volume: true,
+        ownership: media::rx::Ownership::Takeover,
         source_version: "366.0".into(),
         enclosure_color: None,
         time: None,
@@ -232,6 +236,7 @@ fn parse_serve(args: &[String]) -> Result<serve::Options, String> {
                     .ok_or("--volume-range: нужно число дБ от 1 до 144".to_string())?
             }
             "--ignore-volume" => opts.apply_volume = false,
+            "--reject-secondary" => opts.ownership = media::rx::Ownership::Reject,
             "--latency-offset" => {
                 opts.audio.latency_offset_ns = signed_ms(&value()?, "--latency-offset")?
             }
