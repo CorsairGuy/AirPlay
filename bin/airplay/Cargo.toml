@@ -47,10 +47,10 @@ if-addrs.workspace = true
 
 [features]
 default = ["mirroring"]
-mirroring = ["dep:mirror", "dep:video", "media/mirroring"]
+mirroring = ["dep:mirror", "dep:video", "media/mirroring", "sessions/mirroring"]
 # Звук (AAC-ELD) и видео (H.264/H.265) зеркалирования через libavcodec.
 ffmpeg = ["codec/ffmpeg", "video?/ffmpeg"]
-hls = ["dep:hls", "dep:video", "hls/ffmpeg"]
+hls = ["dep:hls", "dep:video", "hls/ffmpeg", "media/hls", "sessions/hls"]
 
 [lints]
 workspace = true

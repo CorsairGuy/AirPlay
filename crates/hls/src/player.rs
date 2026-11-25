@@ -349,7 +349,12 @@ fn play_run(
     loop {
         match control.step() {
             Step::Stop => return Ok(Outcome::Stop),
-            Step::Seek(position) => return Ok(Outcome::Seek(position)),
+            Step::Seek(position) => {
+                if let Some(sink) = audio_sink.as_deref_mut() {
+                    sink.stop();
+                }
+                return Ok(Outcome::Seek(position));
+            }
             Step::Pause => {
                 if paused_at.is_none() {
                     paused_at = Some(Instant::now());
@@ -605,6 +610,11 @@ fn to_nanoseconds(timestamp: Option<i64>, time_base: ff::Rational) -> Option<i64
 /// sink is opened at the stream's own rate, so only channel layout is adapted.
 fn append_pcm(frame: &ff::frame::Audio, out: &mut Vec<i16>) -> Result<(), Error> {
     use ff::format::Sample;
+    if frame.channels() > 2 {
+        return Err(Error::Audio(
+            "multichannel HLS audio is not supported".into(),
+        ));
+    }
     match frame.format() {
         Sample::U8(_) => collect::<u8>(frame, out),
         Sample::I16(_) => collect::<i16>(frame, out),
@@ -789,6 +799,7 @@ mod tests {
     struct Counters {
         frames: AtomicUsize,
         samples: AtomicUsize,
+        stops: AtomicUsize,
         ended: AtomicBool,
     }
 
@@ -822,7 +833,9 @@ mod tests {
             0
         }
 
-        fn stop(&mut self) {}
+        fn stop(&mut self) {
+            self.0.stops.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     fn playback_options(counters: &Arc<Counters>) -> PlaybackOptions {
@@ -924,6 +937,7 @@ mod tests {
             Duration::ZERO,
         );
         wait_until(&playback, || playback.duration().is_some()).await;
+        wait_until(&playback, || counters.samples.load(Ordering::Relaxed) > 0).await;
         assert_eq!(playback.duration(), Some(Duration::from_secs(3)));
         assert!(!playback.seek(Duration::from_secs(30)), "past the end");
         assert!(playback.seek(Duration::from_millis(2300)));
@@ -934,6 +948,10 @@ mod tests {
         })
         .await
         .expect("seek did not restart playback at the segment");
+        assert!(
+            counters.stops.load(Ordering::Relaxed) > 0,
+            "seek did not clear the audio output"
+        );
         tokio::time::timeout(Duration::from_secs(20), playback.wait())
             .await
             .expect("playback timed out after seek")

@@ -28,11 +28,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
-use crate::remote::{self, Command, Remote};
+use crate::control::{self, BPLIST, Command, MrpService, OCTETS, Remote};
+use crate::events::{Events, Metadata, NoEvents, Progress};
 #[cfg(feature = "hls")]
-use crate::sessions::serve::HlsOptions;
-use crate::sessions::session::{BPLIST, Context, OCTETS};
-use ::media::events::{Events, Metadata, NoEvents, Progress};
+use crate::hls::HlsOptions;
 
 /// Сколько байт отправитель может прислать вперёд в буферизованном потоке:
 /// 1 МиБ — около 30 с AAC 256 кбит/с.
@@ -49,6 +48,33 @@ fn video_stream_id(s: &Dictionary, authenticated: bool) -> Result<u64, String> {
     } else {
         Ok(id.unwrap_or(0))
     }
+}
+
+/// Группа сессии отправителя: `gid` в Bonjour, `/info` и карточке.
+///
+/// Медиачасть только сообщает о начале и конце сессии; кто обновляет
+/// объявление и карточку, решает хозяин сессии.
+pub trait SessionGroup: Send + Sync {
+    fn set_group(&self, group: Option<String>);
+}
+
+/// Что медиачасти нужно от сессии: звук, вывод и пульт.
+pub struct MediaContext {
+    pub player: Arc<Player>,
+    /// Куда отдавать видео зеркалирования.
+    #[cfg(feature = "mirroring")]
+    pub mirror: Option<mirror::VideoSinkFactory>,
+    /// URL-cast output; only configured by hosts with a video renderer.
+    #[cfg(feature = "hls")]
+    pub hls: Option<HlsOptions>,
+    /// Команды отправителю через канал событий.
+    pub remote: Remote,
+    /// Кто разбирает канал потока 130; `None` — только регистрация.
+    pub mrp: Option<MrpService>,
+    /// `ID` нашего PTP-участника в ответе SETUP.
+    pub pairing_id: String,
+    /// Сессия отправителя началась или закончилась.
+    pub session_group: Arc<dyn SessionGroup>,
 }
 
 /// Звук играет один отправитель: новый поток вытесняет прежний.
@@ -180,7 +206,7 @@ impl Player {
         self.with(owner, |s| s.playout().set_volume(out));
     }
 
-    #[cfg(test)]
+    #[doc(hidden)]
     pub fn active_packets(&self) -> Option<usize> {
         self.lock()
             .as_ref()
@@ -221,8 +247,12 @@ pub struct Media {
     /// нет, команды через него не шлём.
     rc_only: bool,
     /// Куда пересылать канал MRP (поток 130).
-    mrp_service: Option<remote::MrpService>,
+    mrp_service: Option<MrpService>,
     mrp: Option<JoinHandle<()>>,
+    /// Сессия отправителя: `gid` в объявлении и карточке.
+    group: Arc<dyn SessionGroup>,
+    /// `ID` нашего PTP-участника в ответе SETUP.
+    pairing_id: String,
     /// Адреса отправителя из `timingPeerInfo`.
     sender_addrs: Vec<IpAddr>,
     /// В сессии есть другие приёмники (мультирум).
@@ -243,7 +273,7 @@ pub struct Media {
 }
 
 impl Media {
-    pub fn new(ctx: &Context, local: IpAddr, remote: IpAddr) -> Self {
+    pub fn new(ctx: &MediaContext, local: IpAddr, remote: IpAddr) -> Self {
         Self {
             player: ctx.player.clone(),
             id: ctx.player.next_id.fetch_add(1, Ordering::Relaxed),
@@ -267,6 +297,8 @@ impl Media {
             rc_only: false,
             mrp_service: ctx.mrp.clone(),
             mrp: None,
+            group: ctx.session_group.clone(),
+            pairing_id: ctx.pairing_id.clone(),
             sender_addrs: vec![remote.to_canonical()],
             grouped: false,
             #[cfg(feature = "hls")]
@@ -294,7 +326,7 @@ impl Media {
     }
 
     /// Запрос медиачасти; `None` — не наш.
-    pub fn handle(&mut self, ctx: &Context, req: &Request) -> Option<Response> {
+    pub fn handle(&mut self, req: &Request) -> Option<Response> {
         let ok = || Response::to(req, 200);
         Some(match (req.method.as_str(), req.path()) {
             ("POST", "/fp-setup") => match self.fairplay.handle(&req.body) {
@@ -309,7 +341,7 @@ impl Media {
                 {
                     self.cast_v2 = true;
                 }
-                self.setup(ctx, req)
+                self.setup(req)
             }
             ("RECORD", _) => {
                 #[cfg(feature = "hls")]
@@ -374,7 +406,7 @@ impl Media {
                     // TEARDOWN его не закрывает.
                     self.stop_tasks();
                     if !self.rc_only {
-                        ctx.set_session_group(None);
+                        self.group.set_group(None);
                     }
                 }
                 info!("TEARDOWN");
@@ -605,14 +637,14 @@ impl Media {
         debug!(?state, "sender playback state");
     }
 
-    fn setup(&mut self, ctx: &Context, req: &Request) -> Response {
+    fn setup(&mut self, req: &Request) -> Response {
         let Some(body) = plist_dict(&req.body) else {
             warn!("SETUP без plist: отправители AirPlay 1 пока не поддерживаются");
             return Response::to(req, 400);
         };
         let reply = match body.get("streams").and_then(Value::as_array) {
             Some(streams) => self.setup_streams(streams),
-            None => self.setup_session(ctx, &body),
+            None => self.setup_session(&body),
         };
         match reply {
             Ok(d) => Response::to(req, 200).with_body(BPLIST, write_plist(d)),
@@ -624,7 +656,7 @@ impl Media {
     }
 
     /// Первый SETUP: часы и канал событий.
-    fn setup_session(&mut self, ctx: &Context, body: &Dictionary) -> Result<Dictionary, String> {
+    fn setup_session(&mut self, body: &Dictionary) -> Result<Dictionary, String> {
         let timing = body
             .get("timingProtocol")
             .and_then(Value::as_string)
@@ -664,7 +696,7 @@ impl Media {
         }
         if timing == "PTP" {
             if let Some(group) = body.get("groupUUID").and_then(Value::as_string) {
-                ctx.set_session_group(Some(group.to_owned()));
+                self.group.set_group(Some(group.to_owned()));
             }
             // The RTSP peer remains a timing peer even when timingPeerInfo is absent.
             self.sender_addrs = body
@@ -687,7 +719,7 @@ impl Media {
                     "ClockID".into(),
                     Value::Integer(reading.domain().id().into()),
                 );
-                peer.insert("ID".into(), ctx.device.pairing_id.clone().into());
+                peer.insert("ID".into(), self.pairing_id.clone().into());
                 peer.insert("DeviceType".into(), Value::Integer(0u64.into()));
                 peer.insert("SupportsClockPortMatchingOverride".into(), true.into());
                 info!(
@@ -697,7 +729,7 @@ impl Media {
             }
             d.insert("timingPeerInfo".into(), peer.into());
         }
-        let port = self.start_events(ctx).unwrap_or(0);
+        let port = self.start_events().unwrap_or(0);
         d.insert("eventPort".into(), Value::Integer(port.into()));
         // shairport-sync: фиктивный timingPort 0 только в ветке PTP; у сессии
         // только для пульта (timingProtocol None) в ответе один eventPort.
@@ -821,7 +853,7 @@ impl Media {
     }
 
     /// Канал событий: отправитель подключается сам; отправляем только команды.
-    fn start_events(&mut self, _ctx: &Context) -> Option<u16> {
+    fn start_events(&mut self) -> Option<u16> {
         let shared = self.shared.as_ref()?;
         let listener = match audio_stream::bind_tcp() {
             Ok(l) => l,
@@ -861,7 +893,7 @@ impl Media {
                             player.set_volume(owner, Command::volume_db(v));
                         }
                         cseq += 1;
-                        let req = remote::command_request(remote::command_body(command), cseq);
+                        let req = control::command_request(control::command_body(command), cseq);
                         let mut wire = Vec::new();
                         channel.seal(&req, &mut wire);
                         if conn.write_all(&wire).await.is_err() {
@@ -968,7 +1000,7 @@ impl Media {
         if let Some(old) = self.mrp.take() {
             old.abort();
         }
-        self.mrp = Some(tokio::spawn(remote::bridge(
+        self.mrp = Some(tokio::spawn(control::bridge(
             listener,
             self.remote,
             ControlKeys::accessory_data(shared, seed),
@@ -1245,6 +1277,38 @@ mod tests {
         assert_eq!(p.output_db(0.0), 0.0);
         p.apply_volume = false;
         assert_eq!(p.output_db(-15.0), 0.0);
+    }
+
+    /// Новый SETUP вытесняет прежний поток, а TEARDOWN прежнего отправителя
+    /// не должен останавливать новый.
+    #[tokio::test]
+    async fn buffered_stream_replacement_and_release() {
+        let player = Player::new(
+            audio_stream::Config {
+                device: "null".into(),
+                ..Default::default()
+            },
+            TimeSync::idle(1),
+        );
+        let first =
+            Stream::buffered(player.audio.clone(), &[1; 32], Arc::new(clock::NoTime)).unwrap();
+        first.playout().push(0, 0x1600_0000, vec![0; 8]);
+        player.replace(1, first);
+        assert_eq!(player.active_packets(), Some(1));
+
+        let second =
+            Stream::buffered(player.audio.clone(), &[2; 32], Arc::new(clock::NoTime)).unwrap();
+        player.replace(2, second);
+        assert_eq!(player.active_packets(), Some(0));
+
+        player.release(1);
+        assert_eq!(
+            player.active_packets(),
+            Some(0),
+            "TEARDOWN прежнего отправителя остановил новый поток"
+        );
+        player.release(2);
+        assert_eq!(player.active_packets(), None);
     }
 }
 

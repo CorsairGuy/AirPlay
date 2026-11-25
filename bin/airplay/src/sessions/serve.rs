@@ -5,15 +5,16 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
 use device::{DeviceInfo, Features};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
-use tracing::{info, warn};
+use media::control::MrpService;
+#[cfg(feature = "hls")]
+pub use media::hls::HlsOptions;
+use media::rx::Player;
+use sessions::session::Context;
+use tokio::net::TcpListener;
+use tracing::info;
 
 use crate::card::Card;
 use crate::identity::state;
-use crate::media::rx::Player;
-use crate::remote::MrpService;
-use crate::sessions::session::{Context, Session};
 
 pub struct Options {
     pub name: String,
@@ -39,7 +40,7 @@ pub struct Options {
     /// Экран, который объявляем для зеркалирования.
     pub display: device::Display,
     /// Ручка команд отправителю (play/pause/next, громкость, перемотка).
-    pub remote: crate::remote::Remote,
+    pub remote: media::control::Remote,
     /// Кто отвечает iPhone по MRP (поток 130).
     pub mrp: Mrp,
     /// Что приёмник сообщает наружу (громкость, метаданные, позиция).
@@ -52,19 +53,6 @@ pub struct Options {
     pub source_version: String,
     /// `deviceEnclosureColor` в `/info`.
     pub enclosure_color: Option<String>,
-}
-
-#[cfg(feature = "hls")]
-#[derive(Clone)]
-pub struct HlsOptions {
-    /// Variant bitrate ceiling; if none fits, the fetcher selects the lowest.
-    pub max_bandwidth: u64,
-    /// FFmpeg decoder selection and latency options.
-    pub decoder: video::VideoOptions,
-    /// Host-provided renderer for decoded frames.
-    pub sink: video::FrameSinkFactory,
-    /// Audio output for HLS; `None` plays video only.
-    pub audio: Option<hls::AudioOptions>,
 }
 
 /// MediaRemote: карточка «Сейчас играет» на iPhone.
@@ -166,20 +154,21 @@ pub async fn run(opts: Options) -> Result<()> {
     let mut player = Player::new(opts.audio, time);
     player.volume_range_db = opts.volume_range_db;
     player.apply_volume = opts.apply_volume;
-    let mrp = match opts.mrp {
-        Mrp::Off => None,
-        Mrp::Bridge(addr) => Some(MrpService::Bridge(addr)),
-        Mrp::Card => Some(MrpService::Card(Card::new(
-            Card::device(&device),
-            opts.remote.clone(),
-            opts.events.clone(),
-        ))),
+    let (mrp, events) = match opts.mrp {
+        Mrp::Off => (None, opts.events),
+        Mrp::Bridge(addr) => (Some(MrpService::Bridge(addr)), opts.events),
+        Mrp::Card => {
+            let card = Card::new(
+                Card::device(&device),
+                opts.remote.clone(),
+                opts.events.clone(),
+            );
+            // Карточка узнаёт о треке из тех же событий и передаёт их дальше.
+            let events: Arc<dyn ::media::events::Events> = card.clone();
+            (Some(MrpService::Handler(card)), events)
+        }
     };
-    // Карточка узнаёт о треке из тех же событий и передаёт их дальше.
-    player.events = match &mrp {
-        Some(MrpService::Card(card)) => card.clone(),
-        _ => opts.events,
-    };
+    player.events = events;
     let player = Arc::new(player);
 
     let ctx = Arc::new(Context {
@@ -207,55 +196,11 @@ pub async fn run(opts: Options) -> Result<()> {
     }
 
     for listener in listeners {
-        tokio::spawn(accept_loop(listener, ctx.clone()));
+        tokio::spawn(::sessions::transport::accept_loop(listener, ctx.clone()));
     }
     tokio::signal::ctrl_c().await?;
     info!("остановка");
     Ok(())
-}
-
-async fn accept_loop(listener: TcpListener, ctx: Arc<Context>) {
-    loop {
-        let (stream, addr) = match listener.accept().await {
-            Ok(a) => a,
-            Err(e) => {
-                warn!("accept: {e}");
-                continue;
-            }
-        };
-        let ctx = ctx.clone();
-        tokio::spawn(async move {
-            let peer = addr.to_string();
-            info!(%peer, "подключение");
-            match serve_connection(stream, ctx, addr).await {
-                Ok(()) => info!(%peer, "отключение"),
-                Err(e) => warn!(%peer, "соединение закрыто: {e:#}"),
-            }
-        });
-    }
-}
-
-pub(crate) async fn serve_connection(
-    mut stream: TcpStream,
-    ctx: Arc<Context>,
-    peer: std::net::SocketAddr,
-) -> Result<()> {
-    stream.set_nodelay(true)?;
-    let local = stream.local_addr()?.ip();
-    let mut session = Session::new(ctx, peer, local);
-    let mut buf = vec![0u8; 16 * 1024];
-    let mut out = Vec::new();
-    loop {
-        let n = stream.read(&mut buf).await?;
-        if n == 0 {
-            return Ok(());
-        }
-        session.on_data(&buf[..n], &mut out)?;
-        if !out.is_empty() {
-            stream.write_all(&out).await?;
-            out.clear();
-        }
-    }
 }
 
 /// Идентификатор часов PTP из MAC-адреса, как EUI-64: `aa:bb:cc` FF FE `dd:ee:ff`.

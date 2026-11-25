@@ -10,11 +10,11 @@
 |---|---|
 | crates/pair, crypto, rtsp, rtp, mrp | Общие кодеки и протоколы; независимое состояние каждой сессии |
 | services/timesync | Общий источник времени, role/mapping; явно созданная Service, общие сокеты и union адресатов |
-| services/media | Приём/передача, физические media sessions, PtpPlan, SessionPool и платформо-нейтральный `LocalSink`; без каталога/выбора выходов и Quasar/ALSA paths |
+| services/media | Приём медиа (Player, SETUP потоков, канал событий, пульт и канал MRP), передача, физические media sessions, PtpPlan, SessionPool и платформо-нейтральный `LocalSink`; без каталога/выбора выходов и Quasar/ALSA paths |
 | services/discovery | Browsing и валидированный snapshot устройств, логических групп и физических адресатов |
 | services/coordinator | Модели групп, пользовательский выбор, разрешение логических строк в физические операции и protocol-neutral runtime policy |
-| services/identity, sessions, remote | Доверие, подготовка сессий и протоколы управления |
-| bin/airplay | Frontend и композиция runtime: MRP адаптеры, авторизация и физическая SessionPool integration |
+| services/identity, sessions, remote | Доверие и сопряжения; RTSP-сессия, транспорт и output worker; MRP-карточка и очередь вывода |
+| bin/airplay | Frontend и композиция: аргументы, DeviceInfo/Player/Bonjour/Context, видео-вывод зеркалирования, PTP-группы и CLI `send` |
 | Репозиторий Станции | Glagol/Quasar, native PCM tap, BT/focus, ALSA маршруты, LED, supervisor, install и rollback |
 
 Локальный вывод не является отдельным core-сервисом: `media::tx::LocalSink` и `run_local`
@@ -28,9 +28,11 @@ Discovery публикует только последний валидный sn
 snapshot через интерфейс `coordinator::outputs::OutputSnapshot`, применяет user intent и
 планирует additions/removals физических receiver sessions. `services/media` не знает
 логических строк, алиасов, каталогов или планов выбора: он добавляет, удаляет и сообщает
-состояние физических сессий. Приложение остаётся host adapter для async MRP request loop,
-PIN authorization и `SessionPreparer`; политика выбора, подтверждённое состояние и перевод
-логических выходов в физический план размещены в `services/coordinator`. Направление
+состояние физических сессий. `services/sessions` ведёт RTSP-сессию, транспорт соединения и
+output worker; PIN authorization выполняется им же по `PairingStore` и PIN, которые
+передаёт приложение. Приложение остаётся host adapter: выбирает `PairingStore`, `Events`,
+видеосинки и поднимает Bonjour и список слушателей. Политика выбора, подтверждённое
+состояние и перевод логических выходов в физический план размещены в `services/coordinator`. Направление
 зависимостей — discovery → coordinator contract, media → общие group primitives; coordinator
 не зависит от discovery/media/sessions, поэтому циклической зависимости нет.
 `Runtime::apply_plan` принимает host-адаптер `PhysicalSessionBackend`: coordinator

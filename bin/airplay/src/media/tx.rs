@@ -542,7 +542,8 @@ mod tests {
             .with_test_writer()
             .with_env_filter("audio_stream=debug,timesync::ntp=debug,airplay::media=debug")
             .try_init();
-        use crate::{media::rx::Player, sessions::session::Context as ReceiverContext};
+        use ::media::rx::Player;
+        use ::sessions::session::Context as ReceiverContext;
         use audio::Sink;
         use device::{DeviceInfo, Features};
         use std::sync::Mutex;
@@ -619,7 +620,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let receiver = tokio::spawn(async move {
             let (stream, peer) = listener.accept().await.unwrap();
-            crate::sessions::serve::serve_connection(stream, context, peer).await
+            ::sessions::transport::serve_connection(stream, context, peer).await
         });
         let (_stop, stopped) = watch::channel(false);
         let mut pcm = Vec::new();

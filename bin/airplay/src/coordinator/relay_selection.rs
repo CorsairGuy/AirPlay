@@ -1,5 +1,5 @@
 //! Compatibility facade for the former application-level relay selection API.
-pub use crate::remote::output_selection::{decode, selection};
+pub use ::remote::output_selection::{decode, selection};
 
 use ::coordinator::runtime::Runtime;
 use ::discovery::catalog::OutputCatalog;

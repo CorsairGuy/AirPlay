@@ -3,7 +3,8 @@
 
 use std::io;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use clock::{Anchor, TimeSource};
 use codec::Format;
@@ -17,6 +18,17 @@ use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
 use crate::playout::{Config, Playout};
+
+/// Самая большая UDP-датаграмма. Realtime-пакет ALAC 24 бита по 352 кадра —
+/// это 2112 байт данных плюс заголовок RTP и тег ChaCha; в буфер на 2048 он
+/// не влезает, а `recv` молча обрезает датаграмму, после чего расшифровка
+/// не проходит и наступает тишина.
+const MAX_DATAGRAM: usize = 65_535;
+/// Предел незавершённого буферизованного пакета: испорченная длина не должна
+/// съедать память.
+const MAX_BUFFERED_BYTES: usize = 4 * 1024 * 1024;
+/// Сколько подряд ошибок `accept` терпим, прежде чем закрыть приём.
+const MAX_ACCEPT_FAILURES: u32 = 10;
 
 /// Ключ realtime-потока.
 #[derive(Clone, Copy)]
@@ -54,6 +66,11 @@ pub enum StreamKind {
     Buffered,
 }
 
+/// Текущее TCP-подключение буферизованного потока. Отправитель открывает
+/// новое подключение, не всегда закрывая прежнее, поэтому его нужно уметь
+/// заменить, пока старое ещё читается.
+type Connection = Arc<Mutex<Option<JoinHandle<()>>>>;
+
 pub struct Stream {
     pub kind: StreamKind,
     pub data_port: u16,
@@ -61,6 +78,7 @@ pub struct Stream {
     playout: Arc<Playout>,
     tasks: Vec<JoinHandle<()>>,
     started: Option<watch::Receiver<bool>>,
+    connection: Option<Connection>,
 }
 
 impl Stream {
@@ -73,8 +91,14 @@ impl Stream {
         let control_port = control.local_addr()?.port();
         let playout = Arc::new(Playout::start(cfg, time, None));
         let cipher = Arc::new(Decrypt::ChaCha(AudioCipher::new(shk)));
+        let connection: Connection = Arc::new(Mutex::new(None));
         let tasks = vec![
-            tokio::spawn(accept_buffered(listener, cipher, playout.clone())),
+            tokio::spawn(accept_buffered(
+                listener,
+                cipher,
+                playout.clone(),
+                connection.clone(),
+            )),
             // Отправитель шлёт сюда редко и ничего важного; читаем, чтобы не копилось.
             tokio::spawn(drain(control)),
         ];
@@ -85,6 +109,7 @@ impl Stream {
             control_port,
             playout,
             tasks,
+            connection: Some(connection),
         })
     }
 
@@ -120,6 +145,7 @@ impl Stream {
             control_port,
             playout,
             tasks,
+            connection: None,
         })
     }
 
@@ -149,6 +175,16 @@ impl Stream {
 
 impl Drop for Stream {
     fn drop(&mut self) {
+        // Читатель подключения живёт отдельной задачей: его надо закрыть
+        // вместе с потоком, иначе он продолжит принимать пакеты в мёртвый вывод.
+        if let Some(connection) = &self.connection
+            && let Some(reader) = connection
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take()
+        {
+            reader.abort();
+        }
         for t in &self.tasks {
             t.abort();
         }
@@ -187,27 +223,95 @@ fn dual_stack(ty: Type, proto: Protocol) -> io::Result<Socket> {
     Ok(s)
 }
 
-async fn accept_buffered(listener: TcpListener, cipher: Arc<Decrypt>, playout: Arc<Playout>) {
+async fn accept_buffered(
+    listener: TcpListener,
+    cipher: Arc<Decrypt>,
+    playout: Arc<Playout>,
+    connection: Connection,
+) {
+    let mut failures = 0u32;
+    let (verified_tx, mut verified_rx) = tokio::sync::mpsc::channel(1);
+    let mut candidate: Option<JoinHandle<()>> = None;
     loop {
-        match listener.accept().await {
+        tokio::select! {
+        Some((conn, buffered, timestamp, ssrc, payload)) = verified_rx.recv() => {
+            if let Some(previous) = connection.lock().unwrap_or_else(|error| error.into_inner()).take() {
+                previous.abort();
+            }
+            playout.push(timestamp, ssrc, payload);
+            let cipher = cipher.clone();
+            let playout = playout.clone();
+            let reader = tokio::spawn(async move {
+                read_buffered(conn, &cipher, &playout, buffered).await;
+            });
+            *connection.lock().unwrap_or_else(|error| error.into_inner()) = Some(reader);
+        }
+        accepted = listener.accept() => match accepted {
             Ok((conn, peer)) => {
-                debug!(%peer, "буферизованный поток подключён");
-                // Новое подключение заменяет старое: iPhone переподключается сам.
-                read_buffered(conn, &cipher, &playout).await;
+                failures = 0;
+                // Keep the current stream until an encrypted packet passes
+                // authentication. This does not itself prevent packet replay.
+                if let Some(previous) = candidate.take() { previous.abort(); }
+                let cipher = cipher.clone();
+                let verified_tx = verified_tx.clone();
+                candidate = Some(tokio::spawn(async move {
+                    if let Ok(Some(verified)) = tokio::time::timeout(
+                        Duration::from_secs(5), verify_buffered(conn, &cipher)
+                    ).await {
+                        debug!(%peer, "буферизованный поток подтверждён");
+                        let _ = verified_tx.send(verified).await;
+                    }
+                }));
             }
             Err(e) => {
-                warn!("приём аудиопотока: {e}");
-                return;
+                // Временная ошибка (кончились дескрипторы, сбой сети) не должна
+                // убивать приём навсегда.
+                failures += 1;
+                warn!(failures, "приём аудиопотока: {e}");
+                if failures >= MAX_ACCEPT_FAILURES {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
             }
+        }}
+    }
+}
+
+type Verified = (TcpStream, Vec<u8>, u32, u32, Vec<u8>);
+
+async fn verify_buffered(mut conn: TcpStream, cipher: &Decrypt) -> Option<Verified> {
+    let mut buffered = Vec::new();
+    let mut chunk = [0u8; 32 * 1024];
+    loop {
+        let n = conn.read(&mut chunk).await.ok()?;
+        if n == 0 {
+            return None;
+        }
+        buffered.extend_from_slice(&chunk[..n]);
+        while let Some(mut packet) = rtp::split_buffered(&mut buffered) {
+            if let Some((header, payload)) = cipher.open(&mut packet) {
+                return Some((
+                    conn,
+                    buffered,
+                    header.timestamp,
+                    header.ssrc,
+                    payload.to_vec(),
+                ));
+            }
+        }
+        if buffered.len() > MAX_BUFFERED_BYTES {
+            return None;
         }
     }
 }
 
-async fn read_buffered(mut conn: TcpStream, cipher: &Decrypt, playout: &Playout) {
+async fn read_buffered(mut conn: TcpStream, cipher: &Decrypt, playout: &Playout, mut buf: Vec<u8>) {
     let _ = conn.set_nodelay(true);
-    let mut buf = Vec::with_capacity(64 * 1024);
     let mut chunk = vec![0u8; 32 * 1024];
     loop {
+        while let Some(mut packet) = rtp::split_buffered(&mut buf) {
+            push(cipher, playout, &mut packet);
+        }
         let n = match conn.read(&mut chunk).await {
             Ok(0) => return,
             Ok(n) => n,
@@ -217,8 +321,13 @@ async fn read_buffered(mut conn: TcpStream, cipher: &Decrypt, playout: &Playout)
             }
         };
         buf.extend_from_slice(&chunk[..n]);
-        while let Some(mut packet) = rtp::split_buffered(&mut buf) {
-            push(cipher, playout, &mut packet);
+        if buf.len() > MAX_BUFFERED_BYTES {
+            // Длина пакета заведомо испорчена: ждать её конца бессмысленно.
+            warn!(
+                bytes = buf.len(),
+                "буферизованный поток: пакет больше предела, подключение закрыто"
+            );
+            return;
         }
     }
 }
@@ -242,12 +351,22 @@ async fn receive_realtime(
     playout: Arc<Playout>,
     started: watch::Sender<bool>,
 ) {
-    let mut buf = vec![0u8; 2048];
+    let mut buf = vec![0u8; MAX_DATAGRAM];
+    let mut failures = 0u64;
     loop {
         let n = match socket.recv(&mut buf).await {
-            Ok(n) => n,
+            Ok(n) => {
+                failures = 0;
+                n
+            }
             Err(e) => {
-                debug!("realtime: {e}");
+                // На Windows ICMP «порт недоступен» приходит как ошибка recv;
+                // без паузы цикл крутится вхолостую и жжёт процессор.
+                failures += 1;
+                if failures % 100 == 1 {
+                    debug!(failures, "realtime: {e}");
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
                 continue;
             }
         };
@@ -268,12 +387,20 @@ async fn receive_realtime(
 /// Управляющий канал realtime: синхропакеты с PTP-временем (0xD7) и
 /// повторно присланные пакеты (0xD6).
 async fn receive_control(socket: UdpSocket, cipher: Arc<Decrypt>, playout: Arc<Playout>) {
-    let mut buf = vec![0u8; 2048];
+    let mut buf = vec![0u8; MAX_DATAGRAM];
+    let mut failures = 0u64;
     loop {
         let (n, _from): (usize, SocketAddr) = match socket.recv_from(&mut buf).await {
-            Ok(r) => r,
+            Ok(r) => {
+                failures = 0;
+                r
+            }
             Err(e) => {
-                debug!("управление: {e}");
+                failures += 1;
+                if failures % 100 == 1 {
+                    debug!(failures, "управление: {e}");
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
                 continue;
             }
         };
@@ -316,6 +443,6 @@ async fn receive_control(socket: UdpSocket, cipher: Arc<Decrypt>, playout: Arc<P
 }
 
 async fn drain(socket: UdpSocket) {
-    let mut buf = vec![0u8; 2048];
+    let mut buf = vec![0u8; MAX_DATAGRAM];
     while socket.recv(&mut buf).await.is_ok() {}
 }

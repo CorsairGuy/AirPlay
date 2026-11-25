@@ -1,40 +1,51 @@
-//! Удалённое управление AirPlay 2.
+//! Пульт отправителю и канал MediaRemote (поток 130).
 //!
 //! - Команды отправителю ([`Remote`]): play/pause/next/previous, перемотка
 //!   и громкость уходят plist-ом `sendMediaRemoteCommand` по каналу событий
 //!   звукового соединения. DACP для AirPlay 2 не работает: iOS не
 //!   присылает DACP-ID и не публикует `_dacp._tcp`.
 //! - Канал MediaRemote (поток 130): шифрованный канал данных с протоколом
-//!   MRP внутри ([`bridge`]). Открытый текст идёт в карточку самого
-//!   приёмника (`card`) или в отдельную службу по TCP.
+//!   MRP внутри ([`bridge`]). Открытый текст идёт в обработчик
+//!   ([`MrpHandler`]): карточку приёмника или отдельную службу по TCP.
 
-#[macro_use]
-pub mod mrp_service;
-pub mod output_control;
-pub mod output_selection;
-
+use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
 use crypto::Channel;
 use crypto::kdf::ControlKeys;
 use plist::{Dictionary, Value};
 use rtsp::Request;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 
-use crate::card::Card;
-use crate::sessions::session::BPLIST;
+pub const BPLIST: &str = "application/x-apple-binary-plist";
+pub const OCTETS: &str = "application/octet-stream";
 
 /// Кто разбирает MRP из потока 130.
 #[derive(Clone)]
 pub enum MrpService {
     /// Служба по TCP, например airplay_mrp на станции.
     Bridge(SocketAddr),
-    /// Карточка самого приёмника.
-    Card(Arc<Card>),
+    /// Карточка приёмника или другая служба в этом процессе.
+    Handler(Arc<dyn MrpHandler>),
+}
+
+/// Разбор открытого MRP-канала: поток 130 после расшифровки.
+///
+/// Реализация владеет своей службой; `bridge` только снимает шифрование и
+/// передаёт байты, поэтому MRP-модель остаётся в `remote`, а медиа не знает
+/// о карточке.
+pub trait MrpHandler: Send + Sync {
+    /// Обработать одно подключение до закрытия канала.
+    fn serve(self: Arc<Self>, io: DuplexStream) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+    /// Сессия отправителя началась (`Some`) или закончилась.
+    fn route(&self, group: Option<String>) {
+        let _ = group;
+    }
 }
 
 /// Команда отправителю.
@@ -212,7 +223,7 @@ impl Remote {
     }
 
     /// Канал событий соединения `owner` открыт: команды теперь идут туда.
-    pub(crate) fn attach(&self, owner: u64) -> mpsc::UnboundedReceiver<Command> {
+    pub fn attach(&self, owner: u64) -> mpsc::UnboundedReceiver<Command> {
         let (tx, rx) = mpsc::unbounded_channel();
         *self.active.lock().unwrap_or_else(|e| e.into_inner()) = Some(Active {
             owner,
@@ -221,7 +232,7 @@ impl Remote {
         rx
     }
 
-    pub(crate) fn detach(&self, owner: u64) {
+    pub fn detach(&self, owner: u64) {
         let mut active = self.active.lock().unwrap_or_else(|e| e.into_inner());
         if active
             .as_ref()
@@ -281,10 +292,10 @@ pub async fn bridge(listener: TcpListener, sender: IpAddr, keys: ControlKeys, se
             let _ = conn.set_nodelay(true);
             forward(client, conn, channel).await
         }
-        MrpService::Card(card) => {
-            info!("канал MRP: карточка приёмника");
+        MrpService::Handler(handler) => {
+            info!("канал MRP: служба в процессе");
             let (ours, theirs) = tokio::io::duplex(64 * 1024);
-            let serving = tokio::spawn(card.serve(theirs));
+            let serving = tokio::spawn(handler.serve(theirs));
             let result = forward(client, ours, channel).await;
             serving.abort();
             result

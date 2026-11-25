@@ -24,6 +24,9 @@ const CHUNK: usize = 352;
 const NUDGE_FRAMES: i64 = 22;
 /// Расхождение, после которого не подстраиваемся, а перепрыгиваем.
 const RESYNC_NS: i64 = 100_000_000;
+/// Предел очереди пакетов (около полутора минут AAC 44,1 кГц): сессия на
+/// паузе или ушедший вперёд отправитель не должны съедать память без предела.
+const MAX_BUFFERED_PACKETS: usize = 4096;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -142,8 +145,23 @@ impl Playout {
     /// Пакет после расшифровки: метка, SSRC (формат) и сжатые данные.
     pub fn push(&self, timestamp: u32, ssrc: u32, payload: Vec<u8>) {
         let mut s = self.lock();
+        if s.stopped {
+            // Сессия закрыта, а подключение ещё живёт: не копим пакеты в никуда.
+            return;
+        }
         let ext = s.unwrap.extend(timestamp);
         s.packets.insert(ext, Packet { ssrc, payload });
+        if s.packets.len() > MAX_BUFFERED_PACKETS {
+            let excess = s.packets.len() - MAX_BUFFERED_PACKETS;
+            let stale: Vec<i64> = s.packets.keys().take(excess).copied().collect();
+            for ts in stale {
+                s.packets.remove(&ts);
+            }
+            debug!(
+                dropped = excess,
+                "буфер переполнен, старые пакеты отброшены"
+            );
+        }
         drop(s);
         self.changed();
     }
@@ -164,7 +182,9 @@ impl Playout {
             .map_or(44_100, |f| f.sample_rate) as i64;
         let jump = match s.anchor {
             None => true,
-            Some(old) if s.local_anchor => old.playing != anchor.playing,
+            // Переход с собственного якоря на часы отправителя меняет систему
+            // отсчёта: продолжать прежний курсор нельзя.
+            Some(_) if s.local_anchor => true,
             Some(old) => {
                 let frames = rtp::ts_diff(anchor.rtp, old.rtp) as i64;
                 let expected = old.network_ns as i64 + frames * 1_000_000_000 / rate;
@@ -242,7 +262,10 @@ impl Playout {
     }
 
     pub fn stop(&self) {
-        self.lock().stopped = true;
+        let mut s = self.lock();
+        s.stopped = true;
+        s.packets.clear();
+        drop(s);
         self.changed();
     }
 
@@ -269,6 +292,11 @@ struct Output {
     pcm: Vec<i16>,
     /// Громкость, уже переданная выводу, и применил ли он её сам.
     applied_volume: Option<(f32, bool)>,
+    /// SSRC, для которого формат не определился: чтобы не писать в лог на
+    /// каждый пакет и не замирать на нём.
+    unknown_ssrc: Option<u32>,
+    /// SSRC, для которого декодер уже не открылся.
+    decoder_failed: Option<u32>,
 }
 
 impl Output {
@@ -283,6 +311,8 @@ impl Output {
             epoch: 0,
             pcm: Vec::new(),
             applied_volume: None,
+            unknown_ssrc: None,
+            decoder_failed: None,
         }
     }
 
@@ -293,6 +323,9 @@ impl Output {
             let mut s = lock.lock().unwrap_or_else(|e| e.into_inner());
             loop {
                 if s.stopped {
+                    if let Some(sink) = &mut self.sink {
+                        sink.stop();
+                    }
                     return;
                 }
                 let playing = s.anchor.is_some_and(|a| a.playing);
@@ -339,7 +372,21 @@ impl Output {
     fn next_chunk(&mut self, s: &mut State) -> Option<Vec<i16>> {
         let anchor = s.anchor?;
         let (&first_ts, first) = s.packets.iter().next()?;
-        let format = s.format.or_else(|| Format::from_ssrc(first.ssrc))?;
+        let first_ssrc = first.ssrc;
+        let Some(format) = s.format.or_else(|| Format::from_ssrc(first_ssrc)) else {
+            // SSRC не несёт формат: такой пакет не сыграть. Раньше поток
+            // замирал на нём навсегда, без единой строки в логе.
+            if self.unknown_ssrc != Some(first_ssrc) {
+                warn!(
+                    ssrc = first_ssrc,
+                    "неизвестный формат потока, пакет отброшен"
+                );
+                self.unknown_ssrc = Some(first_ssrc);
+            }
+            s.packets.remove(&first_ts);
+            return Some(Vec::new());
+        };
+        self.unknown_ssrc = None;
         let rate = format.sample_rate;
         self.ensure_sink(rate)?;
         let sink = self.sink.as_mut()?;
@@ -457,13 +504,21 @@ impl Output {
     fn decode(&mut self, format: Format, ssrc: u32, payload: &[u8]) -> Vec<i16> {
         let frames = format.frames_per_packet() as usize;
         if self.decoder.as_ref().is_none_or(|(s, _)| *s != ssrc) {
+            if self.decoder_failed == Some(ssrc) {
+                // Декодер для этого потока уже не открылся: не повторяем
+                // попытку и не пишем в лог на каждом пакете.
+                self.pcm.resize(frames * CHANNELS, 0);
+                return std::mem::take(&mut self.pcm);
+            }
             self.decoder = match Decoder::new(format) {
                 Ok(d) => {
                     info!(?format, "декодер");
+                    self.decoder_failed = None;
                     Some((ssrc, d))
                 }
                 Err(e) => {
-                    warn!("{e}");
+                    warn!(?format, "декодер не открыт: {e}");
+                    self.decoder_failed = Some(ssrc);
                     None
                 }
             };

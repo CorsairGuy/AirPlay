@@ -10,12 +10,20 @@ publish = false
 
 [dependencies]
 anyhow.workspace = true
-plist.workspace = true
-uuid = { version = "1", features = ["v4", "v5"] }
+coordinator.workspace = true
+crypto.workspace = true
+device.workspace = true
+discovery.workspace = true
+identity.workspace = true
+media.workspace = true
 mrp.workspace = true
+plist.workspace = true
 rand.workspace = true
+rtsp.workspace = true
+sha2.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+uuid = { version = "1", features = ["v4", "v5"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

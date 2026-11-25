@@ -1262,8 +1262,12 @@ dependencies = [
  "codec",
  "coordinator",
  "crypto",
+ "fairplay",
+ "hls",
+ "if-addrs",
  "libc",
  "mirror",
+ "mrp",
  "pair",
  "plist",
  "rand 0.8.8",
@@ -1271,6 +1275,8 @@ dependencies = [
  "rtsp",
  "timesync",
  "tokio",
+ "tracing",
+ "video",
 ]
 
 [[package]]
@@ -1837,9 +1843,17 @@ name = "remote"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "coordinator",
+ "crypto",
+ "device",
+ "discovery",
+ "identity",
+ "media",
  "mrp",
  "plist",
  "rand 0.8.8",
+ "rtsp",
+ "sha2",
  "tokio",
  "tracing",
  "uuid",
@@ -2057,14 +2071,26 @@ name = "sessions"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "audio_stream",
  "clock",
  "coordinator",
+ "crypto",
+ "device",
+ "discovery",
+ "hex",
  "identity",
+ "mdns",
  "media",
+ "mirror",
  "mrp",
  "pair",
+ "plist",
+ "remote",
+ "rtp",
  "rtsp",
+ "timesync",
  "tokio",
+ "tracing",
  "uuid",
 ]
 

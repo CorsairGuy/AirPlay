@@ -14,12 +14,15 @@ workspace = true
 [features]
 default = []
 mirroring = ["dep:mirror"]
+hls = ["dep:hls", "dep:video", "hls/ffmpeg"]
 
 [dependencies]
 audio.workspace = true
 audio_stream.workspace = true
 codec.workspace = true
 mirror = { workspace = true, optional = true }
+hls = { workspace = true, optional = true }
+video = { workspace = true, optional = true }
 coordinator.workspace = true
 anyhow.workspace = true
 clock.workspace = true
@@ -31,4 +34,10 @@ crypto.workspace = true
 rtsp.workspace = true
 rtp.workspace = true
 timesync.workspace = true
+fairplay.workspace = true
+tracing.workspace = true
+if-addrs.workspace = true
 libc = "0.2"
+
+[dev-dependencies]
+mrp.workspace = true

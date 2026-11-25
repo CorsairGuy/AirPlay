@@ -10,10 +10,10 @@
 | --- | --- | --- |
 | `bin/airplay` | `airplay` | демон (`airplay`) и утилита управления (`airplay status`, `list`, `send`…) в одном бинарнике |
 | `services/timesync` | `timesync` | единые часы PTP/NTP |
-| `services/media` | `media` | медиаинтерфейсы и физические передающие сессии |
-| `services/remote` | `remote` | MRP-модель, обработка сообщений и альтернативный сервер |
+| `services/media` | `media` | приём медиа (Player, SETUP потоков, канал событий, пульт и канал MRP), физические передающие сессии, HLS и локальный вывод |
+| `services/remote` | `remote` | MRP-модель, карточка «Сейчас играет», очередь вывода и альтернативный сервер |
 | `crates/<имя>` | `<имя>` | библиотеки протоколов и медиа |
-| `services/sessions` | `sessions` | подготовка сессий и политика авторизации |
+| `services/sessions` | `sessions` | RTSP-сессия и транспорт соединения, подготовка сессий и output worker |
 | `services/discovery` | `discovery` | обнаружение и валидированный snapshot устройств/групп |
 | `services/identity` | `identity` | идентичность, доверие и данные сопряжений |
 | `services/coordinator` | `coordinator` | состояние групп, выбор и разрешение логических выходов, runtime policy |

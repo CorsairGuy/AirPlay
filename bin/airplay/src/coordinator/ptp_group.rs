@@ -675,7 +675,7 @@ mod tests {
             Ok(())
         }
     }
-    fn pipeline_card(remote: crate::remote::Remote) -> Arc<crate::card::Card> {
+    fn pipeline_card(remote: ::media::control::Remote) -> Arc<crate::card::Card> {
         crate::card::Card::new(
             mrp::messages::Device {
                 name: "Pipeline card".into(),
@@ -805,7 +805,7 @@ mod tests {
         }
         for malformed in [false, true] {
             let (_clock, _user, group, origin) = fixture();
-            let card = pipeline_card(crate::remote::Remote::new());
+            let card = pipeline_card(::media::control::Remote::new());
             let (_control, requests) =
                 crate::coordinator::output_control::OutputControl::channel(4);
             let (_catalog, discovery) =
@@ -875,7 +875,7 @@ mod tests {
     }
     #[tokio::test]
     async fn card_mrp_pause_play_reaches_continuous_pcm_and_all_owners_end() {
-        use crate::remote::{Command, Remote};
+        use ::media::control::{Command, Remote};
         use ::media::events::Events;
         use tokio::io::AsyncWriteExt;
         let (_clock, _user, group, origin) = fixture();
@@ -1008,7 +1008,7 @@ mod tests {
     #[tokio::test]
     async fn card_pipeline_rejects_unrelated_source_control_before_startup() {
         let (_clock, _user, group, origin) = fixture();
-        let card = pipeline_card(crate::remote::Remote::new());
+        let card = pipeline_card(::media::control::Remote::new());
         let (_pcm, input) = mpsc::channel(1);
         let (_state, controls) = watch::channel(::media::tx::continuous_source::State::default());
         let source = ContinuousSource {

@@ -92,6 +92,12 @@ impl FairPlay {
 
     /// Process M1 (mode selection). Returns the 142-byte pre-computed reply.
     pub fn setup(&mut self, request: &[u8; 16]) -> Result<[u8; 142], Error> {
+        // v2 is a different protocol, not a different mode: its reply is derived
+        // from a random receiver SAP and needs constants we do not have. Report it
+        // separately so field logs distinguish it from an unknown version.
+        if request[4] == 0x02 {
+            return Err(Error::UnsupportedV2);
+        }
         if request[4] != 0x03 {
             return Err(Error::Version);
         }
@@ -105,6 +111,9 @@ impl FairPlay {
 
     /// Process M2 (key message). Stores the key message and returns the 32-byte reply.
     pub fn handshake(&mut self, request: &[u8; 164]) -> Result<[u8; 32], Error> {
+        if request[4] == 0x02 {
+            return Err(Error::UnsupportedV2);
+        }
         if request[4] != 0x03 {
             return Err(Error::Version);
         }
@@ -923,5 +932,87 @@ mod playfair_tests {
             "643da6672b996a6b536d6e6fbdbf4273e2752e777879077b7cb97e7f08a22d83849eb8"
         );
         assert_eq!(to_hex(&b3[..16]), "d8333435113738394c3b3c3d823f4041");
+    }
+
+    /// Точные байты M1, которые macOS Music отправляет перед RAOP-сессией:
+    /// версия `0x02`, mode `0x02`. Источник — лог UxPlay issue #570
+    /// (`Music/1.6.6`, OS X 26.6.2). Это v2, а не v3 с mode 2.
+    const MACOS_MUSIC_M1: [u8; 16] = [
+        0x46, 0x50, 0x4c, 0x59, 0x02, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x04, 0x02, 0x00, 0x02,
+        0xbb,
+    ];
+
+    #[test]
+    fn v2_m1_is_rejected_explicitly() {
+        let mut fp = FairPlay::new();
+        assert_eq!(fp.setup(&MACOS_MUSIC_M1), Err(Error::UnsupportedV2));
+        assert_eq!(fp.handle(&MACOS_MUSIC_M1), Err(Error::UnsupportedV2));
+    }
+
+    #[test]
+    fn v2_m2_is_rejected_explicitly() {
+        let mut msg = [0x41u8; 164];
+        msg[..5].copy_from_slice(b"FPLY\x02");
+        msg[12] = 0x02;
+        let mut fp = FairPlay::new();
+        assert_eq!(fp.handshake(&msg), Err(Error::UnsupportedV2));
+        assert_eq!(fp.handle(&msg), Err(Error::UnsupportedV2));
+    }
+
+    #[test]
+    fn v3_m1_replies_are_unchanged() {
+        for mode in 0..4u8 {
+            let mut m1 = [0u8; 16];
+            m1[..5].copy_from_slice(b"FPLY\x03");
+            m1[12] = 0x02;
+            m1[14] = mode;
+            m1[15] = 0xbb;
+            let reply = FairPlay::new().setup(&m1).expect("v3 M1 stays supported");
+            assert_eq!(reply.len(), 142);
+            assert_eq!(&reply[..4], b"FPLY");
+            assert_eq!(reply[4], 0x03);
+            assert_eq!(reply[6], 0x02);
+            assert_eq!(&reply[8..12], &[0x00, 0x00, 0x00, 0x82]);
+            assert_eq!(reply[13], mode);
+        }
+    }
+
+    /// Захваченный ответ v3 на M1 mode 1 (UxPlay issue #570, iPadOS 27):
+    /// `46 50 4c 59 03 01 02 00 00 00 00 82 02 01 cf ...`. Привязывает таблицу
+    /// к внешнему наблюдению, а не только к самому себе.
+    #[test]
+    fn v3_m1_mode1_matches_captured_prefix() {
+        let mut m1 = [0u8; 16];
+        m1[..5].copy_from_slice(b"FPLY\x03");
+        m1[12] = 0x02;
+        m1[14] = 0x01;
+        m1[15] = 0xbb;
+        let reply = FairPlay::new().setup(&m1).unwrap();
+        assert_eq!(
+            &reply[..15],
+            &[
+                0x46, 0x50, 0x4c, 0x59, 0x03, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x82, 0x02, 0x01,
+                0xcf,
+            ]
+        );
+    }
+
+    #[test]
+    fn v3_m2_reply_is_unchanged() {
+        let mut msg = [0x41u8; 164];
+        msg[..5].copy_from_slice(b"FPLY\x03");
+        msg[12] = 0x01;
+        let reply = FairPlay::new().handshake(&msg).unwrap();
+        assert_eq!(&reply[..12], &FP_HEADER);
+        assert_eq!(&reply[12..], &msg[144..164]);
+    }
+
+    #[test]
+    fn handle_dispatches_by_length_and_keeps_errors() {
+        let mut fp = FairPlay::new();
+        assert_eq!(fp.handle(&[0u8; 15]), Err(Error::Length(15)));
+        let mut unknown = [0u8; 16];
+        unknown[4] = 0x04;
+        assert_eq!(fp.handle(&unknown), Err(Error::Version));
     }
 }

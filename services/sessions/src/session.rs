@@ -14,9 +14,10 @@ use pair::{Identity, PairingStore};
 use rtsp::{Request, Response};
 use tracing::{debug, info, warn};
 
-use crate::media::rx::{Media, Player};
+use media::control::{MrpService, Remote};
 #[cfg(feature = "hls")]
-use crate::sessions::serve::HlsOptions;
+use media::hls::HlsOptions;
+use media::rx::{Media, MediaContext, Player, SessionGroup};
 
 const PUBLIC: &str = "ANNOUNCE, SETUP, RECORD, PAUSE, FLUSH, TEARDOWN, OPTIONS, GET_PARAMETER, SET_PARAMETER, POST, GET";
 pub(crate) const BPLIST: &str = "application/x-apple-binary-plist";
@@ -42,9 +43,9 @@ pub struct Context {
     #[cfg(feature = "hls")]
     pub hls: Option<HlsOptions>,
     /// Команды отправителю.
-    pub remote: crate::remote::Remote,
+    pub remote: Remote,
     /// Кто разбирает канал потока 130; `None` — поток только регистрируется.
-    pub mrp: Option<crate::remote::MrpService>,
+    pub mrp: Option<MrpService>,
     /// `groupUUID` текущей сессии отправителя: идёт в `gid`, как у shairport-sync.
     pub session_group: std::sync::Mutex<Option<String>>,
 }
@@ -91,8 +92,8 @@ impl Context {
             }
             *current = group.clone();
         }
-        if let Some(crate::remote::MrpService::Card(card)) = &self.mrp {
-            card.route(group);
+        if let Some(MrpService::Handler(handler)) = &self.mrp {
+            handler.route(group);
         }
         let services = self.services();
         if let Some(adv) = self.mdns.lock().unwrap_or_else(|e| e.into_inner()).as_mut()
@@ -117,6 +118,46 @@ impl Context {
     }
 }
 
+impl Context {
+    /// Контекст без Bonjour, сопряжения и вывода — для тестов адаптеров.
+    ///
+    /// Поля, которые зависят от фич (`mirror`, `hls`), остаются пустыми,
+    /// поэтому вызывающий не должен повторять cfg-условия чужого крейта.
+    pub fn for_test(
+        identity: Identity,
+        device: DeviceInfo,
+        store: Box<dyn PairingStore>,
+        pin: impl Into<String>,
+        require_pin: bool,
+        player: Arc<Player>,
+    ) -> Self {
+        Self {
+            identity,
+            device,
+            store,
+            pin: pin.into(),
+            require_pin,
+            player,
+            mdns: std::sync::Mutex::new(None),
+            port: 0,
+            #[cfg(feature = "mirroring")]
+            mirror: None,
+            #[cfg(feature = "hls")]
+            hls: None,
+            remote: Default::default(),
+            mrp: None,
+            session_group: Default::default(),
+        }
+    }
+}
+
+/// Сессия отправителя сообщает о начале и конце группы объявлению и карточке.
+impl SessionGroup for Context {
+    fn set_group(&self, group: Option<String>) {
+        self.set_session_group(group);
+    }
+}
+
 pub struct Session {
     ctx: Arc<Context>,
     peer: String,
@@ -133,8 +174,19 @@ pub struct Session {
 
 impl Session {
     pub fn new(ctx: Arc<Context>, peer: SocketAddr, local: IpAddr) -> Self {
+        let media_ctx = MediaContext {
+            player: ctx.player.clone(),
+            #[cfg(feature = "mirroring")]
+            mirror: ctx.mirror.clone(),
+            #[cfg(feature = "hls")]
+            hls: ctx.hls.clone(),
+            remote: ctx.remote.clone(),
+            mrp: ctx.mrp.clone(),
+            pairing_id: ctx.device.pairing_id.clone(),
+            session_group: ctx.clone(),
+        };
         Self {
-            media: Media::new(&ctx, local, peer.ip()),
+            media: Media::new(&media_ctx, local, peer.ip()),
             peer: peer.to_string(),
             ctx,
             wire: Vec::new(),
@@ -225,8 +277,7 @@ impl Session {
             ("POST", "/pair-verify") if is_legacy_verify(req) => (self.legacy_verify(req), None),
             ("POST", "/pair-verify") => self.hap_verify(req),
             _ => {
-                let ctx = self.ctx.clone();
-                if let Some(resp) = self.media.handle(&ctx, req) {
+                if let Some(resp) = self.media.handle(req) {
                     return (resp, None);
                 }
                 warn!(peer = %self.peer, "ещё не поддерживается: {} {}", req.method, req.uri);
@@ -536,7 +587,7 @@ mod tests {
         let data_port = stream["dataPort"].as_unsigned_integer().unwrap() as u16;
 
         let frames = adts_frames(include_bytes!(
-            "../../../../crates/codec/tests/data/sine440.adts"
+            "../../../crates/codec/tests/data/sine440.adts"
         ));
         let cipher = rtp::AudioCipher::new(&shk);
         let mut wire = Vec::new();
@@ -783,7 +834,7 @@ mod tests {
     /// (поток 130) расшифровывается и пересылается в службу MRP.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn remote_control_end_to_end() {
-        use crate::remote::{Command, Remote};
+        use media::control::{Command, Remote};
         use plist::{Dictionary, Value};
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -792,7 +843,7 @@ mod tests {
         let mut ctx = ctx();
         {
             let c = Arc::get_mut(&mut ctx).unwrap();
-            c.mrp = Some(crate::remote::MrpService::Bridge(
+            c.mrp = Some(media::control::MrpService::Bridge(
                 backend.local_addr().unwrap(),
             ));
             c.remote = remote.clone();
@@ -929,12 +980,12 @@ mod tests {
         let mut ctx = ctx();
         let card = {
             let c = Arc::get_mut(&mut ctx).unwrap();
-            let card = crate::card::Card::new(
-                crate::card::Card::device(&c.device),
+            let card = remote::card::Card::new(
+                remote::card::Card::device(&c.device),
                 c.remote.clone(),
-                Arc::new(::media::events::NoEvents),
+                Arc::new(media::events::NoEvents),
             );
-            c.mrp = Some(crate::remote::MrpService::Card(card.clone()));
+            c.mrp = Some(media::control::MrpService::Handler(card.clone()));
             card
         };
         let mut c = Client::new(ctx);
