@@ -114,6 +114,17 @@ enum Inner {
 
 impl Decoder {
     pub fn new(format: Format) -> Result<Self, Error> {
+        if !matches!(format.channels, 1 | 2 | 6 | 8) {
+            return Err(Error::Init(format!(
+                "{} каналов: поддерживаются моно, стерео, 5.1 и 7.1",
+                format.channels
+            )));
+        }
+        if format.codec == Codec::Aac && format.channels > 2 {
+            return Err(Error::Init(
+                "многоканальный AAC: symphonia его не декодирует".into(),
+            ));
+        }
         if let Codec::Pcm { .. } = format.codec {
             return Ok(Self {
                 format,
@@ -224,15 +235,33 @@ fn pcm(packet: &[u8], channels: u8, out: &mut Vec<i16>) -> usize {
     frames
 }
 
-/// Сведение в стерео: моно дублируется, у многоканального берём фронт
-/// и добавляем центр с −3 дБ (порядок каналов symphonia: FL, FR, FC, LFE…).
+/// −3 дБ (0.7071) в Q8: центр и тыловые/боковые каналы.
+const MINUS_3DB: i32 = 181;
+
+/// Сведение в стерео по ITU-R BS.775: фронт как есть, центр и surround
+/// с −3 дБ, LFE не подмешивается (его не удваиваем в стерео). Порядок
+/// каналов — symphonia: FL, FR, FC, LFE, RL, RR[, SL, SR]. Сумма
+/// считается в i32 и насыщается, чтобы не было переполнения i16.
 fn downmix(frame: &[i16]) -> (i16, i16) {
+    let clip = |v: i32| v.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
     match frame {
         [m] => (*m, *m),
-        [l, r, c, ..] => {
-            let c = *c as i32 * 181 / 256;
-            let clip = |v: i32| v.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-            (clip(*l as i32 + c), clip(*r as i32 + c))
+        [l, r] => (*l, *r),
+        [l, r, c, _lfe, rl, rr] => {
+            let l = *l as i32 + *c as i32 * MINUS_3DB / 256 + *rl as i32 * MINUS_3DB / 256;
+            let r = *r as i32 + *c as i32 * MINUS_3DB / 256 + *rr as i32 * MINUS_3DB / 256;
+            (clip(l), clip(r))
+        }
+        [l, r, c, _lfe, rl, rr, sl, sr] => {
+            let l = *l as i32
+                + *c as i32 * MINUS_3DB / 256
+                + *rl as i32 * MINUS_3DB / 256
+                + *sl as i32 * MINUS_3DB / 256;
+            let r = *r as i32
+                + *c as i32 * MINUS_3DB / 256
+                + *rr as i32 * MINUS_3DB / 256
+                + *sr as i32 * MINUS_3DB / 256;
+            (clip(l), clip(r))
         }
         _ => (0, 0),
     }
@@ -377,7 +406,71 @@ mod tests {
     #[test]
     fn downmix_keeps_center() {
         assert_eq!(downmix(&[100]), (100, 100));
+        assert_eq!(downmix(&[100, -100]), (100, -100));
         assert_eq!(downmix(&[100, -100, 256, 0, 0, 0]), (281, 81));
+    }
+
+    /// 5.1: фронт, центр и тыл с −3 дБ, LFE не подмешивается.
+    #[test]
+    fn downmix_5_1_uses_center_and_rear() {
+        assert_eq!(
+            downmix(&[1000, -1000, 256, 20000, 256, -256]),
+            (1362, -1000)
+        );
+    }
+
+    /// 7.1: боковые каналы добавляются к своей стороне.
+    #[test]
+    fn downmix_7_1_adds_sides() {
+        assert_eq!(downmix(&[100, 200, 0, 0, 0, 0, 256, -256]), (281, 19));
+    }
+
+    #[test]
+    fn downmix_saturates_instead_of_wrapping() {
+        let max = [i16::MAX, i16::MAX, i16::MAX, 0, i16::MAX, i16::MAX, i16::MAX, i16::MAX];
+        assert_eq!(downmix(&max), (i16::MAX, i16::MAX));
+        let min = [i16::MIN, i16::MIN, i16::MIN, 0, i16::MIN, i16::MIN, i16::MIN, i16::MIN];
+        assert_eq!(downmix(&min), (i16::MIN, i16::MIN));
+    }
+
+    #[test]
+    fn only_mono_stereo_5_1_and_7_1_are_accepted() {
+        let format = |channels, codec| Format {
+            codec,
+            sample_rate: 48_000,
+            channels,
+        };
+        let pcm = Codec::Pcm {
+            frames_per_packet: 352,
+        };
+        for channels in [1, 2, 6, 8] {
+            Decoder::new(format(channels, pcm)).unwrap();
+        }
+        for channels in [3, 4, 5, 7] {
+            assert!(Decoder::new(format(channels, pcm)).is_err(), "{channels}");
+        }
+        // Многоканальный AAC не декодируется symphonia — отклоняем сразу.
+        assert!(Decoder::new(format(6, Codec::Aac)).is_err());
+    }
+
+    /// PCM 5.1 превращается в стерео с тем же порядком каналов в пакете.
+    #[test]
+    fn pcm_5_1_downmix() {
+        let mut d = Decoder::new(Format {
+            codec: Codec::Pcm {
+                frames_per_packet: 1,
+            },
+            sample_rate: 48_000,
+            channels: 6,
+        })
+        .unwrap();
+        let mut packet = Vec::new();
+        for s in [1000i16, -1000, 256, 20000, 256, -256] {
+            packet.extend_from_slice(&s.to_be_bytes());
+        }
+        let mut out = Vec::new();
+        assert_eq!(d.decode(&packet, &mut out).unwrap(), 1);
+        assert_eq!(out, [1362, -1000]);
     }
 
     #[derive(Default)]

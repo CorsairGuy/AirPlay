@@ -1141,7 +1141,8 @@ fn realtime_format(s: &Dictionary) -> Result<Format, String> {
     Ok(Format {
         codec,
         sample_rate,
-        channels: 2,
+        // AP2 сообщает раскладку в `ch`; без него эфир стерео.
+        channels: uint(s, "ch").unwrap_or(2) as u8,
     })
 }
 
@@ -1265,6 +1266,18 @@ mod tests {
         ]));
         assert_eq!(other_receivers(&x, &sender), 1);
         assert_eq!(other_receivers(b"garbage", &sender), 0);
+    }
+
+    #[test]
+    fn realtime_channels_come_from_setup() {
+        let mut d = Dictionary::new();
+        d.insert("ct".into(), Value::Integer(1.into()));
+        d.insert("sr".into(), Value::Integer(48_000.into()));
+        d.insert("spf".into(), Value::Integer(352.into()));
+        d.insert("ch".into(), Value::Integer(6.into()));
+        assert_eq!(realtime_format(&d).unwrap().channels, 6);
+        d.remove("ch");
+        assert_eq!(realtime_format(&d).unwrap().channels, 2);
     }
 
     #[test]
