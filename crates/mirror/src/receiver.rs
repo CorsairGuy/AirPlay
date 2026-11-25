@@ -202,3 +202,93 @@ mod authenticated_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod passthrough_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpStream;
+
+    #[derive(Debug, PartialEq)]
+    enum Seen {
+        Config(Codec, Vec<u8>),
+        Frame(Vec<u8>),
+    }
+
+    struct Recorded(Arc<Mutex<Vec<Seen>>>);
+
+    impl VideoSink for Recorded {
+        fn config(&mut self, codec: Codec, record: &[u8]) {
+            self.0
+                .lock()
+                .unwrap()
+                .push(Seen::Config(codec, record.to_vec()));
+        }
+        fn frame(&mut self, _pts_ns: u64, nals: &[u8]) {
+            self.0.lock().unwrap().push(Seen::Frame(nals.to_vec()));
+        }
+    }
+
+    fn packet(kind: u8, body: &[u8]) -> Vec<u8> {
+        let mut p = vec![0u8; HEADER_LEN];
+        p[..4].copy_from_slice(&(body.len() as u32).to_le_bytes());
+        p[4] = kind;
+        p[8..16].copy_from_slice(&0x1234_5678u64.to_le_bytes());
+        p.extend_from_slice(body);
+        p
+    }
+
+    /// Расширенный экран Mac меняет разрешение и кодек без нового SETUP:
+    /// приходит новый `Config`, затем кадры другого размера. Приёмник
+    /// обязан отдать их в sink как есть, ничего не предполагая о геометрии.
+    #[tokio::test]
+    async fn accepts_hevc_and_resolution_changes_mid_stream() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let recorded = Arc::new(Mutex::new(Vec::new()));
+        let key = [1u8; 16];
+        let iv = [2u8; 16];
+        let task = tokio::spawn(receive(
+            listener,
+            key,
+            iv,
+            Box::new(Recorded(recorded.clone())),
+        ));
+        let mut client = TcpStream::connect(address).await.unwrap();
+
+        let mut hevc = vec![0u8, 0, 0, 0];
+        hevc.extend_from_slice(b"hvc1");
+        hevc.extend_from_slice(&[0; 70]);
+        let h264 = [
+            1u8, 0x64, 0, 0x28, 0xFF, 0xE1, 0, 2, 0x67, 0x64, 1, 0, 1, 0x68,
+        ];
+
+        let frames: [Vec<u8>; 2] = [vec![0, 0, 0, 3, 0x26, 1, 2], vec![0, 0, 0, 2, 0x02, 0x03]];
+        let mut cipher = ctr::aes128_ctr(&key, &iv);
+        let mut wire = packet(1, &hevc);
+        for frame in &frames {
+            let mut enc = frame.clone();
+            ctr::apply(&mut cipher, &mut enc);
+            wire.extend(packet(0, &enc));
+        }
+        wire.extend(packet(1, &h264));
+        let mut enc = frames[0].clone();
+        ctr::apply(&mut cipher, &mut enc);
+        wire.extend(packet(0, &enc));
+        client.write_all(&wire).await.unwrap();
+        drop(client);
+        task.await.unwrap();
+
+        assert_eq!(
+            *recorded.lock().unwrap(),
+            vec![
+                Seen::Config(Codec::H265, hevc),
+                Seen::Frame(frames[0].clone()),
+                Seen::Frame(frames[1].clone()),
+                Seen::Config(Codec::H264, h264.to_vec()),
+                Seen::Frame(frames[0].clone()),
+            ]
+        );
+    }
+}

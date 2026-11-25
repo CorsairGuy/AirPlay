@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added a configurable mirroring display descriptor: `/info` now reports `width`, `height`, `widthPixels`, `heightPixels`, physical size, `refreshRate`, `maxFPS`, `overscanned`, `rotation`, `uuid` and a per-display feature mask, with CLI flags for each. Feature bit 42 (screen HEVC) is opt-in via `--screen-hevc`, which also defaults the display to 3840x2160@30; the receiver already accepted mid-stream codec and resolution changes. macOS extended-display mode was not hardware-validated; see `docs/EXTENDED-DISPLAY-20261125.md`.
 - PIN pairing sends `X-Apple-Client-Name` on the initial and setup requests; callers can supply a display name or use the existing API's `AirPlay` default. Hardware validation with Apple TV remains outstanding.
 - Added an opt-in HLS VOD path: bounded HTTP(S) fetch and FFmpeg demux feed decoded frames to a host-provided `FrameSink`; AirPlay `/play`, V2 `/rate`, and `/stop` handlers are available with the `hls` feature. Live refresh, audio, pause, seek, and capability advertisement remain unsupported.
 - Moved output-selection precedence and logical-to-physical resolution into `services/coordinator`. MRP output-context decoding and its request queue now sit under the application's `remote` component; the serialized worker applies coordinator decisions to discovered, authorized media sessions.
