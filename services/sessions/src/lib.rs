@@ -5,6 +5,7 @@ use media::tx::{Session, pool::SessionPool};
 use std::future::Future;
 
 pub mod output_worker;
+pub mod photo;
 pub mod preparer;
 pub mod session;
 pub mod transport;

@@ -141,6 +141,7 @@ fn parse_serve(args: &[String]) -> Result<serve::Options, String> {
         hls: None,
         remote: Default::default(),
         mrp: serve::Mrp::Off,
+        photo: None,
         events: std::sync::Arc::new(media::events::NoEvents),
         volume_range_db: 30.0,
         apply_volume: true,
