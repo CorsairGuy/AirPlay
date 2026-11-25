@@ -28,6 +28,6 @@ pub use packet::{
     AudioPacket, FRAME_BYTES, FRAMES_PER_PACKET, MediaClock, PACKET_BYTES, SAMPLE_RATE,
 };
 pub use session::{
-    Identity, MediaProgress, PairingCredentials, PinPairing, PtpPeerControl, Session,
-    SessionConfig, StreamStats, Volume,
+    Artwork, Identity, MAX_ARTWORK_BYTES, MediaProgress, MetadataHandle, PairingCredentials,
+    PinPairing, PtpPeerControl, Session, SessionConfig, StreamStats, TrackMetadata, Volume,
 };
