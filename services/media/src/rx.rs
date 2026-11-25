@@ -77,7 +77,18 @@ pub struct MediaContext {
     pub session_group: Arc<dyn SessionGroup>,
 }
 
-/// Звук играет один отправитель: новый поток вытесняет прежний.
+/// Что делать, когда звук уже занят другим отправителем.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Ownership {
+    /// Новый отправитель останавливает прежний поток (по умолчанию).
+    #[default]
+    Takeover,
+    /// Пока играет один отправитель, второй получает отказ.
+    Reject,
+}
+
+/// Звук играет один отправитель: по политике [`Player::ownership`] новый
+/// поток вытесняет прежний или отклоняется.
 pub struct Player {
     pub audio: audio_stream::Config,
     pub time: TimeSync,
@@ -87,6 +98,8 @@ pub struct Player {
     /// Громкость не применять к звуку, только сообщать в [`Events`]: её
     /// ведёт внешний микшер.
     pub apply_volume: bool,
+    /// Политика для второго отправителя; см. [`Ownership`].
+    pub ownership: Ownership,
     pub events: Arc<dyn Events>,
     active: Mutex<Option<(u64, Stream)>>,
     /// Громкость AirPlay, как прислал отправитель.
@@ -102,6 +115,7 @@ impl Player {
             time,
             volume_range_db: 30.0,
             apply_volume: true,
+            ownership: Ownership::Takeover,
             events: Arc::new(NoEvents),
             active: Mutex::new(None),
             volume_db: Mutex::new(0.0),
@@ -129,7 +143,22 @@ impl Player {
         Arc::new(self.time.clone())
     }
 
-    fn replace(&self, owner: u64, mut stream: Stream) {
+    /// Может ли этот владелец получить звук при текущей политике.
+    fn available(&self, owner: u64) -> bool {
+        self.ownership == Ownership::Takeover
+            || self
+                .lock()
+                .as_ref()
+                .is_none_or(|(id, _)| *id == owner)
+    }
+
+    /// Ставит поток владельцу. `false` — политика [`Ownership::Reject`]
+    /// отказала: поток не занял плеер и освобождён.
+    fn replace(&self, owner: u64, mut stream: Stream) -> bool {
+        if !self.available(owner) {
+            warn!(owner, "второй отправитель отклонён политикой владения");
+            return false;
+        }
         stream
             .playout()
             .set_volume(self.output_db(*self.volume_db.lock().unwrap_or_else(|e| e.into_inner())));
@@ -151,6 +180,7 @@ impl Player {
         {
             info!("новый отправитель, прежний поток остановлен");
         }
+        true
     }
 
     fn with<R>(&self, owner: u64, f: impl FnOnce(&Stream) -> R) -> Option<R> {
@@ -644,11 +674,15 @@ impl Media {
         };
         let reply = match body.get("streams").and_then(Value::as_array) {
             Some(streams) => self.setup_streams(streams),
-            None => self.setup_session(&body),
+            None => self.setup_session(&body).map_err(SetupError::Failed),
         };
         match reply {
             Ok(d) => Response::to(req, 200).with_body(BPLIST, write_plist(d)),
-            Err(e) => {
+            Err(SetupError::Conflict) => {
+                warn!("SETUP: звук уже у другого отправителя");
+                Response::to(req, 409)
+            }
+            Err(SetupError::Failed(e)) => {
                 warn!("SETUP: {e}");
                 Response::to(req, 500)
             }
@@ -828,7 +862,9 @@ impl Media {
             "controlPort".into(),
             Value::Integer(stream.control_port.into()),
         );
-        self.player.replace(self.id, stream);
+        if !self.player.replace(self.id, stream) {
+            return Err("звук уже у другого отправителя".into());
+        }
         Ok(())
     }
 
@@ -911,11 +947,15 @@ impl Media {
         Some(port)
     }
 
-    fn setup_streams(&mut self, streams: &[Value]) -> Result<Dictionary, String> {
+    fn setup_streams(&mut self, streams: &[Value]) -> Result<Dictionary, SetupError> {
         let mut replies = Vec::new();
         for s in streams {
             let Some(s) = s.as_dictionary() else { continue };
             let kind = uint(s, "type").unwrap_or(0);
+            // Звуковые потоки занимают единственный плеер.
+            if matches!(kind, 96 | 103) && !self.player.available(self.id) {
+                return Err(SetupError::Conflict);
+            }
             let mut r = Dictionary::new();
             r.insert("type".into(), Value::Integer(kind.into()));
             match kind {
@@ -968,7 +1008,9 @@ impl Media {
                     }
                     self.anchor = None;
                     stream.playout().set_grouped(self.grouped);
-                    self.player.replace(self.id, stream);
+                    if !self.player.replace(self.id, stream) {
+                        return Err(SetupError::Conflict);
+                    }
                 }
                 130 => self.setup_remote_control(s, &mut r)?,
                 other => {
@@ -1213,6 +1255,24 @@ fn parse_peers(body: &[u8]) -> Vec<IpAddr> {
         }
     }
     peers
+}
+
+/// Ошибка SETUP: конфликт владения отличается от прочих.
+enum SetupError {
+    Conflict,
+    Failed(String),
+}
+
+impl From<String> for SetupError {
+    fn from(e: String) -> Self {
+        SetupError::Failed(e)
+    }
+}
+
+impl From<&str> for SetupError {
+    fn from(e: &str) -> Self {
+        SetupError::Failed(e.to_owned())
+    }
 }
 
 #[cfg(test)]

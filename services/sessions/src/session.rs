@@ -1294,6 +1294,60 @@ mod tests {
         assert_eq!(c.call("POST", "/pair-verify", &[], msg2).status, 200);
     }
 
+    /// Политика Reject: второй отправитель получает 409, первый продолжает
+    /// играть; поздний TEARDOWN второго его не останавливает.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reject_policy_keeps_the_first_sender() {
+        use plist::{Dictionary, Value};
+
+        let mut ctx = ctx();
+        {
+            let player = Arc::get_mut(&mut Arc::get_mut(&mut ctx).unwrap().player).unwrap();
+            player.ownership = media::rx::Ownership::Reject;
+        }
+        let to_plist = |d: Dictionary| {
+            let mut out = Vec::new();
+            Value::Dictionary(d).to_writer_binary(&mut out).unwrap();
+            out
+        };
+        let stream_setup = |c: &mut Client| {
+            let mut s = Dictionary::new();
+            s.insert("type".into(), Value::Integer(96.into()));
+            s.insert("ct".into(), Value::Integer(2.into()));
+            s.insert("sr".into(), Value::Integer(44_100.into()));
+            s.insert("spf".into(), Value::Integer(352.into()));
+            s.insert("shk".into(), Value::Data(vec![9; 32]));
+            let mut d = Dictionary::new();
+            d.insert("streams".into(), Value::Array(vec![s.into()]));
+            c.call("SETUP", "rtsp://x/1", &[], to_plist(d))
+        };
+
+        let mut first = Client::new(ctx.clone());
+        assert_eq!(stream_setup(&mut first).status, 200);
+        assert_eq!(ctx.player.active_packets(), Some(0));
+
+        let mut second = Client::new(ctx.clone());
+        assert_eq!(stream_setup(&mut second).status, 409);
+        // Поздний TEARDOWN отклонённого не должен останавливать первый поток.
+        assert_eq!(
+            second.call("TEARDOWN", "rtsp://x/1", &[], vec![]).status,
+            200
+        );
+        assert_eq!(ctx.player.active_packets(), Some(0));
+
+        assert_eq!(
+            first.call("TEARDOWN", "rtsp://x/1", &[], vec![]).status,
+            200
+        );
+        assert_eq!(ctx.player.active_packets(), None);
+        // Освобождённый плеер снова доступен.
+        assert_eq!(stream_setup(&mut second).status, 200);
+        assert_eq!(
+            second.call("TEARDOWN", "rtsp://x/1", &[], vec![]).status,
+            200
+        );
+    }
+
     #[test]
     fn unknown_request_is_not_implemented() {
         let mut c = Client::new(ctx());

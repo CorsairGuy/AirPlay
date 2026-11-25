@@ -49,6 +49,8 @@ pub struct Options {
     pub volume_range_db: f32,
     /// `false` — громкость не применять, только сообщать в `events`.
     pub apply_volume: bool,
+    /// Что делать со вторым отправителем звука: вытеснить или отклонить.
+    pub ownership: media::rx::Ownership,
     /// `sourceVersion` в `/info` и Bonjour, например 366.0 или 550.10.
     pub source_version: String,
     /// `deviceEnclosureColor` в `/info`.
@@ -154,6 +156,7 @@ pub async fn run(opts: Options) -> Result<()> {
     let mut player = Player::new(opts.audio, time);
     player.volume_range_db = opts.volume_range_db;
     player.apply_volume = opts.apply_volume;
+    player.ownership = opts.ownership;
     let (mrp, events) = match opts.mrp {
         Mrp::Off => (None, opts.events),
         Mrp::Bridge(addr) => (Some(MrpService::Bridge(addr)), opts.events),
