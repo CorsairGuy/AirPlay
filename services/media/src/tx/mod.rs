@@ -9,6 +9,7 @@
 //! This is a port of an experimental sender, not a claim of production-ready TX.
 //! See the crate README and PROVENANCE for supported formats and limitations.
 
+pub mod buffered;
 pub mod continuous;
 pub mod continuous_source;
 pub mod group;
@@ -22,6 +23,7 @@ pub mod source_runtime;
 pub mod timing;
 mod transport;
 
+pub use buffered::{AdtsError, BufferedSender, StreamSetup, adts_frames};
 pub use local::{LocalSink, run_local};
 pub use local_pipe::LocalPcmPipe;
 pub use packet::{
