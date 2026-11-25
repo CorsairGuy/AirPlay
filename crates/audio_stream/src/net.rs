@@ -2,9 +2,9 @@
 //! realtime. Каждый поток — пара задач tokio; вывод идёт в [`Playout`].
 
 use std::io;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use clock::{Anchor, TimeSource};
 use codec::Format;
@@ -29,6 +29,13 @@ const MAX_DATAGRAM: usize = 65_535;
 const MAX_BUFFERED_BYTES: usize = 4 * 1024 * 1024;
 /// Сколько подряд ошибок `accept` терпим, прежде чем закрыть приём.
 const MAX_ACCEPT_FAILURES: u32 = 10;
+/// Не чаще этого шлём запросы пересылки: shairport-sync `7ce90d8`
+/// (`rtp.c`, `rtp_time_of_last_resend_request_error_ns`) так же гасит их
+/// шторм, когда предыдущий `sendto` не ушёл.
+const RESEND_BACKOFF: Duration = Duration::from_millis(300);
+/// Больше этого за раз не просим: живой отправитель пересылает несколько
+/// десятков пакетов, а больший разрыв — обрыв потока, не потеря.
+const MAX_RESEND: u16 = 32;
 
 /// Ключ realtime-потока.
 #[derive(Clone, Copy)]
@@ -39,6 +46,63 @@ pub enum StreamKey {
     AesCbc { key: [u8; 16], iv: [u8; 16] },
     /// AirPlay 1 без шифрования (`et:0`, без `rsaaeskey`): payload открыт.
     Plain,
+}
+
+/// Запросы пересылки потерянных пакетов AirPlay 1. Отправитель отвечает
+/// пакетами `0x80 0x56` в этот же управляющий порт.
+#[derive(Clone)]
+struct Resend {
+    socket: Arc<UdpSocket>,
+    /// `control_port` из `Transport` при SETUP: порт отправителя, не наш.
+    target: SocketAddr,
+}
+
+impl Resend {
+    /// `0x80 0xd5`, номер запроса `1`, первый пропущенный seq, счётчик.
+    /// Формат shairport-sync `7ce90d8` `rtp.c::rtp_request_resend`.
+    fn request(first: u16, count: u16) -> [u8; 8] {
+        let mut req = [0x80, 0xd5, 0, 1, 0, 0, 0, 0];
+        req[4..6].copy_from_slice(&first.to_be_bytes());
+        req[6..8].copy_from_slice(&count.to_be_bytes());
+        req
+    }
+
+    async fn ask(&self, first: u16, count: u16) {
+        if let Err(e) = self.socket.send_to(&Self::request(first, count), self.target).await {
+            debug!(addr = %self.target, first, count, "запрос пересылки: {e}");
+        }
+    }
+}
+
+/// Ожидаемый номер следующего пакета звука.
+#[derive(Default)]
+struct Missing {
+    expected: Option<u16>,
+    last: Option<Instant>,
+}
+
+impl Missing {
+    /// Первый пропущенный номер и сколько запросить; `None` — потерь нет,
+    /// разрыв слишком велик или запрос недавно уже уходил.
+    fn observe(&mut self, packet: &[u8]) -> Option<(u16, u16)> {
+        if packet.len() <= HEADER_LEN || packet[0] >> 6 != 2 || rtp::Header::parse(packet).is_none_or(|header| header.payload_type != 0x60) {
+            return None;
+        }
+        // Шапка RTP у AirPlay 1 открыта и при шифрованном теле.
+        let seq = u16::from_be_bytes([packet[2], packet[3]]);
+        let Some(previous) = self.expected else { self.expected = Some(seq.wrapping_add(1)); return None; };
+        let missing = seq.wrapping_sub(previous);
+        if missing >= 0x8000 { return None; }
+        self.expected = Some(seq.wrapping_add(1));
+        if missing == 0 || missing > MAX_RESEND {
+            return None;
+        }
+        if self.last.is_some_and(|at| at.elapsed() < RESEND_BACKOFF) {
+            return None;
+        }
+        self.last = Some(Instant::now());
+        Some((previous, missing))
+    }
 }
 
 enum Decrypt {
@@ -146,8 +210,10 @@ impl Stream {
                 cipher.clone(),
                 playout.clone(),
                 started_tx,
+                None,
+                None,
             )),
-            tokio::spawn(receive_control(control, cipher, playout.clone())),
+            tokio::spawn(receive_control(Arc::new(control), cipher, playout.clone(), None)),
         ];
         Ok(Stream {
             started: Some(started),
@@ -163,14 +229,25 @@ impl Stream {
 
     /// AirPlay 1 (RAOP): звук по UDP, управляющий канал и отдельный порт
     /// запросов времени. Часов отправителя у нас нет: воспроизведение
-    /// начинается с первого пакета по своим часам.
-    pub fn raop(cfg: Config, key: StreamKey, format: Format) -> io::Result<Stream> {
+    /// начинается с первого пакета по своим часам. `sender_control` —
+    /// `control_port` из `Transport`: туда шлём запросы пересылки потерь.
+    pub fn raop(
+        cfg: Config,
+        key: StreamKey,
+        format: Format,
+        sender_control: Option<u16>,
+        sender: IpAddr,
+    ) -> io::Result<Stream> {
         let data = bind_udp()?;
-        let control = bind_udp()?;
+        let control = Arc::new(bind_udp()?);
         let timing = bind_udp()?;
         let data_port = data.local_addr()?.port();
         let control_port = control.local_addr()?.port();
         let timing_port = timing.local_addr()?.port();
+        let resend = sender_control.map(|port| Resend {
+            socket: control.clone(),
+            target: SocketAddr::new(sender, port),
+        });
         let playout = Arc::new(Playout::start(cfg, Arc::new(clock::NoTime), Some(format)));
         let cipher = Arc::new(match key {
             StreamKey::ChaCha(shk) => Decrypt::ChaCha(AudioCipher::new(&shk)),
@@ -184,8 +261,10 @@ impl Stream {
                 cipher.clone(),
                 playout.clone(),
                 started_tx,
+                resend,
+                Some(sender),
             )),
-            tokio::spawn(receive_control(control, cipher, playout.clone())),
+            tokio::spawn(receive_control(control, cipher, playout.clone(), Some(sender))),
             tokio::spawn(receive_timing(timing)),
         ];
         Ok(Stream {
@@ -401,14 +480,19 @@ async fn receive_realtime(
     cipher: Arc<Decrypt>,
     playout: Arc<Playout>,
     started: watch::Sender<bool>,
+    resend: Option<Resend>,
+    allowed_peer: Option<IpAddr>,
 ) {
     let mut buf = vec![0u8; MAX_DATAGRAM];
     let mut failures = 0u64;
+    let mut missing = Missing::default();
     loop {
-        let n = match socket.recv(&mut buf).await {
-            Ok(n) => {
+        // `recv_from`, а не `recv`: по источнику первого пакета узнаём
+        // адрес отправителя для запросов пересылки.
+        let (n, source): (usize, SocketAddr) = match socket.recv_from(&mut buf).await {
+            Ok(r) => {
                 failures = 0;
-                n
+                r
             }
             Err(e) => {
                 // На Windows ICMP «порт недоступен» приходит как ошибка recv;
@@ -421,7 +505,17 @@ async fn receive_realtime(
                 continue;
             }
         };
-        if let Some(ts) = push(&cipher, &playout, &mut buf[..n]) {
+        if allowed_peer.is_some_and(|peer| peer.to_canonical() != source.ip().to_canonical()) { continue; }
+        if let Some(resend) = &resend {
+            if let Some((first, count)) = missing.observe(&buf[..n]) {
+                resend.ask(first, count).await;
+            }
+        }
+        // Пересланный пакет приходит на порт звука с четырёхбайтовой
+        // приставкой `0x80 0x56` (shairport-sync `7ce90d8` `rtp.c`).
+        let resent = resend.is_some() && n > 4 && buf[1] & 0x7f == 0x56;
+        let from = if resent { 4 } else { 0 };
+        if let Some(ts) = push(&cipher, &playout, &mut buf[from..n]) {
             playout.play_from(ts);
             started.send_if_modified(|value| {
                 if *value {
@@ -437,11 +531,11 @@ async fn receive_realtime(
 
 /// Управляющий канал realtime: синхропакеты с PTP-временем (0xD7) и
 /// повторно присланные пакеты (0xD6).
-async fn receive_control(socket: UdpSocket, cipher: Arc<Decrypt>, playout: Arc<Playout>) {
+async fn receive_control(socket: Arc<UdpSocket>, cipher: Arc<Decrypt>, playout: Arc<Playout>, allowed_peer: Option<IpAddr>) {
     let mut buf = vec![0u8; MAX_DATAGRAM];
     let mut failures = 0u64;
     loop {
-        let (n, _from): (usize, SocketAddr) = match socket.recv_from(&mut buf).await {
+        let (n, from): (usize, SocketAddr) = match socket.recv_from(&mut buf).await {
             Ok(r) => {
                 failures = 0;
                 r
@@ -455,6 +549,7 @@ async fn receive_control(socket: UdpSocket, cipher: Arc<Decrypt>, playout: Arc<P
                 continue;
             }
         };
+        if allowed_peer.is_some_and(|peer| peer.to_canonical() != from.ip().to_canonical()) { continue; }
         let packet = &mut buf[..n];
         if n < 4 {
             continue;
@@ -581,5 +676,74 @@ mod tests {
         let (h, body) = cipher.open(&mut packet).unwrap();
         assert_eq!(h, header);
         assert_eq!(body, b"alac");
+    }
+}
+
+#[cfg(test)]
+mod resend_tests {
+    use super::{Missing, Resend};
+
+    fn audio(seq: u16) -> Vec<u8> {
+        let mut packet = vec![0u8; 13];
+        packet[0] = 0x80;
+        packet[1] = 0x60;
+        packet[2..4].copy_from_slice(&seq.to_be_bytes());
+        packet
+    }
+
+    #[test]
+    fn request_matches_the_wire_format() {
+        // shairport-sync `7ce90d8` `rtp.c::rtp_request_resend`: 0x80 0xd5,
+        // номер запроса 1, первый пропущенный seq, счётчик.
+        assert_eq!(Resend::request(1000, 2), [0x80, 0xd5, 0, 1, 0x03, 0xe8, 0, 2]);
+    }
+
+    #[test]
+    fn a_missed_packet_is_requested_once() {
+        let mut missing = Missing::default();
+        assert_eq!(missing.observe(&audio(1)), None);
+        assert_eq!(missing.observe(&audio(2)), None);
+        assert_eq!(missing.observe(&audio(4)), Some((3, 1)));
+        // Повтор того же разрыва не должен слать второй запрос.
+        assert_eq!(missing.observe(&audio(5)), None);
+    }
+
+    #[test]
+    fn late_packets_do_not_rewind_sequence_tracking() {
+        let mut missing = Missing::default();
+        assert_eq!(missing.observe(&audio(1)), None);
+        assert_eq!(missing.observe(&audio(2)), None);
+        assert_eq!(missing.observe(&audio(1)), None);
+        assert_eq!(missing.observe(&audio(3)), None);
+        assert_eq!(missing.observe(&audio(5)), Some((4, 1)));
+    }
+
+    #[test]
+    fn sequence_wraps_and_big_gaps_are_ignored() {
+        let mut missing = Missing::default();
+        assert_eq!(missing.observe(&audio(0xfffe)), None);
+        assert_eq!(missing.observe(&audio(0)), Some((0xffff, 1)));
+        // Разрыв в сотни пакетов — обрыв потока, а не потеря в сети.
+        let mut other = Missing::default();
+        assert_eq!(other.observe(&audio(0)), None);
+        assert_eq!(other.observe(&audio(900)), None);
+    }
+
+    #[test]
+    fn a_resent_packet_carries_a_four_byte_prefix() {
+        // `0x80 0x56` + RTP-шапка: seq лежит по смещению 4 + 2.
+        let mut packet = vec![0x80, 0x56, 0, 0];
+        packet.extend_from_slice(&audio(9));
+        let stripped = &packet[4..];
+        assert_eq!(u16::from_be_bytes([stripped[2], stripped[3]]), 9);
+    }
+
+    #[test]
+    fn control_packets_and_short_datagrams_are_not_tracked() {
+        let mut missing = Missing::default();
+        let mut sync = audio(7);
+        sync[1] = 0xd4;
+        assert_eq!(missing.observe(&sync), None);
+        assert_eq!(missing.observe(&[0x80, 0x60]), None);
     }
 }

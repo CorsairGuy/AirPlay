@@ -1,11 +1,14 @@
 //! Classic AirPlay 1 (RAOP): `ANNOUNCE` с SDP, UDP-`SETUP` без plist,
 //! `RECORD`, `FLUSH` и `TEARDOWN`.
 //!
-//! Профиль сознательно узкий: принимаем только открытый звук (`et:0`, без
-//! `rsaaeskey`/`fpaeskey`). Ключ, обёрнутый RSA, требует закрытого ключа
-//! приёмника, которого у нас нет, поэтому такой `ANNOUNCE` отклоняется, а
-//! не подтверждается молча. Совместимость с реальными отправителями не
-//! проверена без устройства.
+//! Профиль сознательно узкий: принимаем только открытый звук. Шифрование
+//! определяется наличием обёрнутого ключа (`a=rsaaeskey`/`a=fpaeskey`/
+//! `a=aesiv`), а не списком `et`: `et:0,1` без ключа — открытый поток
+//! (так же считает shairport-sync 5.6.3, `rtsp.c`, `handle_announce`).
+//! Обёрнутый ключ требует RSA-операции приватным ключом приёмника; у
+//! shairport-sync такой ключ есть (`pk` в TXT — его публичная половина),
+//! у нас его нет, поэтому такой `ANNOUNCE` отклоняется, а не подтверждается
+//! молча. Совместимость с реальными отправителями не проверена без устройства.
 
 use audio_stream::{Stream, StreamKey};
 use codec::{Codec, Format};
@@ -57,21 +60,22 @@ impl Raop {
         &mut self,
         req: &Request,
         cfg: audio_stream::Config,
+        sender: std::net::IpAddr,
     ) -> Result<(Response, Stream), Response> {
         let Some(format) = self.format else {
             warn!("SETUP AirPlay 1 без ANNOUNCE");
             return Err(Response::to(req, 400));
         };
         let transport = req.headers.get("Transport").unwrap_or("");
-        match parse_transport(transport) {
-            Ok(()) => {}
+        let sender_control = match parse_transport(transport) {
+            Ok(control) => control,
             Err(TransportError::Unsupported) => {
                 warn!(transport, "SETUP: профиль транспорта не поддерживается");
                 return Err(Response::to(req, 501));
             }
             Err(TransportError::Malformed) => return Err(Response::to(req, 400)),
-        }
-        let stream = Stream::raop(cfg, StreamKey::Plain, format).map_err(|e| {
+        };
+        let stream = Stream::raop(cfg, StreamKey::Plain, format, sender_control, sender).map_err(|e| {
             warn!("сокеты AirPlay 1: {e}");
             Response::to(req, 500)
         })?;
@@ -122,7 +126,9 @@ fn parse_sdp(body: &[u8]) -> Result<Format, SdpError> {
     let mut rate: Option<u32> = None;
     let mut channels: Option<u8> = None;
     let mut fmtp: Option<&str> = None;
-    let mut encrypted = false;
+    let mut key_wrapping = false;
+    let mut et_seen = false;
+    let mut plain_allowed = true;
     for line in text.lines() {
         let line = line.trim_end_matches('\r');
         if line.starts_with("m=audio") {
@@ -144,14 +150,21 @@ fn parse_sdp(body: &[u8]) -> Result<Format, SdpError> {
             || line.starts_with("a=fpaeskey:")
             || line.starts_with("a=aesiv:")
         {
-            encrypted = true;
-        } else if let Some(value) = line.strip_prefix("a=et:")
-            && value.trim() != "0"
-        {
-            encrypted = true;
+            key_wrapping = true;
+        } else if let Some(value) = line.strip_prefix("a=et:") {
+            // `et` — список объявленных профилей, а не решение о шифровании.
+            // `et:0,1` — обычное объявление («открытый» + заявка на ключ):
+            // без `rsaaeskey`/`aesiv` поток открытый. Шифрование выдаёт
+            // только наличие обёрнутого ключа (так же считает shairport-sync
+            // 5.6.3, `rtsp.c`, `handle_announce`).
+            et_seen = true;
+            plain_allowed = value.split(',').any(|item| item.trim() == "0");
         }
     }
-    if encrypted {
+    if key_wrapping {
+        return Err(SdpError::Encrypted);
+    }
+    if et_seen && !plain_allowed {
         return Err(SdpError::Encrypted);
     }
     if !audio {
@@ -228,7 +241,8 @@ fn parse_sdp(body: &[u8]) -> Result<Format, SdpError> {
 
 /// `RTP/AVP/UDP;unicast;mode=record;control_port=…;timing_port=…`.
 /// Некоторые UDP-отправители также указывают `interleaved`; транспорт при этом остаётся UDP.
-fn parse_transport(value: &str) -> Result<(), TransportError> {
+/// Возвращает `control_port` отправителя — туда шлём запросы пересылки.
+fn parse_transport(value: &str) -> Result<Option<u16>, TransportError> {
     if value.trim().is_empty() {
         return Err(TransportError::Malformed);
     }
@@ -239,14 +253,18 @@ fn parse_transport(value: &str) -> Result<(), TransportError> {
     if lower.split(';').next().map(str::trim) != Some("rtp/avp/udp") {
         return Err(TransportError::Unsupported);
     }
+    let mut control = None;
     for param in lower.split(';').skip(1) {
         if let Some((key, value)) = param.split_once('=') {
             if key.trim() == "mode" && value.trim().trim_matches('"') != "record" {
                 return Err(TransportError::Unsupported);
             }
+            if key.trim() == "control_port" {
+                control = value.trim().parse().ok();
+            }
         }
     }
-    Ok(())
+    Ok(control)
 }
 
 #[cfg(test)]
@@ -322,6 +340,9 @@ a=rtpmap:96 AppleLossless\r\na=fmtp:96 352 0 16 40 10 14 2 255 0 0 44100\r\n";
         }
         // et:0 — открытый звук.
         assert!(parse_sdp(format!("{ALAC}a=et:0\r\n").as_bytes()).is_ok());
+        // et:0,1 — обычное объявление настоящего отправителя: заявка на ключ
+        // без `rsaaeskey` — это открытый поток, а не шифрованный.
+        assert!(parse_sdp(format!("{ALAC}a=et:0,1\r\n").as_bytes()).is_ok());
     }
 
     #[test]
@@ -353,8 +374,9 @@ a=rtpmap:96 AppleLossless\r\na=fmtp:96 352 0 16 40 10 14 2 255 0 0 44100\r\n";
     fn transport_profiles() {
         assert_eq!(
             parse_transport("RTP/AVP/UDP;unicast;mode=record;control_port=6001;timing_port=6002"),
-            Ok(())
+            Ok(Some(6001))
         );
+        assert_eq!(parse_transport("RTP/AVP/UDP;unicast;mode=record"), Ok(None));
         assert_eq!(
             parse_transport("RTP/AVP;unicast;mode=record"),
             Err(TransportError::Unsupported)
@@ -366,7 +388,7 @@ a=rtpmap:96 AppleLossless\r\na=fmtp:96 352 0 16 40 10 14 2 255 0 0 44100\r\n";
         );
         assert_eq!(
             parse_transport("RTP/AVP/UDP;unicast;interleaved=0-1;mode=record"),
-            Ok(())
+            Ok(None)
         );
         assert_eq!(
             parse_transport("RTP/AVP/TCP;unicast;description=udp"),

@@ -738,7 +738,7 @@ impl Media {
         if !self.player.available(self.id) {
             return Response::to(req, 409);
         }
-        match self.raop.setup(req, self.player.audio.clone()) {
+        match self.raop.setup(req, self.player.audio.clone(), self.remote) {
             Ok((resp, stream)) => {
                 self.anchor = None;
                 if self.player.replace(self.id, stream) {
