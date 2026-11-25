@@ -7,10 +7,12 @@
 //! `video`, показ зависит от железа и живёт в программе, которая
 //! встраивает приёмник.
 
+mod fanout;
 mod receiver;
 
 use sha2::{Digest, Sha512};
 
+pub use fanout::FanOutSink;
 pub use receiver::{HEADER_LEN, Header, PacketKind, receive, receive_authenticated};
 
 use std::fmt;
