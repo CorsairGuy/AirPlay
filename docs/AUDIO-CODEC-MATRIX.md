@@ -1,0 +1,69 @@
+# Матрица аудиокодеков AirPlay — 25 ноября 2026
+
+Ветка `feat/audio-codec-matrix` от `main` (`847fe38`). Закрывает пункт
+очереди «матрица аудиокодеков и векторы» (D25, D82). Референсы: §C-MEDIA
+`AIRPLAY-WIRE-SPEC.md`, SSRC-таблица shairport-sync (L-53), D57/L-79
+(профили `ct` у airplay-cli).
+
+## Где живёт
+
+`codec::matrix` — единственное место, где `ct`/`ss`/`spf`/`sr` превращаются
+в [`codec::Format`]. `media::rx::realtime_format` больше не содержит своего
+match: он собирает `matrix::Advertisement` и вызывает `matrix::format`.
+
+## Матрица
+
+| `ct` | Кодек | Разбираем | Объявляем | Ограничение |
+|---|---|---|---|---|
+| 1 | PCM 16 BE | да | да | только `ss=16`; другая разрядность — отказ `PcmBitDepth` |
+| 2 | ALAC | да | да, 16 бит | 24 бита и 48 кГц разбираются, но не рекламируются (D82) |
+| 4 | AAC-LC | да | да | кадр 1024 задаёт кодек, `spf` не влияет |
+| 8 | AAC-ELD | да | нет | только путь зеркалирования, `codec::Decoder` за фичей `ffmpeg` |
+| прочее | — | нет | нет | `UnknownCompression(ct)` |
+
+`ADVERTISED = [1, 2, 4]` — то, что можно писать в профиль/feature-биты;
+`is_parsed` шире объявленного: AAC-ELD структурно известен, но в
+realtime-профиль не входит.
+
+Дополнительно `format()` отвергает `spf=0` и `sr=0` (`EmptyStream`): такой
+поток нельзя нарезать на пакеты, и раньше он приводил к пустому формату.
+
+## Векторы (golden)
+
+Проверено тестами `crates/codec/src/matrix.rs`:
+
+| Вход | Результат |
+|---|---|
+| умолчания (`ct` нет) | ALAC 16/44100/352 = `Format::ALAC_44100` |
+| `ct=1, ss=16, sr=44100, spf=352` | `Pcm { 352 }`, 44100, 2 канала |
+| `ct=2, ss=24, sr=48000, spf=352` | `Alac { 24, 352 }`, 48000 |
+| `ct=4, spf=1024` | `Aac`, `frames_per_packet() == 1024` |
+| `ct=8, spf=480` | `Err(AacEld)` |
+| `ct=1, ss=24` | `Err(PcmBitDepth(24))` |
+| `ct=9` | `Err(UnknownCompression(9))` |
+| `spf=0` | `Err(EmptyStream)` |
+
+SSRC-профили из `Format::from_ssrc` (`0x0000FACE`, `0x15000000`, `0x16000000`,
+`0x17000000`, `0x27000000`, `0x28000000`) проверяются отдельным тестом на
+покрытие объявленных кодеков; неизвестный SSRC возвращает `None`.
+
+## Границы
+
+- Это wire-матрица, а не подтверждение совместимости: ни один реальный
+  отправитель не проверялся, 24-бит/48 кГц остаются «разбираем, но не
+  объявляем».
+- `audioFormat` (bitmap) не приравнивается к `ct` — §C-MEDIA прямо
+  предупреждает об этом; маска в матрицу не входит.
+- Многоканальные раскладки — отдельная политика downmix (`feat/multichannel-audio`),
+  здесь каналы фиксированы двумя.
+
+## Проверки
+
+```
+cargo test --offline -p codec     # 11 passed (5 прежних + 6 matrix)
+cargo test --offline -p media     # 73 passed
+cargo clippy --offline -p codec -p media --all-targets -- -D warnings
+cargo fmt -p codec -p media -- --check
+```
+
+Прогон: MSYS2/UCRT64, `stable-x86_64-pc-windows-gnu`, offline.

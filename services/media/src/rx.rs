@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use audio_stream::{Stream, StreamKey};
 use clock::{Anchor, TimeSource};
-use codec::{Codec, Format};
+use codec::Format;
 use crypto::Channel;
 use crypto::kdf::ControlKeys;
 use fairplay::FairPlay;
@@ -804,7 +804,7 @@ impl Media {
     #[cfg(feature = "mirroring")]
     fn setup_mirror_audio(&mut self, s: &Dictionary, r: &mut Dictionary) -> Result<(), String> {
         let format = Format {
-            codec: Codec::AacEld,
+            codec: codec::Codec::AacEld,
             sample_rate: uint(s, "sr").unwrap_or(44_100) as u32,
             channels: 2,
         };
@@ -1123,26 +1123,13 @@ async fn next_command(
 }
 
 fn realtime_format(s: &Dictionary) -> Result<Format, String> {
-    let sample_rate = uint(s, "sr").unwrap_or(44_100) as u32;
-    let frames = uint(s, "spf").unwrap_or(352) as u32;
-    let bits = uint(s, "ss").unwrap_or(16) as u8;
-    let codec = match uint(s, "ct").unwrap_or(2) {
-        1 if bits == 16 => Codec::Pcm {
-            frames_per_packet: frames,
-        },
-        2 => Codec::Alac {
-            bit_depth: bits,
-            frames_per_packet: frames,
-        },
-        4 => Codec::Aac,
-        8 => return Err("AAC-ELD пока не поддерживается".into()),
-        other => return Err(format!("неизвестный кодек ct={other}")),
-    };
-    Ok(Format {
-        codec,
-        sample_rate,
-        channels: 2,
-    })
+    let advertisement = codec::matrix::Advertisement::from_fields(
+        uint(s, "ct"),
+        uint(s, "ss"),
+        uint(s, "sr"),
+        uint(s, "spf"),
+    );
+    codec::matrix::format(advertisement).map_err(codec::matrix::Rejection::reason)
 }
 
 fn plist_dict(body: &[u8]) -> Option<Dictionary> {
@@ -1315,6 +1302,7 @@ mod tests {
 #[cfg(test)]
 mod realtime_state_tests {
     use super::*;
+    use codec::Codec;
     use std::time::Duration;
     #[derive(Default)]
     struct States(Mutex<Vec<bool>>);

@@ -12,6 +12,8 @@ use symphonia::core::codecs::audio::{AudioCodecParameters, AudioDecoder, AudioDe
 use symphonia::core::packet::PacketRef;
 use symphonia::core::units::{Duration, Timestamp};
 
+pub mod matrix;
+
 #[cfg(feature = "ffmpeg")]
 mod eld;
 #[cfg(feature = "ffmpeg")]
