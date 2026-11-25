@@ -278,4 +278,13 @@ mod tests {
         .into_bytes();
         assert_eq!(decode_request(&mut buf), Err(Error::BodyTooLong));
     }
+
+    #[test]
+    fn rejects_oversized_receiver_response_before_body_arrives() {
+        for length in [MAX_BODY + 1, usize::MAX] {
+            let mut buf =
+                format!("RTSP/1.0 200 OK\r\nContent-Length: {length}\r\n\r\n").into_bytes();
+            assert_eq!(decode_response(&mut buf), Err(Error::BodyTooLong));
+        }
+    }
 }

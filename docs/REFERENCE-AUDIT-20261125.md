@@ -45,6 +45,39 @@ default branch на момент проверки. Лицензия репози
   но общий playfair/UxPlay provenance не делает реализации независимыми
   подтверждениями wire-семантики или совместимости AP2 audio + video.
 
+### Сверка следующих обзоров
+
+- [CVE-2026-14324](https://bugzilla.redhat.com/show_bug.cgi?id=CVE-2026-14324):
+  в PipeWire RAOP недоверенный `Content-Length` в ответе приводил к ошибке
+  выделения памяти и падению. Наш sender использует `rtsp::decode_response`,
+  общий `MAX_BODY` и ограничение входного буфера. Добавлен регрессионный тест
+  ответов с `MAX_BODY + 1` и `usize::MAX` без присланного тела; это не полный
+  fuzz-аудит и не доказательство наличия CVE в нашем коде.
+- [AirCiller](https://github.com/carlosciller/AirCiller) заявляет отправку
+  локального видео с Mac на Apple TV, без перекодирования совместимого видео;
+  лицензия по README GPL-3.0. Степень самостоятельности протокольного стека и
+  совместимость с нашим приёмником отдельно не проверены.
+- [CastBay](https://github.com/weenas/castbay) использует UxPlay, ExoPlayer и
+  MediaCodec; заявляет проверку iPhone на TCL, Sony и BYD. Его замечание про
+  Mac Music относится к используемому им срезу. [UxPlay PR #639](https://github.com/FDH2/UxPlay/pull/639)
+  позднее добавил поддержку FairPlay v2 в master; нельзя распространять старое
+  ограничение на всю текущую линию UxPlay. Наш v2 всё ещё не реализован.
+- [Wormhole Display](https://github.com/pgodlews/wormhole-display) заявляет
+  выбор extended display на Mac с приёмником Meta Portal. Это кандидат для
+  проверки геометрии/объявлений; результат на нашем ядре не подтверждён и не
+  доказывает, что одних дескрипторов всегда достаточно.
+- [obs-airplay-plugin](https://github.com/dgraid/obs-airplay-plugin) заявляет
+  два источника и сосуществование с системным приёмником macOS; долгие циклы
+  и soak авторы оставляют непроверенными. Это не подтверждение реализации
+  нескольких профилей внутри нашего процесса.
+- [esp32-iphone-agent](https://github.com/onehumanbeing/esp32-iphone-agent)
+  передаёт H.264 с ESP32 в iPhone-приложение по **Wi-Fi TCP**, не по BLE;
+  BLE используется для команд и статуса. Это отдельная граница приёмника и
+  декодера, не доказательство работы нашего TX.
+- [Shairport Sync 5.6](https://github.com/mikebrady/shairport-sync/releases/tag/5.6)
+  сам указывает, что при работающих AP2-командах два поля доступности пока
+  остаются false. Это не измерение задержки нашего ТВ-профиля.
+
 **Высокий приоритет, обновление существующего эталона:** UxPlay 17 ноября
 слил [поддержку FairPlay v2](https://github.com/FDH2/UxPlay/pull/639),
 которую авторы связывают с macOS Music. Наш приёмник сейчас явно отклоняет
