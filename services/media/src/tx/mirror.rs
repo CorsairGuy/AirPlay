@@ -305,116 +305,136 @@ impl MirrorSession {
             }
             Err(error) => return Err(error.context("audio SETUP")),
         };
-        let response = plist::Value::from_reader(std::io::Cursor::new(response.body))?;
-        let mut probe_task = start_timing_probes(&response, config.endpoint, timing.clone())?;
-        let mut skip_record = response
-            .as_dictionary()
-            .and_then(|d| d.get("skipRecord"))
-            .and_then(|v| v.as_boolean())
-            .unwrap_or(false);
-        let mut event_task = connect_event(
-            &response,
-            config.endpoint,
-            config.request_timeout,
-            event_keys.clone(),
-        )
-        .await?;
-        let audio_stream = response
-            .as_dictionary()
-            .and_then(|d| d.get("streams"))
-            .and_then(|v| v.as_array())
-            .and_then(|v| v.first())
-            .ok_or_else(|| anyhow!("audio SETUP reply has no stream"))?;
-        let audio_data_port = stream_port(audio_stream, "dataPort", "streamConnectionTypeRTP")?
-            .ok_or_else(|| anyhow!("audio SETUP reply has no data port"))?;
-        let audio_control_port =
-            stream_port(audio_stream, "controlPort", "streamConnectionTypeRTCP")?
-                .ok_or_else(|| anyhow!("audio SETUP reply has no control port"))?;
-
-        // SETUP 2: видео.
-        let video_setup = dictionary(vec![(
-            "streams",
-            plist::Value::Array(vec![plist::Value::Dictionary(dictionary(vec![
-                ("type", plist::Value::Integer(110u64.into())),
-                (
-                    "streamConnectionID",
-                    plist::Value::Integer(video_stream_id.into()),
-                ),
-                (
-                    "latencyMs",
-                    plist::Value::Integer((config.video_latency_ms.max(0) as u64).into()),
-                ),
-                ("timestampInfo", plist::Value::Array(vec![])),
-            ]))]),
-        )]);
-        let response = rtsp
-            .request(
-                "SETUP",
-                None,
-                binary_plist(video_setup)?,
-                Some("application/x-apple-binary-plist"),
-                &[],
-            )
-            .await
-            .context("video SETUP")?;
-        let response = plist::Value::from_reader(std::io::Cursor::new(response.body))?;
-        if probe_task.is_none() {
-            probe_task = start_timing_probes(&response, config.endpoint, timing.clone())?;
-        }
-        skip_record |= response
-            .as_dictionary()
-            .and_then(|d| d.get("skipRecord"))
-            .and_then(|v| v.as_boolean())
-            .unwrap_or(false);
-        if event_task.is_none() {
-            event_task = connect_event(
+        let prepared = async {
+            let response = plist::Value::from_reader(std::io::Cursor::new(response.body))?;
+            let mut probe_task = start_timing_probes(&response, config.endpoint, timing.clone())?;
+            let mut skip_record = response
+                .as_dictionary()
+                .and_then(|d| d.get("skipRecord"))
+                .and_then(|v| v.as_boolean())
+                .unwrap_or(false);
+            let mut event_task = connect_event(
                 &response,
                 config.endpoint,
                 config.request_timeout,
-                event_keys,
+                event_keys.clone(),
             )
             .await?;
-        }
-        let video_stream = response
-            .as_dictionary()
-            .and_then(|d| d.get("streams"))
-            .and_then(|v| v.as_array())
-            .and_then(|v| v.first())
-            .ok_or_else(|| anyhow!("video SETUP reply has no stream"))?;
-        let video_port = stream_port(video_stream, "dataPort", "streamConnectionTypeRTP")?
-            .ok_or_else(|| anyhow!("video SETUP reply has no data port"))?;
+            let audio_stream = response
+                .as_dictionary()
+                .and_then(|d| d.get("streams"))
+                .and_then(|v| v.as_array())
+                .and_then(|v| v.first())
+                .ok_or_else(|| anyhow!("audio SETUP reply has no stream"))?;
+            let audio_data_port = stream_port(audio_stream, "dataPort", "streamConnectionTypeRTP")?
+                .ok_or_else(|| anyhow!("audio SETUP reply has no data port"))?;
+            let audio_control_port =
+                stream_port(audio_stream, "controlPort", "streamConnectionTypeRTCP")?
+                    .ok_or_else(|| anyhow!("audio SETUP reply has no control port"))?;
 
-        let video = tokio::time::timeout(
-            config.request_timeout,
-            TcpStream::connect((config.endpoint.ip(), video_port)),
-        )
-        .await
-        .context("mirror video connect deadline")?
-        .context("mirror video connect")?;
-        video.set_nodelay(true)?;
+            // SETUP 2: видео.
+            let video_setup = dictionary(vec![(
+                "streams",
+                plist::Value::Array(vec![plist::Value::Dictionary(dictionary(vec![
+                    ("type", plist::Value::Integer(110u64.into())),
+                    (
+                        "streamConnectionID",
+                        plist::Value::Integer(video_stream_id.into()),
+                    ),
+                    (
+                        "latencyMs",
+                        plist::Value::Integer((config.video_latency_ms.max(0) as u64).into()),
+                    ),
+                    ("timestampInfo", plist::Value::Array(vec![])),
+                ]))]),
+            )]);
+            let response = rtsp
+                .request(
+                    "SETUP",
+                    None,
+                    binary_plist(video_setup)?,
+                    Some("application/x-apple-binary-plist"),
+                    &[],
+                )
+                .await
+                .context("video SETUP")?;
+            let response = plist::Value::from_reader(std::io::Cursor::new(response.body))?;
+            if probe_task.is_none() {
+                probe_task = start_timing_probes(&response, config.endpoint, timing.clone())?;
+            }
+            skip_record |= response
+                .as_dictionary()
+                .and_then(|d| d.get("skipRecord"))
+                .and_then(|v| v.as_boolean())
+                .unwrap_or(false);
+            if event_task.is_none() {
+                event_task = connect_event(
+                    &response,
+                    config.endpoint,
+                    config.request_timeout,
+                    event_keys,
+                )
+                .await?;
+            }
+            let video_stream = response
+                .as_dictionary()
+                .and_then(|d| d.get("streams"))
+                .and_then(|v| v.as_array())
+                .and_then(|v| v.first())
+                .ok_or_else(|| anyhow!("video SETUP reply has no stream"))?;
+            let video_port = stream_port(video_stream, "dataPort", "streamConnectionTypeRTP")?
+                .ok_or_else(|| anyhow!("video SETUP reply has no data port"))?;
 
-        if !skip_record {
-            rtsp.request(
-                "RECORD",
-                None,
-                Vec::new(),
-                None,
-                &[
-                    ("Session", session_uuid.clone()),
-                    ("Range", "npt=0-".into()),
-                    ("RTP-Info", "seq=0;rtptime=0".into()),
-                ],
+            let video = tokio::time::timeout(
+                config.request_timeout,
+                TcpStream::connect((config.endpoint.ip(), video_port)),
             )
             .await
-            .context("RECORD")?;
-        }
+            .context("mirror video connect deadline")?
+            .context("mirror video connect")?;
+            video.set_nodelay(true)?;
 
-        audio
-            .connect((config.endpoint.ip(), audio_data_port))
-            .await?;
-        audio_control
-            .connect((config.endpoint.ip(), audio_control_port))
-            .await?;
+            if !skip_record {
+                rtsp.request(
+                    "RECORD",
+                    None,
+                    Vec::new(),
+                    None,
+                    &[
+                        ("Session", session_uuid.clone()),
+                        ("Range", "npt=0-".into()),
+                        ("RTP-Info", "seq=0;rtptime=0".into()),
+                    ],
+                )
+                .await
+                .context("RECORD")?;
+            }
+
+            audio
+                .connect((config.endpoint.ip(), audio_data_port))
+                .await?;
+            audio_control
+                .connect((config.endpoint.ip(), audio_control_port))
+                .await?;
+
+            Ok::<_, anyhow::Error>((video, probe_task, event_task))
+        }
+        .await;
+        let (video, probe_task, event_task) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                let _ = rtsp
+                    .request(
+                        "TEARDOWN",
+                        None,
+                        Vec::new(),
+                        None,
+                        &[("Session", session_uuid.clone())],
+                    )
+                    .await;
+                return Err(error);
+            }
+        };
 
         Ok(Self {
             config,
