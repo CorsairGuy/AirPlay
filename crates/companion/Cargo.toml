@@ -1,12 +1,22 @@
 [package]
 name = "companion"
-description = "Companion Link: пульт и клавиатура."
+description = "Companion Link: пульт и клавиатура (OPACK, кадры, pair-verify)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
+
+[dependencies]
+crypto.workspace = true
+pair.workspace = true
+x25519-dalek.workspace = true
+rand.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+hex.workspace = true
 
 [lints]
 workspace = true
