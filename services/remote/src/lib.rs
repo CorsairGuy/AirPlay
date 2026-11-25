@@ -61,6 +61,10 @@ pub trait Control: Send + Sync {
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Сдвиг громкости меньше этого не рассылается.
 const VOLUME_STEP: f32 = 0.004;
+/// Сколько идентификаторов команд помнить для защиты от повторов.
+/// Идентификаторы ограничены по длине, поэтому память ограничена.
+const SEEN_COMMAND_IDS: usize = 64;
+const MAX_COMMAND_ID: usize = 256;
 
 /// Одно соединение MRP до его закрытия.
 pub async fn serve<S>(
@@ -82,6 +86,7 @@ where
         control,
         volume,
         subscribed: false,
+        seen_commands: std::collections::VecDeque::new(),
     };
     let mut decoder = Decoder::new();
     let mut chunk = vec![0u8; 16 * 1024];
@@ -209,6 +214,8 @@ struct Session {
     volume: watch::Sender<Option<f32>>,
     /// iPhone прислал CLIENT_UPDATES_CONFIG: ему нужны изменения.
     subscribed: bool,
+    /// Уже выполненные команды в пределах соединения, для MRP-повторов.
+    seen_commands: std::collections::VecDeque<String>,
 }
 
 impl Session {
@@ -245,6 +252,20 @@ impl Session {
             }
             kind::SET_VOLUME_MESSAGE => self.set_volume(&body, now, id),
             kind::SEND_COMMAND_MESSAGE => {
+                // MRP может повторить запрос с тем же identifier. Повтор
+                // подтверждаем, но команду приложению не отправляем снова.
+                if let Some(id) = id {
+                    if !id.is_empty() && id.len() <= MAX_COMMAND_ID {
+                        if self.seen_commands.iter().any(|seen| seen == id) {
+                            info!(command = id, "MRP: повтор команды не выполняется");
+                            return vec![messages::command_reply(Some(id), 0)];
+                        }
+                        if self.seen_commands.len() == SEEN_COMMAND_IDS {
+                            self.seen_commands.pop_front();
+                        }
+                        self.seen_commands.push_back(id.to_owned());
+                    }
+                }
                 let error = self.command(&body).await;
                 vec![messages::command_reply(id, error)]
             }
