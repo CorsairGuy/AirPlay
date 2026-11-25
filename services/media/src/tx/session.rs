@@ -321,6 +321,12 @@ impl PairingCredentials {
     pub fn accessory_public_key(&self) -> [u8; 32] {
         self.accessory_key
     }
+
+    /// Controller identity with its signing key, needed by callers that run
+    /// pair-verify themselves (the mirroring sender does).
+    pub(crate) fn controller_identity(&self) -> &PairIdentity {
+        &self.controller
+    }
     pub fn new(
         controller: PairIdentity,
         accessory_id: Vec<u8>,

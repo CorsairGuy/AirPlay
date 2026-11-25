@@ -15,6 +15,7 @@ pub mod continuous_source;
 pub mod group;
 mod local;
 mod local_pipe;
+pub mod mirror;
 mod packet;
 pub mod pool;
 mod session;
@@ -25,6 +26,9 @@ mod transport;
 
 pub use local::{LocalSink, run_local};
 pub use local_pipe::LocalPcmPipe;
+pub use mirror::{
+    AudioFormat, MirrorAuth, MirrorConfig, MirrorSession, VIDEO_HEADER_LEN, VideoCodec,
+};
 pub use packet::{
     AudioPacket, FRAME_BYTES, FRAMES_PER_PACKET, MediaClock, PACKET_BYTES, SAMPLE_RATE,
 };
