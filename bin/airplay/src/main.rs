@@ -112,6 +112,14 @@ const USAGE: &str = "\
                   stdin: S16BE, 44100 Гц, стерео. Один общий источник времени;
                   это не управление группой AP2/PTP. Ошибка приёмника завершает запуск.
 
+Параметры send-buffered:
+  --to HOST[:PORT]  один приёмник, порт по умолчанию 7000
+  --aac FILE        готовый AAC-LC в ADTS (без энкодера и без stdin)
+  --control-port N  порт управляющего канала отправителя (по умолчанию свободный)
+  --timeout-s N     1..30 с на RTSP-запрос; по умолчанию 8
+                  buffered-поток (type 103) с transient-сопряжением; кадры идут в
+                  реальном времени. Это не проверено на устройствах.
+
 Подробность логов задаёт RUST_LOG, например RUST_LOG=debug.";
 
 fn hostname() -> String {
@@ -438,6 +446,33 @@ fn main() -> ExitCode {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(error) => {
                     eprintln!("airplay send: {error:#}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+        Some("send-buffered") => {
+            let options = match airplay::media::buffered::Options::parse(&args[1..]) {
+                Ok(options) => options,
+                Err(error) => {
+                    eprintln!("airplay send-buffered: {error:#}\n\n{USAGE}");
+                    return ExitCode::from(2);
+                }
+            };
+            tracing_subscriber::fmt()
+                .with_writer(std::io::stderr)
+                .with_env_filter(
+                    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+                )
+                .init();
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .expect("не создать среду выполнения tokio");
+            match runtime.block_on(airplay::media::buffered::run(options)) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(error) => {
+                    eprintln!("airplay send-buffered: {error:#}");
                     ExitCode::FAILURE
                 }
             }

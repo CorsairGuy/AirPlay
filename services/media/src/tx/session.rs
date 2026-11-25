@@ -1305,7 +1305,7 @@ fn binary_plist(value: plist::Value) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-async fn verify_pairing(
+pub(crate) async fn verify_pairing(
     rtsp: &mut Rtsp,
     credentials: &PairingCredentials,
 ) -> Result<(ControlKeys, Vec<u8>)> {
@@ -1327,7 +1327,10 @@ async fn verify_pairing(
     Ok((keys, shared))
 }
 
-async fn setup_proof(mut pair: ControllerSetup, m2: Vec<u8>) -> Result<(ControllerSetup, Vec<u8>)> {
+pub(crate) async fn setup_proof(
+    mut pair: ControllerSetup,
+    m2: Vec<u8>,
+) -> Result<(ControllerSetup, Vec<u8>)> {
     // 3072-bit SRP exponentiation must not stall media/control tasks on the
     // current-thread runtime. Cancellation closes the socket; the finite CPU
     // operation may finish in the blocking pool without owning that connection.

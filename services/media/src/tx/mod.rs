@@ -10,6 +10,9 @@
 //! See the crate README and PROVENANCE for supported formats and limitations.
 
 pub mod airplay1;
+pub mod buffered;
+pub mod buffered_link;
+pub mod buffered_session;
 pub mod continuous;
 pub mod continuous_source;
 pub mod group;
@@ -24,6 +27,9 @@ pub mod source_runtime;
 pub mod timing;
 mod transport;
 
+pub use buffered::{AAC_FRAMES_PER_PACKET, AdtsError, BufferedSender, StreamSetup, adts_frames};
+pub use buffered_link::{BufferedLink, StreamReply};
+pub use buffered_session::{AAC_LC_44100_SSRC, BufferedConfig, BufferedSession};
 pub use local::{LocalSink, run_local};
 pub use local_pipe::LocalPcmPipe;
 pub use mirror::{
