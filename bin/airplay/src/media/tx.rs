@@ -640,6 +640,7 @@ mod tests {
             #[cfg(feature = "hls")]
             hls: None,
             remote: Default::default(),
+            photo: None,
             mrp: None,
             session_group: Default::default(),
         });

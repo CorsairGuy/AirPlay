@@ -45,6 +45,8 @@ pub struct Options {
     pub mrp: Mrp,
     /// Что приёмник сообщает наружу (громкость, метаданные, позиция).
     pub events: Arc<dyn ::media::events::Events>,
+    /// Куда отдавать принятые фотографии; `None` — профиль выключен.
+    pub photo: Option<Arc<dyn sessions::photo::Sink>>,
     /// Шкала громкости, дБ (по умолчанию 30, как ползунок iPhone).
     pub volume_range_db: f32,
     /// `false` — громкость не применять, только сообщать в `events`.
@@ -260,6 +262,7 @@ pub async fn start(opts: Options) -> Result<Receiver> {
         remote: opts.remote,
         mrp,
         session_group: Default::default(),
+        photo: opts.photo.map(sessions::photo::Service::new),
     });
     if opts.mdns {
         let host = format!("airplay-{}", device_id.replace(':', "").to_lowercase());

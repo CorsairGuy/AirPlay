@@ -19,7 +19,7 @@ use media::control::{MrpService, Remote};
 use media::hls::HlsOptions;
 use media::rx::{Media, MediaContext, Player, SessionGroup};
 
-const PUBLIC: &str = "ANNOUNCE, SETUP, RECORD, PAUSE, FLUSH, TEARDOWN, OPTIONS, GET_PARAMETER, SET_PARAMETER, POST, GET";
+const PUBLIC: &str = "ANNOUNCE, SETUP, RECORD, PAUSE, FLUSH, TEARDOWN, OPTIONS, GET_PARAMETER, SET_PARAMETER, POST, PUT, DELETE, GET";
 pub(crate) const BPLIST: &str = "application/x-apple-binary-plist";
 pub(crate) const OCTETS: &str = "application/octet-stream";
 
@@ -48,6 +48,9 @@ pub struct Context {
     pub mrp: Option<MrpService>,
     /// `groupUUID` текущей сессии отправителя: идёт в `gid`, как у shairport-sync.
     pub session_group: std::sync::Mutex<Option<String>>,
+    /// Приём фотографий; `None` — профиль выключен и `/photo` отвечает 501.
+    /// Возможность не объявляется в TXT до проверки с iPhone.
+    pub photo: Option<Arc<crate::photo::Service>>,
 }
 
 impl Context {
@@ -147,6 +150,7 @@ impl Context {
             remote: Default::default(),
             mrp: None,
             session_group: Default::default(),
+            photo: None,
         }
     }
 }
@@ -276,8 +280,22 @@ impl Session {
             ("POST", "/pair-setup") => self.hap_setup(req),
             ("POST", "/pair-verify") if is_legacy_verify(req) => (self.legacy_verify(req), None),
             ("POST", "/pair-verify") => self.hap_verify(req),
+            ("PUT", "/photo") => (self.photo_put(req), None),
+            ("DELETE", "/photo") => (self.photo_delete(req), None),
+            ("GET", "/slideshow-features") => (self.slideshow_features(req), None),
+            ("POST", "/stop") => {
+                if let Some(photo) = &self.ctx.photo {
+                    photo.clear();
+                }
+                (Response::to(req, 200), None)
+            }
             _ => {
                 if let Some(resp) = self.media.handle(req) {
+                    if req.method.eq_ignore_ascii_case("TEARDOWN")
+                        && let Some(photo) = &self.ctx.photo
+                    {
+                        photo.clear();
+                    }
                     return (resp, None);
                 }
                 warn!(peer = %self.peer, "ещё не поддерживается: {} {}", req.method, req.uri);
@@ -362,6 +380,66 @@ impl Session {
                 (Response::to(req, 400), None)
             }
         }
+    }
+
+    /// `PUT /photo`: тело — JPEG/PNG, ключ и переход в заголовках.
+    fn photo_put(&self, req: &Request) -> Response {
+        let Some(photo) = &self.ctx.photo else {
+            return Response::to(req, 501);
+        };
+        let asset = req.headers.get("X-Apple-AssetKey").unwrap_or_default();
+        let transition = req.headers.get("X-Apple-Transition");
+        let action = req
+            .headers
+            .get("X-Apple-AssetAction")
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let result = if action == "displaycached" {
+            photo.display_cached(asset, transition)
+        } else {
+            photo.put(asset, transition, &req.body, action == "cacheonly")
+        };
+        match result {
+            Ok(()) => Response::to(req, 200),
+            Err(error) => {
+                debug!(peer = %self.peer, "photo: {}", error.message());
+                Response::to(req, error.status())
+            }
+        }
+    }
+
+    fn photo_delete(&self, req: &Request) -> Response {
+        let Some(photo) = &self.ctx.photo else {
+            return Response::to(req, 501);
+        };
+        let asset = req
+            .headers
+            .get("X-Apple-AssetKey")
+            .map(str::to_owned)
+            .or_else(|| {
+                req.uri
+                    .split_once("asset=")
+                    .map(|(_, value)| value.split('&').next().unwrap_or(value).to_owned())
+            })
+            .unwrap_or_default();
+        if asset.is_empty() {
+            return Response::to(req, 400);
+        }
+        if photo.remove(&asset) {
+            Response::to(req, 200)
+        } else {
+            Response::to(req, 412)
+        }
+    }
+
+    /// Минимальный список переходов; сам слайд-шоу не запускаем.
+    fn slideshow_features(&self, req: &Request) -> Response {
+        let body = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict><key>transitions</key><array>
+<string>None</string><string>Dissolve</string><string>SlideLeft</string><string>SlideRight</string>
+</array></dict></plist>"#;
+        Response::to(req, 200).with_body("text/x-apple-plist+xml", body.as_bytes().to_vec())
     }
 
     fn legacy_setup(&mut self, req: &Request) -> Response {
@@ -451,6 +529,7 @@ mod tests {
             remote: Default::default(),
             mrp: None,
             session_group: Default::default(),
+            photo: None,
             player: Arc::new(Player::new(
                 audio_stream::Config {
                     device: "null".into(),
@@ -1374,5 +1453,155 @@ mod tests {
             200
         );
         assert_eq!(*ctx.session_group.lock().unwrap(), None);
+    }
+
+    #[derive(Default)]
+    struct PhotoLog(std::sync::Mutex<Vec<String>>);
+
+    impl crate::photo::Sink for PhotoLog {
+        fn display(&self, photo: &crate::photo::Photo) {
+            self.0.lock().unwrap().push(format!(
+                "display {} {}x{}",
+                photo.asset, photo.width, photo.height
+            ));
+        }
+
+        fn clear(&self) {
+            self.0.lock().unwrap().push("clear".into());
+        }
+    }
+
+    fn jpeg(width: u16, height: u16) -> Vec<u8> {
+        vec![
+            0xff,
+            0xd8,
+            0xff,
+            0xe0,
+            0,
+            4,
+            0,
+            0,
+            0xff,
+            0xc0,
+            0,
+            11,
+            8,
+            (height >> 8) as u8,
+            height as u8,
+            (width >> 8) as u8,
+            width as u8,
+            3,
+            1,
+            1,
+            0,
+        ]
+    }
+
+    /// Отдельный профиль фото: без настройки 501, затем проверка, кэш и
+    /// очистка при завершении сессии. HLS не задействован.
+    #[test]
+    fn photo_profile_accepts_validates_caches_and_clears() {
+        let mut disabled = Client::new(ctx());
+        assert_eq!(
+            disabled
+                .call(
+                    "PUT",
+                    "/photo",
+                    &[("X-Apple-AssetKey", "A")],
+                    jpeg(100, 100)
+                )
+                .status,
+            501
+        );
+
+        let log = Arc::new(PhotoLog::default());
+        let mut context = ctx();
+        Arc::get_mut(&mut context).unwrap().photo = Some(crate::photo::Service::new(log.clone()));
+        let mut client = Client::new(context);
+        assert_eq!(
+            client
+                .call(
+                    "PUT",
+                    "/photo",
+                    &[
+                        ("X-Apple-AssetKey", "A"),
+                        ("X-Apple-Transition", "Dissolve")
+                    ],
+                    jpeg(100, 100)
+                )
+                .status,
+            200
+        );
+        assert_eq!(*log.0.lock().unwrap(), ["display A 100x100"]);
+
+        assert_eq!(
+            client
+                .call(
+                    "PUT",
+                    "/photo",
+                    &[
+                        ("X-Apple-AssetKey", "B"),
+                        ("X-Apple-AssetAction", "cacheOnly")
+                    ],
+                    jpeg(320, 240)
+                )
+                .status,
+            200
+        );
+        assert_eq!(log.0.lock().unwrap().len(), 1);
+        assert_eq!(
+            client
+                .call(
+                    "PUT",
+                    "/photo",
+                    &[
+                        ("X-Apple-AssetKey", "B"),
+                        ("X-Apple-AssetAction", "displayCached")
+                    ],
+                    vec![]
+                )
+                .status,
+            200
+        );
+        assert_eq!(
+            *log.0.lock().unwrap(),
+            ["display A 100x100", "display B 320x240"]
+        );
+
+        assert_eq!(
+            client
+                .call(
+                    "PUT",
+                    "/photo",
+                    &[("X-Apple-AssetKey", "bad")],
+                    b"GIF89a".to_vec()
+                )
+                .status,
+            400
+        );
+        assert_eq!(client.call("PUT", "/photo", &[], jpeg(10, 10)).status, 400);
+        assert_eq!(
+            client
+                .call(
+                    "PUT",
+                    "/photo",
+                    &[
+                        ("X-Apple-AssetKey", "missing"),
+                        ("X-Apple-AssetAction", "displayCached")
+                    ],
+                    vec![]
+                )
+                .status,
+            412
+        );
+
+        assert_eq!(
+            client.call("TEARDOWN", "rtsp://x/1", &[], vec![]).status,
+            200
+        );
+        assert_eq!(
+            log.0.lock().unwrap().last().map(String::as_str),
+            Some("clear")
+        );
     }
 }
