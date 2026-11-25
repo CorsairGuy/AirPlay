@@ -147,16 +147,16 @@ impl Player {
     /// Может ли этот владелец получить звук при текущей политике.
     fn available(&self, owner: u64) -> bool {
         self.ownership == Ownership::Takeover
-            || self
-                .lock()
-                .as_ref()
-                .is_none_or(|(id, _)| *id == owner)
+            || self.lock().as_ref().is_none_or(|(id, _)| *id == owner)
     }
 
     /// Ставит поток владельцу. `false` — политика [`Ownership::Reject`]
     /// отказала: поток не занял плеер и освобождён.
     fn replace(&self, owner: u64, mut stream: Stream) -> bool {
-        if !self.available(owner) {
+        let mut active = self.lock();
+        if self.ownership == Ownership::Reject
+            && active.as_ref().is_some_and(|(id, _)| *id != owner)
+        {
             warn!(owner, "второй отправитель отклонён политикой владения");
             return false;
         }
@@ -176,7 +176,7 @@ impl Player {
                 events.playing(true);
             }
         });
-        if let Some((old, _)) = self.lock().replace((owner, stream))
+        if let Some((old, _)) = active.replace((owner, stream))
             && old != owner
         {
             info!("новый отправитель, прежний поток остановлен");
@@ -282,6 +282,7 @@ pub struct Media {
     mrp: Option<JoinHandle<()>>,
     /// Сессия отправителя: `gid` в объявлении и карточке.
     group: Arc<dyn SessionGroup>,
+    pending_group: Option<String>,
     /// `ID` нашего PTP-участника в ответе SETUP.
     pairing_id: String,
     /// Адреса отправителя из `timingPeerInfo`.
@@ -331,6 +332,7 @@ impl Media {
             mrp_service: ctx.mrp.clone(),
             mrp: None,
             group: ctx.session_group.clone(),
+            pending_group: None,
             pairing_id: ctx.pairing_id.clone(),
             sender_addrs: vec![remote.to_canonical()],
             grouped: false,
@@ -704,11 +706,17 @@ impl Media {
     /// SETUP classic AirPlay 1: `Transport` без plist, порты занимает
     /// [`Raop`], медиачасть ставит поток в плеер.
     fn setup_raop(&mut self, req: &Request) -> Response {
+        if !self.player.available(self.id) {
+            return Response::to(req, 409);
+        }
         match self.raop.setup(req, self.player.audio.clone()) {
             Ok((resp, stream)) => {
                 self.anchor = None;
-                self.player.replace(self.id, stream);
-                resp
+                if self.player.replace(self.id, stream) {
+                    resp
+                } else {
+                    Response::to(req, 409)
+                }
             }
             Err(resp) => resp,
         }
@@ -759,7 +767,10 @@ impl Media {
         }
         if timing == "PTP" {
             if let Some(group) = body.get("groupUUID").and_then(Value::as_string) {
-                self.group.set_group(self.id, Some(group.to_owned()));
+                self.pending_group = Some(group.to_owned());
+                if self.player.available(self.id) {
+                    self.group.set_group(self.id, self.pending_group.clone());
+                }
             }
             // The RTSP peer remains a timing peer even when timingPeerInfo is absent.
             self.sender_addrs = body
@@ -865,7 +876,7 @@ impl Media {
     /// сессии и `eiv`, время по NTP. Без декодера AAC-ELD (сборка без фичи
     /// `ffmpeg`) порты всё равно отдаём, иначе отправитель не начнёт видео.
     #[cfg(feature = "mirroring")]
-    fn setup_mirror_audio(&mut self, s: &Dictionary, r: &mut Dictionary) -> Result<(), String> {
+    fn setup_mirror_audio(&mut self, s: &Dictionary, r: &mut Dictionary) -> Result<(), SetupError> {
         let format = Format {
             codec: Codec::AacEld,
             sample_rate: sample_rate(s)?,
@@ -873,7 +884,7 @@ impl Media {
         };
         if let Err(e) = codec::Decoder::new(format) {
             warn!("звук зеркалирования не играет: {e}");
-            return self.drain_mirror_audio(r);
+            return self.drain_mirror_audio(r).map_err(Into::into);
         }
         let aes = self.aes_key.ok_or("нет ключа звука: SETUP без ekey")?;
         let iv = self.eiv.ok_or("нет eiv в SETUP")?;
@@ -892,7 +903,7 @@ impl Media {
             Value::Integer(stream.control_port.into()),
         );
         if !self.player.replace(self.id, stream) {
-            return Err("звук уже у другого отправителя".into());
+            return Err(SetupError::Conflict);
         }
         Ok(())
     }
@@ -1046,6 +1057,11 @@ impl Media {
                     warn!(kind = other, "поток не поддерживается");
                     continue;
                 }
+            }
+            if matches!(kind, 96 | 103)
+                && let Some(group) = &self.pending_group
+            {
+                self.group.set_group(self.id, Some(group.clone()));
             }
             replies.push(Value::Dictionary(r));
         }
@@ -1546,6 +1562,33 @@ mod tests {
         );
         player.release(2);
         assert_eq!(player.active_packets(), None);
+    }
+
+    #[tokio::test]
+    async fn reject_policy_is_atomic_for_simultaneous_senders() {
+        let mut player = Player::new(audio_stream::Config::default(), TimeSync::idle(1));
+        player.ownership = Ownership::Reject;
+        let player = Arc::new(player);
+        let one =
+            Stream::buffered(player.audio.clone(), &[1; 32], Arc::new(clock::NoTime)).unwrap();
+        let two =
+            Stream::buffered(player.audio.clone(), &[2; 32], Arc::new(clock::NoTime)).unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let results = std::thread::scope(|scope| {
+            let a = player.clone();
+            let b = player.clone();
+            let gate = barrier.clone();
+            let first = scope.spawn(move || {
+                gate.wait();
+                a.replace(1, one)
+            });
+            let second = scope.spawn(move || {
+                barrier.wait();
+                b.replace(2, two)
+            });
+            [first.join().unwrap(), second.join().unwrap()]
+        });
+        assert_eq!(results.into_iter().filter(|ok| *ok).count(), 1);
     }
 }
 

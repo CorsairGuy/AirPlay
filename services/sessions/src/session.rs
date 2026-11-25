@@ -1449,12 +1449,21 @@ mod tests {
             d.insert("streams".into(), Value::Array(vec![s.into()]));
             c.call("SETUP", "rtsp://x/1", &[], to_plist(d))
         };
+        let group_setup = |c: &mut Client, group: &str| {
+            let mut d = Dictionary::new();
+            d.insert("timingProtocol".into(), "PTP".into());
+            d.insert("groupUUID".into(), group.into());
+            c.call("SETUP", "rtsp://x/1", &[], to_plist(d))
+        };
 
         let mut first = Client::new(ctx.clone());
+        assert_eq!(group_setup(&mut first, "first").status, 200);
         assert_eq!(stream_setup(&mut first).status, 200);
         assert_eq!(ctx.player.active_packets(), Some(0));
 
         let mut second = Client::new(ctx.clone());
+        assert_eq!(group_setup(&mut second, "second").status, 200);
+        assert_eq!(*ctx.session_group.lock().unwrap(), Some("first".into()));
         assert_eq!(stream_setup(&mut second).status, 409);
         // Поздний TEARDOWN отклонённого не должен останавливать первый поток.
         assert_eq!(
@@ -1470,6 +1479,7 @@ mod tests {
         assert_eq!(ctx.player.active_packets(), None);
         // Освобождённый плеер снова доступен.
         assert_eq!(stream_setup(&mut second).status, 200);
+        assert_eq!(*ctx.session_group.lock().unwrap(), Some("second".into()));
         assert_eq!(
             second.call("TEARDOWN", "rtsp://x/1", &[], vec![]).status,
             200
