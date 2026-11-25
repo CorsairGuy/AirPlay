@@ -4,6 +4,7 @@
 
 - AirPlay 1 sender: a separate RAOP profile now parses `_raop._tcp` TXT, negotiates PCM or uncompressed ALAC, performs OPTIONS/ANNOUNCE/SETUP/RECORD, sends RTP audio (optional AES-CBC), sets volume and tears down. A local fake receiver verifies the sequence, SDP, volume body and decrypted ALAC payload. RSA key exchange, NTP anchoring and hardware compatibility are explicitly not implemented.
 - Live group: verified join/leave and per-speaker failure through the existing SessionPool; a failed member can be removed and rejoined on the same endpoint without restarting surviving receivers. PTP is unchanged and no acoustic synchronization was measured.
+- MRP card: a reconnecting controller now receives the current track snapshot on subscribe instead of waiting for the next sender event; added tests for artwork replacement/cleanup, pause/resume and reconnect. Verified with the test client only, not an iPhone.
 
 - HLS seek clears buffered audio; multichannel HLS audio is rejected rather than silently dropping channels. A replacement buffered-audio connection must deliver an authenticated packet before replacing the active reader; replay protection remains outside this change.
 

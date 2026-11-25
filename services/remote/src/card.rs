@@ -671,3 +671,112 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod phase6_tests {
+    use super::*;
+    use crate::mrp_service::model::Feed;
+
+    fn card(uid: &str) -> Arc<Card> {
+        Card::new(
+            Device {
+                name: "a".into(),
+                model: "AudioAccessory5,1".into(),
+                localized_model: "HomePod".into(),
+                uid: uid.into(),
+                group: "g".into(),
+                system_app: "x".into(),
+            },
+            Remote::new(),
+            Arc::new(::media::events::NoEvents),
+        )
+    }
+
+    fn jpeg(width: u16, height: u16) -> Vec<u8> {
+        vec![
+            0xff,
+            0xd8,
+            0xff,
+            0xe0,
+            0,
+            4,
+            0,
+            0,
+            0xff,
+            0xc0,
+            0,
+            11,
+            8,
+            (height >> 8) as u8,
+            height as u8,
+            (width >> 8) as u8,
+            width as u8,
+            3,
+            1,
+            1,
+            0,
+        ]
+    }
+
+    #[test]
+    fn artwork_is_replaced_but_invalid_update_clears_stale_cover() {
+        let card = card("art");
+        let first = jpeg(100, 100);
+        card.artwork("image/jpeg", &first);
+        let cover = card.feed.borrow().cover.clone().unwrap();
+        assert_eq!(cover.id, hash(&first));
+        assert_eq!((cover.width, cover.height), (100, 100));
+
+        let second = jpeg(200, 150);
+        card.artwork("image/jpeg", &second);
+        let replaced = card.feed.borrow().cover.clone().unwrap();
+        assert_eq!(replaced.id, hash(&second));
+        assert_eq!((replaced.width, replaced.height), (200, 150));
+        assert_ne!(replaced.id, cover.id);
+
+        // Повреждённая картинка не должна оставлять старую обложку на экране.
+        card.artwork("image/jpeg", b"GIF89a");
+        assert!(card.feed.borrow().cover.is_none());
+    }
+
+    #[test]
+    fn pause_keeps_track_position_and_resume_continues_it() {
+        let card = card("pause");
+        let _rx = card.feed.subscribe();
+        card.metadata(&Metadata {
+            title: Some("Трек".into()),
+            artist: Some("Артист".into()),
+            ..Default::default()
+        });
+        card.progress(Progress {
+            position: std::time::Duration::from_secs(42),
+            duration: std::time::Duration::from_secs(180),
+        });
+        card.playing(false);
+        let paused = card.feed.borrow().clone();
+        assert!(!paused.playing);
+        assert_eq!(paused.title, "Трек");
+        assert_eq!(paused.position, 42.0);
+        assert_eq!(paused.duration, Some(180.0));
+        card.playing(true);
+        let resumed = card.feed.borrow().clone();
+        assert!(resumed.playing);
+        assert_eq!(resumed.position, 42.0);
+        assert_eq!(resumed.content_id, paused.content_id);
+    }
+
+    #[test]
+    fn feed_snapshot_is_what_a_reconnecting_controller_reads() {
+        let card = card("reconnect");
+        card.metadata(&Metadata {
+            title: Some("Сейчас".into()),
+            artist: Some("Кто-то".into()),
+            ..Default::default()
+        });
+        card.playing(true);
+        let feed: Feed = card.feed.borrow().clone();
+        assert_eq!(feed.title, "Сейчас");
+        assert_eq!(feed.artist, "Кто-то");
+        assert!(feed.playing && feed.control_available);
+    }
+}
