@@ -15,8 +15,12 @@ workspace = true
 reqwest.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tracing.workspace = true
+clock.workspace = true
+audio.workspace = true
+codec = { workspace = true, optional = true }
 ffmpeg-next = { workspace = true, optional = true }
 video = { workspace = true, optional = true }
 
 [features]
-ffmpeg = ["dep:ffmpeg-next", "dep:video", "video/ffmpeg"]
+ffmpeg = ["dep:ffmpeg-next", "dep:codec", "dep:video", "video/ffmpeg"]

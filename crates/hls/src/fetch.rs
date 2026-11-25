@@ -178,6 +178,24 @@ impl Resolve for PublicResolver {
     }
 }
 
+#[cfg(all(test, feature = "ffmpeg"))]
+impl Fetcher {
+    /// Client without the non-public DNS resolver, for loopback tests.
+    /// Test builds only: the production constructor rejects private addresses.
+    pub(crate) fn for_tests() -> Self {
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .expect("test HTTP client");
+        Self {
+            client,
+            in_flight: Arc::new(tokio::sync::Semaphore::new(4)),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

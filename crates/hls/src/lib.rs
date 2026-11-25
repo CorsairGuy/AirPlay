@@ -5,19 +5,27 @@
 //! `mlhls://` and `nfhls://` schemes need protocol-specific resolvers.
 //!
 //! Fetching is bounded and rejects non-public DNS results. Optional FFmpeg
-//! support demultiplexes finite VOD and decodes video into a generic
-//! `FrameSink`; live refresh, audio, and full AirPlay playback controls remain
-//! unsupported. The binary's opt-in `hls` feature handles only start/stop.
+//! support demultiplexes finite VOD, decodes video into a generic `FrameSink`
+//! and audio into an [`audio::Sink`], keeping the two streams on one
+//! presentation clock, and offers segment-granular pause/resume and seek.
+//! Live refresh, encrypted playlists and FairPlay remain unsupported.
 
 mod fetch;
 mod source;
 
 pub use fetch::{Fetcher, MAX_SEGMENT_BYTES};
 pub use source::{SegmentReader, VodSource};
+#[cfg(all(test, feature = "ffmpeg"))]
+mod testserver;
+
 #[cfg(feature = "ffmpeg")]
 mod demux;
 #[cfg(feature = "ffmpeg")]
+mod player;
+#[cfg(feature = "ffmpeg")]
 pub use demux::{ContainerHint, open_demux};
+#[cfg(feature = "ffmpeg")]
+pub use player::{AudioOptions, Playback, PlaybackOptions};
 
 pub const MAX_PLAYLIST_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_PLAYLIST_LINES: usize = 32_768;
@@ -62,6 +70,8 @@ pub enum Error {
     Demux,
     #[error("video decoder failed: {0}")]
     Decode(String),
+    #[error("audio output failed: {0}")]
+    Audio(String),
     #[error("video worker failed: {0}")]
     Worker(String),
 }

@@ -12,6 +12,8 @@ pub use mirror;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+#[cfg(feature = "hls")]
+use std::time::Duration;
 
 use audio_stream::{Stream, StreamKey};
 use clock::{Anchor, TimeSource};
@@ -228,9 +230,10 @@ pub struct Media {
     #[cfg(feature = "hls")]
     hls: Option<HlsOptions>,
     #[cfg(feature = "hls")]
-    hls_task: Option<JoinHandle<()>>,
+    hls_playback: Option<Arc<hls::Playback>>,
+    /// Playlist and start position waiting for `/rate` in the AirPlay 2 flow.
     #[cfg(feature = "hls")]
-    pending_hls: Option<hls::Url>,
+    pending_hls: Option<(hls::Url, Duration)>,
     #[cfg(feature = "hls")]
     cast_v2: bool,
     #[cfg(feature = "hls")]
@@ -269,7 +272,7 @@ impl Media {
             #[cfg(feature = "hls")]
             hls: ctx.hls.clone(),
             #[cfg(feature = "hls")]
-            hls_task: None,
+            hls_playback: None,
             #[cfg(feature = "hls")]
             pending_hls: None,
             #[cfg(feature = "hls")]
@@ -391,7 +394,7 @@ impl Media {
                 ok()
             }
             #[cfg(feature = "hls")]
-            ("POST", "/scrub") => Response::to(req, 501),
+            ("POST", "/scrub") => self.hls_scrub(req),
             ("POST", "/feedback") | ("POST", "/audioMode") => ok(),
             _ => return None,
         })
@@ -442,9 +445,6 @@ impl Media {
         if !start.is_finite() || start < 0.0 {
             return Response::to(req, 400);
         }
-        if start > 0.0 {
-            return Response::to(req, 501);
-        }
         let Some(location) = body.get("Content-Location").and_then(Value::as_string) else {
             return Response::to(req, 400);
         };
@@ -461,17 +461,17 @@ impl Media {
                 return Response::to(req, 409);
             }
             self.stop_hls();
-            self.pending_hls = Some(url);
+            self.pending_hls = Some((url, Duration::from_secs_f64(start)));
             return Response::to(req, 200);
         }
-        self.start_hls(req, options, url)
+        self.start_hls(req, options, url, Duration::from_secs_f64(start))
     }
 
+    /// `POST /rate?value=RATE`: `1.0` starts a pending AirPlay 2 playback or
+    /// resumes a paused one, `0.0` pauses. Other rates are not implemented and
+    /// are refused instead of being reported as supported.
     #[cfg(feature = "hls")]
     fn hls_rate(&mut self, req: &Request) -> Response {
-        if !self.cast_v2 || !self.hls_v2_setup || !self.hls_v2_recorded {
-            return Response::to(req, 501);
-        }
         let rate = req
             .uri
             .split_once('?')
@@ -480,20 +480,78 @@ impl Media {
             .flat_map(|query| query.split('&'))
             .find_map(|item| item.strip_prefix("value="))
             .and_then(|value| value.parse::<f64>().ok());
-        if rate != Some(1.0) {
+        let Some(rate) = rate.filter(|rate| rate.is_finite()) else {
+            return Response::to(req, 400);
+        };
+        if rate != 0.0 && rate != 1.0 {
             return Response::to(req, 501);
         }
-        let Some(url) = self.pending_hls.take() else {
+        if rate == 1.0 && self.pending_hls.is_some() {
+            if !self.cast_v2 || !self.hls_v2_setup || !self.hls_v2_recorded {
+                return Response::to(req, 409);
+            }
+            let Some((url, position)) = self.pending_hls.take() else {
+                return Response::to(req, 409);
+            };
+            let Some(options) = self.hls.clone() else {
+                return Response::to(req, 501);
+            };
+            return self.start_hls(req, options, url, position);
+        }
+        let Some(playback) = self.hls_playback.as_ref() else {
             return Response::to(req, 409);
         };
-        let Some(options) = self.hls.clone() else {
-            return Response::to(req, 501);
+        if playback.finished() {
+            return Response::to(req, 409);
+        }
+        if rate == 0.0 {
+            debug!("HLS pause");
+            playback.pause();
+        } else {
+            debug!("HLS resume");
+            playback.resume();
+        }
+        Response::to(req, 200)
+    }
+
+    /// `POST /scrub?position=SECONDS`: restart at the playlist segment that
+    /// contains the position. Segment granularity is the confirmed data; a
+    /// frame-accurate seek is not offered.
+    #[cfg(feature = "hls")]
+    fn hls_scrub(&mut self, req: &Request) -> Response {
+        let Some(playback) = self.hls_playback.as_ref() else {
+            return Response::to(req, 409);
         };
-        self.start_hls(req, options, url)
+        if playback.finished() {
+            return Response::to(req, 409);
+        }
+        let position = req
+            .uri
+            .split_once('?')
+            .map(|(_, query)| query)
+            .into_iter()
+            .flat_map(|query| query.split('&'))
+            .find_map(|item| item.strip_prefix("position="))
+            .and_then(|value| value.parse::<f64>().ok())
+            .filter(|value| value.is_finite() && *value >= 0.0);
+        let Some(position) = position else {
+            return Response::to(req, 400);
+        };
+        if !playback.seek(Duration::from_secs_f64(position)) {
+            return Response::to(req, 416);
+        }
+        info!(position, "HLS scrub");
+        Response::to(req, 200)
     }
 
     #[cfg(feature = "hls")]
-    fn start_hls(&mut self, req: &Request, options: HlsOptions, url: hls::Url) -> Response {
+    fn start_hls(
+        &mut self,
+        req: &Request,
+        options: HlsOptions,
+        url: hls::Url,
+        position: Duration,
+    ) -> Response {
         let fetcher = match hls::Fetcher::new() {
             Ok(fetcher) => fetcher,
             Err(error) => {
@@ -502,27 +560,27 @@ impl Media {
             }
         };
         self.stop_hls();
-        self.hls_task = Some(tokio::spawn(async move {
-            if let Err(error) = fetcher
-                .play_vod(
-                    &url,
-                    options.max_bandwidth,
-                    options.decoder,
-                    options.sink.open(),
-                )
-                .await
-            {
-                warn!("HLS playback: {error}");
-            }
-        }));
+        let playback = hls::Playback::spawn(
+            fetcher,
+            url,
+            hls::PlaybackOptions {
+                max_bandwidth: options.max_bandwidth,
+                video: options.decoder,
+                video_sink: options.sink,
+                audio: options.audio,
+            },
+            position,
+        );
+        info!(position = %position.as_secs_f64(), "HLS playback");
+        self.hls_playback = Some(Arc::new(playback));
         Response::to(req, 200)
     }
 
     #[cfg(feature = "hls")]
     fn stop_hls(&mut self) {
         self.pending_hls = None;
-        if let Some(task) = self.hls_task.take() {
-            task.abort();
+        if let Some(playback) = self.hls_playback.take() {
+            playback.stop();
         }
     }
 

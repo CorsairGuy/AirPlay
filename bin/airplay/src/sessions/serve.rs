@@ -63,6 +63,8 @@ pub struct HlsOptions {
     pub decoder: video::VideoOptions,
     /// Host-provided renderer for decoded frames.
     pub sink: video::FrameSinkFactory,
+    /// Audio output for HLS; `None` plays video only.
+    pub audio: Option<hls::AudioOptions>,
 }
 
 /// MediaRemote: карточка «Сейчас играет» на iPhone.

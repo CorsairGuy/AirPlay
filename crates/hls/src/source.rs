@@ -1,4 +1,5 @@
 use std::io::{self, Read};
+use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -10,6 +11,8 @@ const SEGMENT_QUEUE: usize = 2;
 pub struct VodSource {
     media_url: Url,
     playlist: Playlist,
+    duration: Duration,
+    start: Duration,
     reader: Option<SegmentReader>,
     producer: Option<JoinHandle<Result<(), Error>>>,
 }
@@ -21,6 +24,18 @@ impl VodSource {
 
     pub fn playlist(&self) -> &Playlist {
         &self.playlist
+    }
+
+    /// Full length of the finite playlist: the sum of its `EXTINF` durations.
+    /// This is the only duration the receiver can confirm before playback.
+    pub fn duration(&self) -> Duration {
+        self.duration
+    }
+
+    /// Offset of the first delivered segment in the playlist timeline. It is a
+    /// segment boundary, never an arbitrary position.
+    pub fn start(&self) -> Duration {
+        self.start
     }
 
     /// Take the blocking reader to pass to a demuxer running off the async
@@ -100,14 +115,32 @@ impl Read for SegmentReader {
 impl Fetcher {
     /// Fetch a finite media playlist into a bounded blocking byte stream.
     pub async fn open_vod(&self, url: &Url, max_bandwidth: u64) -> Result<VodSource, Error> {
+        self.open_vod_at(url, max_bandwidth, Duration::ZERO).await
+    }
+
+    /// Open a finite playlist at the segment that contains `position`.
+    ///
+    /// The playlist's `EXTINF` values are confirmed data, so a start or seek is
+    /// mapped to the beginning of the containing segment: the first media byte
+    /// served is a segment boundary, not the requested timestamp.
+    pub async fn open_vod_at(
+        &self,
+        url: &Url,
+        max_bandwidth: u64,
+        position: Duration,
+    ) -> Result<VodSource, Error> {
         let (media_url, playlist) = self.media_playlist(url, max_bandwidth).await?;
         if playlist.live {
             return Err(Error::UnsupportedFeature("live playlist refresh"));
         }
 
+        let total_ms: u64 = playlist.segments.iter().map(|s| s.duration_ms).sum();
+        let (first, start) = segment_at(&playlist, position)?;
+        let duration = Duration::from_millis(total_ms);
+
         let (sender, receiver) = mpsc::channel(SEGMENT_QUEUE);
         let fetcher = self.clone();
-        let segments = playlist.segments.clone();
+        let segments = playlist.segments[first..].to_vec();
         let producer = tokio::spawn(async move {
             let mut last_init = None;
             for segment in segments {
@@ -125,10 +158,34 @@ impl Fetcher {
         Ok(VodSource {
             media_url,
             playlist,
+            duration,
+            start,
             reader: Some(SegmentReader::new(receiver)),
             producer: Some(producer),
         })
     }
+}
+
+/// The segment that contains `position` and that segment's start offset.
+fn segment_at(playlist: &Playlist, position: Duration) -> Result<(usize, Duration), Error> {
+    if playlist.segments.is_empty() {
+        return Err(Error::Playlist("media playlist has no segments".into()));
+    }
+    let mut start_ms = 0u64;
+    for (index, segment) in playlist.segments.iter().enumerate() {
+        let end_ms = start_ms.saturating_add(segment.duration_ms);
+        if position.as_millis() < u128::from(end_ms) {
+            return Ok((index, Duration::from_millis(start_ms)));
+        }
+        start_ms = end_ms;
+    }
+    // Past the end: clamp to the last segment rather than reading past it.
+    let index = playlist.segments.len() - 1;
+    let start_ms: u64 = playlist.segments[..index]
+        .iter()
+        .map(|s| s.duration_ms)
+        .sum();
+    Ok((index, Duration::from_millis(start_ms)))
 }
 
 async fn fetch_and_send(
@@ -143,5 +200,57 @@ async fn fetch_and_send(
             return Err(error);
         }
     };
-    sender.send(Ok(bytes)).await.map_err(|_| Error::Fetch)
+    // Nobody is reading any more (stop or seek): end quietly instead of
+    // reporting a fetch failure for segments the caller no longer wants.
+    let _ = sender.send(Ok(bytes)).await;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Segment, Variant};
+
+    fn playlist(durations: &[u64]) -> Playlist {
+        Playlist {
+            variants: Vec::<Variant>::new(),
+            segments: durations
+                .iter()
+                .enumerate()
+                .map(|(i, ms)| Segment {
+                    uri: Url::parse(&format!("https://example.com/{i}.ts")).unwrap(),
+                    duration_ms: *ms,
+                    initialization_segment: None,
+                })
+                .collect(),
+            live: false,
+        }
+    }
+
+    #[test]
+    fn position_maps_to_containing_segment() {
+        let p = playlist(&[1000, 1000, 1000]);
+        assert_eq!(segment_at(&p, Duration::ZERO).unwrap().0, 0);
+        assert_eq!(segment_at(&p, Duration::from_millis(999)).unwrap().0, 0);
+        assert_eq!(
+            segment_at(&p, Duration::from_millis(1000)).unwrap(),
+            (1, Duration::from_millis(1000))
+        );
+        assert_eq!(
+            segment_at(&p, Duration::from_millis(2100)).unwrap(),
+            (2, Duration::from_millis(2000))
+        );
+        assert_eq!(
+            segment_at(&p, Duration::from_secs(30)).unwrap(),
+            (2, Duration::from_millis(2000))
+        );
+    }
+
+    #[test]
+    fn empty_playlist_is_rejected() {
+        assert!(matches!(
+            segment_at(&playlist(&[]), Duration::ZERO),
+            Err(Error::Playlist(_))
+        ));
+    }
 }

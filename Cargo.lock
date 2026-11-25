@@ -812,10 +812,14 @@ dependencies = [
 name = "hls"
 version = "0.1.0"
 dependencies = [
+ "audio",
+ "clock",
+ "codec",
  "ffmpeg-next",
  "reqwest",
  "thiserror 2.0.21",
  "tokio",
+ "tracing",
  "video",
 ]
 

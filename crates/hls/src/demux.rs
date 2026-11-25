@@ -28,6 +28,9 @@ pub fn open_demux(
 impl Fetcher {
     /// Fetch, demux, decode, and present a finite HLS VOD stream on a blocking
     /// worker. The caller retains the AirPlay playback lifecycle and controls.
+    ///
+    /// This is the video-only path kept for callers that have no audio output.
+    /// [`Fetcher::playback`] adds audio, pause, seek and an explicit stop.
     pub async fn play_vod(
         &self,
         url: &Url,
@@ -42,11 +45,18 @@ impl Fetcher {
             video::decode_input(input, &options, sink)
                 .map_err(|error| Error::Decode(error.to_string()))
         });
-        let playback = worker
-            .await
-            .map_err(|error| Error::Worker(error.to_string()))?;
-        let fetch = source.finish().await;
-        playback?;
-        fetch
+        match worker.await {
+            // The blocking decoder owns the reader, so a panic or abort ends the
+            // segment producer through the closed channel.
+            Err(error) => Err(Error::Worker(error.to_string())),
+            Ok(Ok(())) => source.finish().await,
+            // Report the download failure when there was one; otherwise the
+            // decoding error is what stopped playback. The reader is already
+            // gone, so `finish` returns without waiting for more segments.
+            Ok(Err(playback)) => match source.finish().await {
+                Err(fetch) => Err(fetch),
+                Ok(()) => Err(playback),
+            },
+        }
     }
 }

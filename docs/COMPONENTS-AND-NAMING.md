@@ -80,7 +80,7 @@ reference/ — архив, не активные workspace members; чужие �
 | Companion Link | самостоятельный control protocol | ap_companion; общий crypto/pairing/command/event model; OPACK — его data codec, не OS service |
 | DACP | reverse-control protocol | remote::dacp, shared HTTP/transport; не заменять его MRP и не обобщать «DACP только AP1» |
 | DMAP | tagged metadata format | один metadata codec, сейчас events::Metadata::from_dmap; не новая сетевая служба |
-| HLS/URL casting | медиа delivery profile | opt-in `hls` принимает V1 `/play` и V2 `NTP SETUP`→`RECORD`→`/play`→`/rate?value=1`, декодирует конечный HTTP(S) VOD в `FrameSink`; пауза, seek, live, аудио и capability bits пока не реализованы |
+| HLS/URL casting | медиа delivery profile | opt-in `hls` принимает V1 `/play` и V2 `NTP SETUP`→`RECORD`→`/play`→`/rate?value=1`, декодирует конечный незашифрованный HTTP(S) VOD в `FrameSink` и звук в `audio::Sink` на общих часах; pause/resume (`/rate` 0/1) и seek по границам сегментов `EXTINF` (`/scrub`, `Start-Position-Seconds`) реализованы и покрыты локальными тестами; live, DRM/FairPlay, покадровый seek, буферизация вперёд и capability bits не реализованы; проверка с iPhone не выполнена |
 | MLP1 / local IPC | внутренние контракты | один encoder/decoder и version contract; не протокол Apple и не отдельный AirPlay stack |
 
 ## Подтверждённые дубли и места консолидации
@@ -140,9 +140,10 @@ pair::hap обеих сторон использует единый crypto::srp 
 5. Переименования runtime-пакетов и переносы из bin — отдельными move-коммитами с
    compatibility aliases, audio-only tree check и проверкой Station core pin/lock/package.
 6. Companion реализуется в единственном существующем ap_companion, с общими pairing/crypto;
-   coordinator не требует нового протокола. HLS сейчас имеет ограниченный
-   HTTP(S) VOD-to-`FrameSink` pipeline с opt-in V1/V2 start/stop routes;
-   HLS live/audio, pause/seek и capability advertisement не готовы. Capture/IPC
+   coordinator не требует нового протокола. HLS сейчас умеет конечный
+   HTTP(S) VOD со звуком, pause/resume и seek по границам сегментов через opt-in
+   V1/V2 routes; HLS live, DRM, покадровый seek и capability advertisement не
+   готовы. Capture/IPC
    остаются placeholders. Ни один
    из этих компонентов не рекламировать готовым без сквозной реализации.
 7. По каждому profile фиксировать: enabled components, actual processes/binaries, listeners,
