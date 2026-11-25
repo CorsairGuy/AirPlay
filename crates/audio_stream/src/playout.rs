@@ -8,6 +8,13 @@
 //! отстаёт или спешит больше чем на полмиллисекунды, в очередной пакет
 //! добавляем или из него выбрасываем один кадр. На слух это незаметно, в
 //! отличие от ресемплинга не стоит процессору ничего.
+//!
+//! Долгая сессия переживает перезапуск отправителя: если метка времени
+//! прыгнула больше чем на [`MAX_TS_JUMP_SECS`] секунд, шкала считается
+//! новой. Очередь очищается, якорь переставляется на новую метку, вывод
+//! начинает заново по своим часам до следующего якоря отправителя. Без
+//! этого сброс метки заворачивался через 32-битную арифметику в «далёкое
+//! будущее» и поток замирал навсегда.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -27,6 +34,9 @@ const RESYNC_NS: i64 = 100_000_000;
 /// Предел очереди пакетов (около полутора минут AAC 44,1 кГц): сессия на
 /// паузе или ушедший вперёд отправитель не должны съедать память без предела.
 const MAX_BUFFERED_PACKETS: usize = 4096;
+/// Скачок метки больше этого числа секунд — не джиттер, а новая шкала
+/// (перезапуск отправителя или потеря сессии).
+pub const MAX_TS_JUMP_SECS: i64 = 10;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -87,6 +97,20 @@ impl Unwrap {
             Some((last, ext)) => ext + rtp::ts_diff(ts, last) as i64,
         }
     }
+
+    fn last_ext(&self) -> Option<i64> {
+        self.last.map(|(_, ext)| ext)
+    }
+
+    /// Новая шкала: метка `ts` становится началом отсчёта.
+    fn reset(&mut self, ts: u32) {
+        self.last = Some((ts, ts as i64));
+    }
+}
+
+/// Прыжок больше допустимого означает новую шкалу времени, а не джиттер.
+fn is_discontinuity(delta_frames: i64, rate: i64) -> bool {
+    delta_frames.abs() > rate * MAX_TS_JUMP_SECS
 }
 
 #[derive(Default)]
@@ -105,6 +129,8 @@ struct State {
     latency_offset_ns: i64,
     /// Растёт при перемотке и смене якоря: поток вывода начинает заново.
     epoch: u64,
+    /// Сколько раз шкала меток времени начиналась заново.
+    resyncs: u64,
     stopped: bool,
 }
 
@@ -148,6 +174,37 @@ impl Playout {
         if s.stopped {
             // Сессия закрыта, а подключение ещё живёт: не копим пакеты в никуда.
             return;
+        }
+        let rate = s
+            .format
+            .or_else(|| Format::from_ssrc(ssrc))
+            .map_or(44_100, |f| f.sample_rate) as i64;
+        if let Some(last) = s.unwrap.last_ext() {
+            let next = s.unwrap.peek(timestamp);
+            if is_discontinuity(next - last, rate) {
+                info!(
+                    delta_frames = next - last,
+                    "разрыв меток времени: поток начинается заново"
+                );
+                s.packets.clear();
+                s.unwrap.reset(timestamp);
+                // Прежний якорь относится к старой шкале: продолжать по нему
+                // нельзя. До следующего якоря отправителя играем по своим
+                // часам — тот же путь, что и realtime-поток без PTP.
+                if s.anchor.is_some() {
+                    let playing = s.anchor.is_some_and(|a| a.playing);
+                    s.anchor = Some(Anchor {
+                        rtp: timestamp,
+                        network_ns: 0,
+                        timeline: 0,
+                        playing,
+                    });
+                    s.local_anchor = true;
+                    s.fallback_local_ns = now_ns() as i64;
+                }
+                s.epoch += 1;
+                s.resyncs += 1;
+            }
         }
         let ext = s.unwrap.extend(timestamp);
         s.packets.insert(ext, Packet { ssrc, payload });
@@ -271,6 +328,13 @@ impl Playout {
 
     pub fn buffered_packets(&self) -> usize {
         self.lock().packets.len()
+    }
+
+    /// Сколько раз шкала меток времени начиналась заново (перезапуск
+    /// отправителя). Штатный FLUSH меняет эпоху, но не метку, и счётчик не
+    /// увеличивает.
+    pub fn resync_count(&self) -> u64 {
+        self.lock().resyncs
     }
 }
 
@@ -534,5 +598,113 @@ impl Output {
             self.pcm.resize(frames * CHANNELS, 0);
         }
         std::mem::take(&mut self.pcm)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    impl Playout {
+        /// Плейаут без потока вывода: проверяем только состояние очереди.
+        fn inert(format: Option<Format>) -> Self {
+            let shared = Arc::new((
+                Mutex::new(State {
+                    format,
+                    ..State::default()
+                }),
+                Condvar::new(),
+            ));
+            Self {
+                shared,
+                offsets: (0, None),
+            }
+        }
+    }
+
+    const AAC_44100: u32 = 0x1600_0000;
+
+    #[test]
+    fn discontinuity_threshold_is_ten_seconds() {
+        let rate = 44_100;
+        assert!(!is_discontinuity(rate * 9, rate));
+        assert!(!is_discontinuity(0, rate));
+        assert!(!is_discontinuity(-rate * 9, rate));
+        assert!(is_discontinuity(rate * 10 + 1, rate));
+        assert!(is_discontinuity(-rate * 10 - 1, rate));
+    }
+
+    #[test]
+    fn unwrap_reset_starts_a_new_scale() {
+        let mut u = Unwrap::default();
+        assert_eq!(u.extend(1_000_000_000), 1_000_000_000);
+        assert_eq!(u.extend(1_000_000_352), 1_000_000_352);
+        assert_eq!(u.last_ext(), Some(1_000_000_352));
+        u.reset(0);
+        assert_eq!(u.last_ext(), Some(0));
+        assert_eq!(u.extend(1024), 1024);
+    }
+
+    #[test]
+    fn sender_restart_rebases_the_queue() {
+        let playout = Playout::inert(None);
+        playout.push(1_000_000_000, AAC_44100, vec![1]);
+        playout.push(1_000_000_352, AAC_44100, vec![2]);
+        assert_eq!(playout.buffered_packets(), 2);
+        assert_eq!(playout.resync_count(), 0);
+
+        // Отправитель перезапустил поток и начал метки с нуля.
+        playout.push(0, AAC_44100, vec![3]);
+        assert_eq!(playout.resync_count(), 1);
+        assert_eq!(playout.buffered_packets(), 1, "старая шкала выброшена");
+
+        // Дальше поток снова идёт подряд и не режется.
+        playout.push(1024, AAC_44100, vec![4]);
+        assert_eq!(playout.buffered_packets(), 2);
+        assert_eq!(playout.resync_count(), 1);
+    }
+
+    #[test]
+    fn ordinary_jitter_and_medium_gaps_do_not_rebase() {
+        let playout = Playout::inert(None);
+        playout.push(352_000, AAC_44100, vec![1]);
+        // Пауза в 5 секунд — ещё не новая шкала.
+        playout.push(352_000 + 44_100 * 5, AAC_44100, vec![2]);
+        assert_eq!(playout.resync_count(), 0);
+        assert_eq!(playout.buffered_packets(), 2);
+
+        // Небольшой обратный джиттер тоже не повод всё выбрасывать.
+        playout.push(352_000 + 44_100 * 5 - 352, AAC_44100, vec![3]);
+        assert_eq!(playout.resync_count(), 0);
+    }
+
+    #[test]
+    fn resync_keeps_play_state_and_reanchors() {
+        let playout = Playout::inert(None);
+        playout.play_from(352_000);
+        playout.push(352_000, AAC_44100, vec![1]);
+        playout.push(352_000 + 1_000, AAC_44100, vec![2]);
+        // Скачок на 30 секунд вперёд — новая шкала.
+        playout.push(352_000 + 44_100 * 30, AAC_44100, vec![3]);
+        assert_eq!(playout.resync_count(), 1);
+        assert_eq!(playout.buffered_packets(), 1);
+
+        let state = playout.lock();
+        assert!(state.anchor.is_some_and(|a| a.playing), "играть продолжаем");
+        assert!(state.local_anchor, "до нового якоря — свои часы");
+        assert_eq!(state.anchor.unwrap().rtp, 352_000 + 44_100 * 30);
+    }
+
+    #[test]
+    fn resync_does_not_happen_without_previous_packets() {
+        let playout = Playout::inert(None);
+        playout.push(0, AAC_44100, vec![1]);
+        assert_eq!(playout.resync_count(), 0);
+        playout.push(u32::MAX - 100, AAC_44100, vec![2]);
+        assert_eq!(
+            playout.resync_count(),
+            0,
+            "32-битное переполнение — не разрыв"
+        );
     }
 }
