@@ -4,8 +4,8 @@
 //! PCM/ALAC negotiation, plain RTSP announce/setup/record, UDP RTP audio,
 //! volume and teardown. It does not share the AirPlay 2 session/PTP engine.
 //!
-//! AES-CBC requires a caller-supplied RSA-OAEP wrapped key. Generating that
-//! wrapped key and verifying Apple-Response are not implemented here.
+//! AES-CBC keys are wrapped with RSA-OAEP/SHA-1 by the core crypto module.
+//! Apple-Response verification is not implemented here.
 //! No hardware compatibility is claimed.
 
 use std::collections::BTreeMap;
@@ -134,6 +134,13 @@ impl SessionConfig {
         }
     }
 
+    /// Generate fresh AES session material for classic RSA-encrypted RAOP.
+    pub fn enable_classic_encryption(&mut self) {
+        self.audio_key = Some(rand::random());
+        self.audio_iv = Some(rand::random());
+        self.rsa_wrapped_key = None;
+    }
+
     pub fn validate(&self) -> Result<()> {
         if self.codec == Codec::Alac && !self.receiver.alac {
             bail!("receiver does not advertise ALAC");
@@ -142,9 +149,9 @@ impl SessionConfig {
             bail!("receiver does not advertise PCM");
         }
         if self.audio_key.is_some() != self.audio_iv.is_some()
-            || self.audio_key.is_some() != self.rsa_wrapped_key.is_some()
+            || (self.rsa_wrapped_key.is_some() && self.audio_key.is_none())
         {
-            bail!("audio key, IV and RSA-wrapped key must be supplied together");
+            bail!("audio key and IV must be supplied together; wrapped key requires both");
         }
         if self
             .rsa_wrapped_key
@@ -193,8 +200,12 @@ pub struct Session {
 }
 
 impl Session {
-    pub async fn connect(config: SessionConfig) -> Result<Self> {
+    pub async fn connect(mut config: SessionConfig) -> Result<Self> {
         config.validate()?;
+        if let (Some(key), None) = (config.audio_key, &config.rsa_wrapped_key) {
+            config.rsa_wrapped_key =
+                Some(crypto::raop::wrap_key(&key).context("wrap RAOP audio key")?);
+        }
         let stream = timeout(
             config.request_timeout,
             TcpStream::connect(config.receiver.address),
@@ -670,7 +681,10 @@ mod tests {
         config.audio_key = Some([1; 16]);
         assert!(config.validate().is_err(), "key without IV");
         config.audio_iv = Some([2; 16]);
-        assert!(config.validate().is_err(), "key without RSA transport");
+        assert!(
+            config.validate().is_ok(),
+            "key is wrapped automatically during connect"
+        );
         config.rsa_wrapped_key = Some(vec![0; 255]);
         assert!(config.validate().is_err(), "invalid RSA block length");
         config.rsa_wrapped_key = Some(vec![0; 256]);
@@ -850,7 +864,6 @@ mod tests {
         config.receiver.address = address;
         config.audio_key = Some(key);
         config.audio_iv = Some(iv);
-        config.rsa_wrapped_key = Some(vec![0xa5; 256]);
         let mut session = Session::connect(config).await.unwrap();
         let pcm: Vec<u8> = (0..PACKET_BYTES).map(|i| (i % 251) as u8).collect();
         session.send(&pcm).await.unwrap();

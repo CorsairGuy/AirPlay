@@ -6,6 +6,7 @@ pub mod cbc;
 pub mod channel;
 pub mod ctr;
 pub mod kdf;
+pub mod raop;
 pub mod srp;
 
 pub use channel::Channel;

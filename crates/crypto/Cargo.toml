@@ -17,6 +17,8 @@ ctr.workspace = true
 num-bigint.workspace = true
 rand.workspace = true
 thiserror.workspace = true
+rsa = "0.9"
+sha1 = "0.10"
 
 [dev-dependencies]
 hex.workspace = true
