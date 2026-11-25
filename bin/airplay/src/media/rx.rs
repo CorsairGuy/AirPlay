@@ -1188,6 +1188,38 @@ mod tests {
         p.apply_volume = false;
         assert_eq!(p.output_db(-15.0), 0.0);
     }
+
+    /// Новый SETUP вытесняет прежний поток, а TEARDOWN прежнего отправителя
+    /// не должен останавливать новый.
+    #[tokio::test]
+    async fn buffered_stream_replacement_and_release() {
+        let player = Player::new(
+            audio_stream::Config {
+                device: "null".into(),
+                ..Default::default()
+            },
+            TimeSync::idle(1),
+        );
+        let first =
+            Stream::buffered(player.audio.clone(), &[1; 32], Arc::new(clock::NoTime)).unwrap();
+        first.playout().push(0, 0x1600_0000, vec![0; 8]);
+        player.replace(1, first);
+        assert_eq!(player.active_packets(), Some(1));
+
+        let second =
+            Stream::buffered(player.audio.clone(), &[2; 32], Arc::new(clock::NoTime)).unwrap();
+        player.replace(2, second);
+        assert_eq!(player.active_packets(), Some(0));
+
+        player.release(1);
+        assert_eq!(
+            player.active_packets(),
+            Some(0),
+            "TEARDOWN прежнего отправителя остановил новый поток"
+        );
+        player.release(2);
+        assert_eq!(player.active_packets(), None);
+    }
 }
 
 #[cfg(test)]

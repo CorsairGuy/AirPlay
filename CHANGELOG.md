@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fixed audio receive defects that caused silence or a stuck session: realtime UDP datagrams were truncated at 2048 bytes (an ALAC 24-bit packet is 2156), a second buffered TCP connection was not accepted while the previous one stayed open, an unknown SSRC stalled playback permanently, the packet queue and the partial-packet buffer had no bound, `recv` errors spun a busy loop, and a failed decoder was recreated on every packet. End-to-end tests in `crates/audio_stream/tests/pcm.rs` send known AAC/PCM and compare the PCM that reaches the sink; the realtime path is covered with PCM because no ALAC encoder is available, so ALAC playback still needs an iPhone check.
 - PIN pairing sends `X-Apple-Client-Name` on the initial and setup requests; callers can supply a display name or use the existing API's `AirPlay` default. Hardware validation with Apple TV remains outstanding.
 - Added an opt-in HLS VOD path: bounded HTTP(S) fetch and FFmpeg demux feed decoded frames to a host-provided `FrameSink`; AirPlay `/play`, V2 `/rate`, and `/stop` handlers are available with the `hls` feature. Live refresh, audio, pause, seek, and capability advertisement remain unsupported.
 - Moved output-selection precedence and logical-to-physical resolution into `services/coordinator`. MRP output-context decoding and its request queue now sit under the application's `remote` component; the serialized worker applies coordinator decisions to discovered, authorized media sessions.
