@@ -11,6 +11,7 @@
 
 pub mod buffered;
 pub mod buffered_link;
+pub mod buffered_session;
 pub mod continuous;
 pub mod continuous_source;
 pub mod group;
@@ -26,6 +27,7 @@ mod transport;
 
 pub use buffered::{AdtsError, BufferedSender, StreamSetup, adts_frames};
 pub use buffered_link::{BufferedLink, StreamReply};
+pub use buffered_session::{AAC_LC_44100_SSRC, BufferedConfig, BufferedSession};
 pub use local::{LocalSink, run_local};
 pub use local_pipe::LocalPcmPipe;
 pub use packet::{

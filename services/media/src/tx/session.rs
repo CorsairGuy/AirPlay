@@ -1037,7 +1037,7 @@ fn binary_plist(value: plist::Value) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-async fn verify_pairing(
+pub(crate) async fn verify_pairing(
     rtsp: &mut Rtsp,
     credentials: &PairingCredentials,
 ) -> Result<(ControlKeys, Vec<u8>)> {
