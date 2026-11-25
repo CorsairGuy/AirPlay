@@ -32,6 +32,24 @@ topology и announcement, но не текущее состояние. Пере�
 
 `cargo test -p remote` — 31 тест, все прошли. Clippy — см. итог ветки.
 
+## Аудит §6 — начатые пункты (2026-11-25)
+
+Проверено чтением кода, без запуска тестов и без устройства.
+
+| Пункт | Вердикт | Где |
+| --- | --- | --- |
+| 1 Framing | ok для пакета и кадра: длина каждого сообщения — varint-префикс, кадр канала — 32-байтовый заголовок с u32 BE | `crates/mrp/src/wire.rs:246`, `crates/mrp/src/frame.rs` |
+| 6 Подписка | ok: на `CLIENT_UPDATES_CONFIG_MESSAGE` отправляется текущее `SET_STATE_MESSAGE` (сделано в этой ветке) | `services/remote/src/mrp_service`, `remote::card` |
+| 8 Unknown fields | ok: `Node` без `prost` сохраняет неизвестные поля при пересылке; для **входящих** сообщений строгая `Node::validate` заменена на `validate_known` (неизвестное поле и несовпадение типа пропускаются), иначе новый клиент ронял бы ответ с PIN. В разобранном `ModifyOutputContextRequestMessage` поля вне 1–7 по-прежнему отбрасываются — не фатально, но и не пересылаются | `crates/mrp/src/wire.rs`, `authorization.rs:71`, `output_context.rs:54` |
+
+| 9 supportedCommands | ok: анонсируются команды 1–6 с `enabled` и `SeekToPlaybackPosition` (45) с `canScrub`; `preferredIntervals` нет, потому что команды skip не объявляются | `model::state` в `services/remote/src/model.rs` |
+| 10 PlaybackQueueRequest | ok: ответ — `SET_STATE` с текущим item, эхом запроса, `requestID` и `resolvedPlayerPath` | `model::state`, `mrp_service/server.rs` (`PLAYBACK_QUEUE_REQUEST_MESSAGE`) |
+| 11 SET_STATE errorCode | частично: успех — `errorCode 0`, отказы — 6/18/39; поля `priority` в нашей схеме нет, оно не отправляется — проверять клиентом | `mrp_service/server.rs` (`reply`) |
+| 12 Обложка | ok: при `artworkWidth`/`artworkHeight` или `returnContentItemAssetsInUserCompletion=1` отдаётся `artworkData` с реальными размерами (без ресайза) | `model::state` |
+
+Остальные пункты 2–5, 7, 13–16 **не проверены**: нужны золотые векторы D55
+и/или iPhone. Вывод по п.8 в WIRE-SPEC/SECURITY ещё не внесён.
+
 ## Что проверено на iPhone, а что только тестовым клиентом
 
 **На iPhone не проверялось ничего**: в окружении нет устройства. Все сценарии

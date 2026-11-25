@@ -126,20 +126,37 @@ impl Node {
 
     /// Сверяет типы полей со схемой, вложенные сообщения — тоже.
     pub fn validate(&self, message: &str) -> Result<(), Error> {
+        self.validate_inner(message, false, 0)
+    }
+
+    fn validate_inner(&self, message: &str, allow_unknown: bool, depth: usize) -> Result<(), Error> {
+        if depth > 64 { return Err(Error::Protobuf("слишком глубокая вложенность")); }
         for (id, value) in &self.0 {
-            let (expected, nested) = crate::schema::wire_type(message, *id)
-                .ok_or_else(|| Error::Schema(format!("нет поля {message}.{id}")))?;
+            let Some((expected, nested)) = crate::schema::wire_type(message, *id) else {
+                if allow_unknown { continue; }
+                return Err(Error::Schema(format!("нет поля {message}.{id}")));
+            };
             if value.wire_type() != expected {
+                if allow_unknown { continue; }
                 return Err(Error::Schema(format!(
                     "{message}.{id}: тип {} вместо {expected}",
                     value.wire_type()
                 )));
             }
             if let (false, Value::Bytes(raw)) = (nested.is_empty(), value) {
-                Node::parse(raw)?.validate(nested)?;
+                Node::parse(raw)?.validate_inner(nested, allow_unknown, depth + 1)?;
             }
         }
         Ok(())
+    }
+
+    /// Как [`Node::validate`], но для **входящих** сообщений: неизвестное
+    /// поле или несовпадение типа пропускается, а не отклоняет сообщение.
+    /// Клиент вправе прислать поле из новой версии — по §6 плана v12 это не
+    /// повод рвать сессию; protobuf-парсеры так же считают такое поле
+    /// неизвестным.
+    pub fn validate_known(&self, message: &str) -> Result<(), Error> {
+        self.validate_inner(message, true, 0)
     }
 
     pub fn add(&mut self, field: u32, value: Value) -> &mut Self {

@@ -206,3 +206,30 @@ pub fn decode_packet(mut data: &[u8]) -> Result<Vec<Node>> {
     }
     Ok(output)
 }
+
+#[cfg(test)]
+mod unknown_field_tests {
+    use super::{Node, decode_packet};
+
+    #[test]
+    fn unknown_fields_survive_a_round_trip() {
+        // ProtocolMessage.type = 9 (SET_STATE) и неизвестное поле 1000.
+        // Клиент вправе прислать поле из новой версии: разбор не должен
+        // падать, а поле — теряться при пересылке (план v12, §6 п.8).
+        let mut packet = vec![0x08, 0x09];
+        packet.extend_from_slice(&[0xc0, 0x3e, 0x05]);
+        let messages = decode_packet(&packet).unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].number(1), Some(9));
+        assert_eq!(messages[0].encode(), packet);
+    }
+
+    #[test]
+    fn validate_is_for_our_own_messages_only() {
+        // Строгая проверка ловит опечатку в схеме у нас, но к входящим
+        // сообщениям не применяется — иначе новое поле клиента ломало бы сессию.
+        let mut node = Node::default();
+        node.int(1, 9).int(1000, 5);
+        assert!(node.validate("ProtocolMessage").is_err());
+    }
+}

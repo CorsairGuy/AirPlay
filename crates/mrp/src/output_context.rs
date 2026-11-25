@@ -51,7 +51,7 @@ impl Request {
                 .cloned()
                 .collect(),
         )
-        .validate("ModifyOutputContextRequestMessage")?;
+        .validate_known("ModifyOutputContextRequestMessage")?;
         if body
             .number(f::ModifyOutputContextRequestMessage::r#type)
             .is_some_and(|kind| kind != 1)

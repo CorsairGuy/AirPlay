@@ -66,7 +66,9 @@ impl Response {
 }
 
 pub fn response(message: &Node) -> Result<Response, Error> {
-    message.validate("ProtocolMessage")?;
+    // Ответ приходит от клиента: новое поле из его версии не должно
+    // выглядеть ошибкой (план v12, §6 п.8).
+    message.validate_known("ProtocolMessage")?;
     if message.number(f::ProtocolMessage::r#type)
         != Some(kind::PROMPT_FOR_ROUTE_AUTHORIZATION_RESPONSE_MESSAGE as u64)
     {
@@ -125,6 +127,16 @@ mod tests {
             Some("request-id"),
         )
     }
+    #[test]
+    fn a_newer_client_field_does_not_break_the_pin_response() {
+        let mut body = Node::default();
+        body.text(1, "4821").int(99, 7);
+        let mut message = reply(&body);
+        message.int(1000, 1);
+        let decoded = response(&Node::parse(&message.encode()).unwrap()).unwrap();
+        assert_eq!(decoded.into_pin().as_deref(), Some("4821"));
+    }
+
     #[test]
     fn wire_tags_match_station_and_mediaremote_layout() {
         let prompt = prompt(&route(), "request-id").unwrap();
