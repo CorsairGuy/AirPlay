@@ -41,13 +41,15 @@ impl Fetcher {
 
     /// Fetch bounded HLS playlist bytes.
     pub async fn fetch_playlist(&self, url: &Url) -> Result<Vec<u8>, Error> {
-        self.fetch_limited(url, MAX_PLAYLIST_BYTES).await
+        self.fetch_limited(url, MAX_PLAYLIST_BYTES)
+            .await
+            .map(|(_, bytes)| bytes)
     }
 
     /// Fetch a playlist and resolve each listed URI against its URL.
     pub async fn playlist(&self, url: &Url) -> Result<Playlist, Error> {
-        let bytes = self.fetch_playlist(url).await?;
-        parse_playlist(url, &bytes)
+        let (final_url, bytes) = self.fetch_limited(url, MAX_PLAYLIST_BYTES).await?;
+        parse_playlist(&final_url, &bytes)
     }
 
     /// Follow bounded master-playlist nesting and choose a stream at or below
@@ -59,9 +61,10 @@ impl Fetcher {
     ) -> Result<(Url, Playlist), Error> {
         let mut current = url.clone();
         for _ in 0..MAX_MASTER_DEPTH {
-            let playlist = self.playlist(&current).await?;
+            let (final_url, bytes) = self.fetch_limited(&current, MAX_PLAYLIST_BYTES).await?;
+            let playlist = parse_playlist(&final_url, &bytes)?;
             if playlist.variants.is_empty() {
-                return Ok((current, playlist));
+                return Ok((final_url, playlist));
             }
             let variant = playlist
                 .variants
@@ -87,10 +90,12 @@ impl Fetcher {
 
     /// Fetch one bounded media segment.
     pub async fn fetch_segment(&self, url: &Url) -> Result<Vec<u8>, Error> {
-        self.fetch_limited(url, MAX_SEGMENT_BYTES).await
+        self.fetch_limited(url, MAX_SEGMENT_BYTES)
+            .await
+            .map(|(_, bytes)| bytes)
     }
 
-    async fn fetch_limited(&self, url: &Url, max_bytes: usize) -> Result<Vec<u8>, Error> {
+    async fn fetch_limited(&self, url: &Url, max_bytes: usize) -> Result<(Url, Vec<u8>), Error> {
         let _permit = self
             .in_flight
             .clone()
@@ -102,7 +107,7 @@ impl Fetcher {
             .map_err(|_| Error::Timeout)?
     }
 
-    async fn fetch_redirects(&self, url: &Url, max_bytes: usize) -> Result<Vec<u8>, Error> {
+    async fn fetch_redirects(&self, url: &Url, max_bytes: usize) -> Result<(Url, Vec<u8>), Error> {
         let mut current = url.clone();
         for redirect_count in 0..=MAX_REDIRECTS {
             let mut response = self
@@ -143,7 +148,7 @@ impl Fetcher {
                 }
                 body.extend_from_slice(&chunk);
             }
-            return Ok(body);
+            return Ok((current, body));
         }
         Err(Error::UnsafeRedirect)
     }
@@ -170,5 +175,48 @@ impl Resolve for PublicResolver {
             }
             Ok(Box::new(addresses.into_iter()) as Addrs)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn redirected_playlist_resolves_segments_against_final_url() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let body = "#EXTM3U\n#EXTINF:1,\nseg.ts\n#EXT-X-ENDLIST\n";
+            for response in [
+                "HTTP/1.1 302 Found\r\nLocation: /video/list.m3u8\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned(),
+                format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()),
+            ] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                assert!(stream.read(&mut request).await.unwrap() > 0);
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let fetcher = Fetcher {
+            client: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .no_proxy()
+                .build()
+                .unwrap(),
+            in_flight: Arc::new(tokio::sync::Semaphore::new(1)),
+        };
+        let url = Url::parse(&format!("http://localhost:{port}/start.m3u8")).unwrap();
+        let (final_url, playlist) = fetcher.media_playlist(&url, u64::MAX).await.unwrap();
+        assert_eq!(
+            final_url.as_str(),
+            format!("http://localhost:{port}/video/list.m3u8")
+        );
+        assert_eq!(
+            playlist.segments[0].uri.as_str(),
+            format!("http://localhost:{port}/video/seg.ts")
+        );
+        server.await.unwrap();
     }
 }
