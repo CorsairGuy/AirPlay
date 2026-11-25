@@ -60,8 +60,14 @@ fn read_ntp(b: &[u8]) -> u64 {
 }
 
 fn request() -> [u8; 32] {
+    request_with_sequence(7)
+}
+
+/// AirPlay timing request on the same clock used by timing responses.
+pub fn request_with_sequence(sequence: u16) -> [u8; 32] {
     let mut req = [0u8; 32];
-    req[..4].copy_from_slice(&[0x80, 0x80 | REQUEST, 0x00, 0x07]);
+    req[..2].copy_from_slice(&[0x80, 0x80 | REQUEST]);
+    req[2..4].copy_from_slice(&sequence.to_be_bytes());
     req[24..32].copy_from_slice(&ns_to_ntp(local_ns()));
     req
 }

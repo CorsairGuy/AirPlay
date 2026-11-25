@@ -519,7 +519,7 @@ pub fn select(device: &Device, want: Want) -> Selection {
     if !device.has_airplay {
         return refuse(
             RefusalCode::NoAirPlayRecord,
-            "устройство объявляет только _raop._tcp; RAOP-отправителя в этой сборке нет",
+            "устройство объявляет только _raop._tcp; экспериментальный RAOP-отправитель не подключён к выбору профиля",
         );
     }
     let caps = &device.capabilities;
@@ -576,7 +576,7 @@ pub fn select(device: &Device, want: Want) -> Selection {
             }
             refuse(
                 RefusalCode::SenderUnavailable,
-                "экран объявлен, но отправителя зеркалирования нет в этой сборке",
+                "экран объявлен, но экспериментальный отправитель зеркалирования не подключён к выбору профиля",
             )
         }
     }

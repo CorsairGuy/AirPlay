@@ -227,7 +227,7 @@ fn parse_sdp(body: &[u8]) -> Result<Format, SdpError> {
 }
 
 /// `RTP/AVP/UDP;unicast;mode=record;control_port=…;timing_port=…`.
-/// Порты берём свои; `interleaved` внутри RTSP-соединения не реализован.
+/// Некоторые UDP-отправители также указывают `interleaved`; транспорт при этом остаётся UDP.
 fn parse_transport(value: &str) -> Result<(), TransportError> {
     if value.trim().is_empty() {
         return Err(TransportError::Malformed);
@@ -241,9 +241,7 @@ fn parse_transport(value: &str) -> Result<(), TransportError> {
     }
     for param in lower.split(';').skip(1) {
         if let Some((key, value)) = param.split_once('=') {
-            if key.trim() == "interleaved"
-                || (key.trim() == "mode" && value.trim().trim_matches('"') != "record")
-            {
+            if key.trim() == "mode" && value.trim().trim_matches('"') != "record" {
                 return Err(TransportError::Unsupported);
             }
         }
@@ -368,7 +366,7 @@ a=rtpmap:96 AppleLossless\r\na=fmtp:96 352 0 16 40 10 14 2 255 0 0 44100\r\n";
         );
         assert_eq!(
             parse_transport("RTP/AVP/UDP;unicast;interleaved=0-1;mode=record"),
-            Err(TransportError::Unsupported)
+            Ok(())
         );
         assert_eq!(
             parse_transport("RTP/AVP/TCP;unicast;description=udp"),

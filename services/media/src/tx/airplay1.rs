@@ -4,16 +4,17 @@
 //! PCM/ALAC negotiation, plain RTSP announce/setup/record, UDP RTP audio,
 //! volume and teardown. It does not share the AirPlay 2 session/PTP engine.
 //!
-//! AES-CBC payload encryption is supported when the caller supplies the 16-byte
-//! key and IV. RSA transport of that key (`rsaaeskey`) and Apple-Challenge are
-//! not implemented, so a stock receiver that requires them needs that exchange
-//! from the caller or a future change. No hardware compatibility is claimed.
+//! AES-CBC requires a caller-supplied RSA-OAEP wrapped key. Generating that
+//! wrapped key and verifying Apple-Response are not implemented here.
+//! No hardware compatibility is claimed.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use base64::{Engine as _, engine::general_purpose::STANDARD_NO_PAD};
 use crypto::cbc::AudioCbc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
@@ -23,6 +24,14 @@ use super::{FRAMES_PER_PACKET, PACKET_BYTES, Volume};
 
 const RTP_PAYLOAD: u8 = 96;
 const RTSP_TIMEOUT: Duration = Duration::from_secs(5);
+
+struct AbortTask(tokio::task::JoinHandle<()>);
+impl Drop for AbortTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+type PacketCache = Arc<Mutex<Vec<Option<(u16, Vec<u8>)>>>>;
 
 /// Advertised RAOP `cn` codecs relevant here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -104,7 +113,11 @@ pub struct SessionConfig {
     /// Optional AES-128-CBC key/IV for the RTP payload.
     pub audio_key: Option<[u8; 16]>,
     pub audio_iv: Option<[u8; 16]>,
+    /// RSA-OAEP-SHA1 wrapping of `audio_key`, exactly one 2048-bit block.
+    pub rsa_wrapped_key: Option<Vec<u8>>,
     pub request_timeout: Duration,
+    /// Playout lead in 44.1 kHz samples; defaults to the observed two-second RAOP profile.
+    pub latency_frames: u32,
 }
 
 impl SessionConfig {
@@ -115,7 +128,9 @@ impl SessionConfig {
             volume: Volume::db(-20.0).expect("constant"),
             audio_key: None,
             audio_iv: None,
+            rsa_wrapped_key: None,
             request_timeout: RTSP_TIMEOUT,
+            latency_frames: 88_200,
         }
     }
 
@@ -126,11 +141,23 @@ impl SessionConfig {
         if self.codec == Codec::Pcm && !self.receiver.pcm {
             bail!("receiver does not advertise PCM");
         }
-        if self.audio_key.is_some() != self.audio_iv.is_some() {
-            bail!("audio key and IV must be supplied together");
+        if self.audio_key.is_some() != self.audio_iv.is_some()
+            || self.audio_key.is_some() != self.rsa_wrapped_key.is_some()
+        {
+            bail!("audio key, IV and RSA-wrapped key must be supplied together");
+        }
+        if self
+            .rsa_wrapped_key
+            .as_ref()
+            .is_some_and(|key| key.len() != 256)
+        {
+            bail!("RSA-wrapped audio key must contain 256 bytes");
         }
         if self.request_timeout.is_zero() || self.request_timeout > Duration::from_secs(60) {
             bail!("invalid RTSP timeout");
+        }
+        if self.latency_frames > 44_100 * 10 {
+            bail!("RAOP playout latency exceeds ten seconds");
         }
         if !self.volume.as_db().is_finite()
             || !(self.volume.as_db() == -144.0 || (-30.0..=0.0).contains(&self.volume.as_db()))
@@ -154,6 +181,15 @@ pub struct Session {
     config: SessionConfig,
     audio_target: SocketAddr,
     recorded: bool,
+    session_id: Option<String>,
+    control: Arc<UdpSocket>,
+    retransmit_cache: PacketCache,
+    control_task: Option<AbortTask>,
+    _timing_task: AbortTask,
+    timing_port: u16,
+    control_target: Option<SocketAddr>,
+    frames_since_sync: u32,
+    sync_sent: bool,
 }
 
 impl Session {
@@ -168,6 +204,9 @@ impl Session {
         stream.set_nodelay(true)?;
         let local = stream.local_addr()?.ip();
         let audio = UdpSocket::bind((local, 0)).await?;
+        let control = Arc::new(UdpSocket::bind((local, 0)).await?);
+        let (timing_port, _, timing_task) =
+            timesync::ntp::start(SocketAddr::new(config.receiver.address.ip(), 0))?;
         let audio_target = config.receiver.address;
         let mut session = Self {
             rtsp: stream,
@@ -183,6 +222,15 @@ impl Session {
             config,
             audio_target,
             recorded: false,
+            session_id: None,
+            control,
+            retransmit_cache: Arc::new(Mutex::new(vec![None; rtp::RETRANSMIT_CACHE_PACKETS])),
+            control_task: None,
+            _timing_task: AbortTask(timing_task),
+            timing_port,
+            control_target: None,
+            frames_since_sync: 0,
+            sync_sent: false,
         };
         let uri = format!(
             "rtsp://{}/{}",
@@ -190,22 +238,35 @@ impl Session {
         );
         // OPTIONS proves the peer is RAOP and exposes methods without changing state.
         session.request("OPTIONS", "*", &[], &[]).await?;
+        let challenge = session
+            .config
+            .audio_key
+            .map(|_| STANDARD_NO_PAD.encode(rand::random::<[u8; 16]>()));
+        let mut announce_headers = vec![("Content-Type", "application/sdp")];
+        if let Some(challenge) = &challenge {
+            announce_headers.push(("Apple-Challenge", challenge));
+        }
         session
             .request(
                 "ANNOUNCE",
                 &uri,
-                &[("Content-Type", "application/sdp")],
-                session.sdp(&uri).as_bytes(),
+                &announce_headers,
+                session.sdp(local).as_bytes(),
             )
             .await?;
         let transport = format!(
             "RTP/AVP/UDP;unicast;mode=record;control_port={};timing_port={}",
-            session.audio.local_addr()?.port(),
-            session.audio.local_addr()?.port()
+            session.control.local_addr()?.port(),
+            session.timing_port
         );
         let setup = session
             .request("SETUP", &uri, &[("Transport", &transport)], &[])
             .await?;
+        session.session_id = setup
+            .headers
+            .get("Session")
+            .map(|value| value.split(';').next().unwrap_or(value).trim().to_owned())
+            .filter(|value| !value.is_empty());
         let server_port = setup
             .headers
             .get("Transport")
@@ -218,7 +279,33 @@ impl Session {
             .filter(|port| *port != 0)
             .context("RAOP SETUP response has no valid server_port")?;
         session.audio_target = SocketAddr::new(session.config.receiver.address.ip(), server_port);
-        session.request("RECORD", &uri, &[], &[]).await?;
+        if let Some(control_port) = setup
+            .headers
+            .get("Transport")
+            .and_then(|value| {
+                value
+                    .split(';')
+                    .find_map(|part| part.trim().strip_prefix("control_port="))
+            })
+            .and_then(|value| value.parse::<u16>().ok())
+            .filter(|port| *port != 0)
+        {
+            let control = session.control.clone();
+            let cache = session.retransmit_cache.clone();
+            let peer = SocketAddr::new(session.config.receiver.address.ip(), control_port);
+            session.control_target = Some(peer);
+            session.control_task =
+                Some(AbortTask(tokio::spawn(serve_resends(control, cache, peer))));
+        }
+        let rtp_info = format!("seq={};rtptime={}", session.sequence, session.timestamp);
+        session
+            .request(
+                "RECORD",
+                &uri,
+                &[("Range", "npt=0-"), ("RTP-Info", &rtp_info)],
+                &[],
+            )
+            .await?;
         session.recorded = true;
         Ok(session)
     }
@@ -227,21 +314,31 @@ impl Session {
         self.config.codec
     }
 
-    fn sdp(&self, uri: &str) -> String {
+    fn sdp(&self, local: std::net::IpAddr) -> String {
+        let family = if local.is_ipv4() { "IP4" } else { "IP6" };
+        let id = self.ssrc;
         let fmtp = match self.config.codec {
             Codec::Alac => {
                 "a=rtpmap:96 AppleLossless\r\na=fmtp:96 352 0 16 40 10 14 2 255 0 0 44100\r\n"
             }
             Codec::Pcm => "a=rtpmap:96 L16/44100/2\r\n",
         };
+        let encryption = match (&self.config.rsa_wrapped_key, self.config.audio_iv) {
+            (Some(key), Some(iv)) => format!(
+                "a=rsaaeskey:{}\r\na=aesiv:{}\r\n",
+                STANDARD_NO_PAD.encode(key),
+                STANDARD_NO_PAD.encode(iv)
+            ),
+            _ => String::new(),
+        };
         format!(
             "v=0\r\n\
-             o=iTunes {uri} 0 IN IP4 127.0.0.1\r\n\
+             o=iTunes {id} 0 IN {family} {local}\r\n\
              s=iTunes\r\n\
-             c=IN IP4 127.0.0.1\r\n\
+             c=IN {family} {local}\r\n\
              t=0 0\r\n\
              m=audio 0 RTP/AVP 96\r\n\
-             {fmtp}"
+             {fmtp}{encryption}"
         )
     }
 
@@ -255,6 +352,9 @@ impl Session {
         let mut req = rtsp::Request::new(method, uri, "RTSP/1.0");
         req.headers.insert("CSeq", self.cseq.to_string());
         req.headers.insert("User-Agent", "airplay-raop/1");
+        if let Some(session_id) = &self.session_id {
+            req.headers.insert("Session", session_id.clone());
+        }
         for (name, value) in headers {
             req.headers.insert(*name, *value);
         }
@@ -282,6 +382,7 @@ impl Session {
             buffer.extend_from_slice(&chunk[..n]);
         };
         self.cseq += 1;
+        // Some RAOP receivers return an incorrect CSeq (also tolerated by OwnTone).
         if response.status != 200 {
             bail!("RAOP {method} rejected with {}", response.status);
         }
@@ -290,11 +391,31 @@ impl Session {
 
     /// Send one 352-frame packet. `pcm` is interleaved 16-bit big-endian.
     pub async fn send(&mut self, pcm: &[u8]) -> Result<()> {
+        self.send_at(pcm, timesync::ntp::now()).await
+    }
+
+    /// Send a packet anchored to its producer's NTP timestamp. The caller must
+    /// pace packets and supply timestamps on the same clock as `timesync::ntp`.
+    pub async fn send_at(&mut self, pcm: &[u8], produced_ntp: u64) -> Result<()> {
         if !self.recorded {
             bail!("RAOP session is not recording");
         }
         if pcm.len() != PACKET_BYTES {
             bail!("RAOP packet must be {PACKET_BYTES} bytes");
+        }
+        if !self.sync_sent || self.frames_since_sync >= 44_100 {
+            let target = self
+                .control_target
+                .context("RAOP receiver omitted control_port; cannot synchronize")?;
+            let sync = rtp::sync_packet(
+                self.timestamp,
+                self.config.latency_frames,
+                produced_ntp,
+                !self.sync_sent,
+            );
+            self.control.send_to(&sync, target).await?;
+            self.sync_sent = true;
+            self.frames_since_sync = 0;
         }
         let payload = match self.config.codec {
             Codec::Pcm => pcm.to_vec(),
@@ -310,9 +431,15 @@ impl Session {
         packet.extend_from_slice(&self.timestamp.to_be_bytes());
         packet.extend_from_slice(&self.ssrc.to_be_bytes());
         packet.extend_from_slice(&payload);
+        self.retransmit_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            [self.sequence as usize % rtp::RETRANSMIT_CACHE_PACKETS] =
+            Some((self.sequence, packet.clone()));
         self.audio.send_to(&packet, self.audio_target).await?;
         self.sequence = self.sequence.wrapping_add(1);
         self.timestamp = self.timestamp.wrapping_add(FRAMES_PER_PACKET as u32);
+        self.frames_since_sync += FRAMES_PER_PACKET as u32;
         Ok(())
     }
 
@@ -337,6 +464,41 @@ impl Session {
         self.recorded = false;
         let _ = self.rtsp.shutdown().await;
         result.map(|_| ())
+    }
+}
+
+async fn serve_resends(socket: Arc<UdpSocket>, cache: PacketCache, peer: SocketAddr) {
+    let mut input = [0u8; 128];
+    while let Ok((len, source)) = socket.recv_from(&mut input).await {
+        if source != peer {
+            continue;
+        }
+        let Some(request) = rtp::RetransmitRequest::parse(&input[..len]) else {
+            continue;
+        };
+        let replies: Vec<Vec<u8>> = {
+            let cache = cache.lock().unwrap_or_else(|e| e.into_inner());
+            (0..usize::from(request.count).min(rtp::RETRANSMIT_CACHE_PACKETS))
+                .filter_map(|offset| {
+                    let sequence = request.first_sequence.wrapping_add(offset as u16);
+                    let (cached, packet) =
+                        cache[sequence as usize % rtp::RETRANSMIT_CACHE_PACKETS].as_ref()?;
+                    if *cached != sequence {
+                        return None;
+                    }
+                    let mut reply = Vec::with_capacity(packet.len() + 4);
+                    reply.extend_from_slice(&[0x80, 0xd6]);
+                    reply.extend_from_slice(&sequence.to_be_bytes());
+                    reply.extend_from_slice(packet);
+                    Some(reply)
+                })
+                .collect()
+        };
+        for reply in replies {
+            if socket.send_to(&reply, peer).await.is_err() {
+                break;
+            }
+        }
     }
 }
 
@@ -413,6 +575,38 @@ pub fn receiver_from_service(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn retransmit_uses_original_packet_and_ignores_other_peers() {
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let destination = socket.local_addr().unwrap();
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let stranger = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let cache: PacketCache = Arc::new(Mutex::new(vec![None; rtp::RETRANSMIT_CACHE_PACKETS]));
+        let packet = vec![0x80, 0x60, 0, 9, 1, 2, 3];
+        cache.lock().unwrap()[9] = Some((9, packet.clone()));
+        let task = AbortTask(tokio::spawn(serve_resends(
+            socket,
+            cache,
+            peer.local_addr().unwrap(),
+        )));
+        let request = [0x80, 0xd5, 0, 1, 0, 9, 0, 1];
+        stranger.send_to(&request, destination).await.unwrap();
+        let mut buf = [0u8; 64];
+        assert!(
+            timeout(Duration::from_millis(50), stranger.recv_from(&mut buf))
+                .await
+                .is_err()
+        );
+        peer.send_to(&request, destination).await.unwrap();
+        let (n, _) = timeout(Duration::from_secs(2), peer.recv_from(&mut buf))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(&buf[..4], &[0x80, 0xd6, 0, 9]);
+        assert_eq!(&buf[4..n], &packet);
+        drop(task);
+    }
     use std::net::Ipv4Addr;
 
     fn raop(cn: &str, et: &str) -> Receiver {
@@ -476,6 +670,10 @@ mod tests {
         config.audio_key = Some([1; 16]);
         assert!(config.validate().is_err(), "key without IV");
         config.audio_iv = Some([2; 16]);
+        assert!(config.validate().is_err(), "key without RSA transport");
+        config.rsa_wrapped_key = Some(vec![0; 255]);
+        assert!(config.validate().is_err(), "invalid RSA block length");
+        config.rsa_wrapped_key = Some(vec![0; 256]);
         assert!(config.validate().is_ok());
     }
 
@@ -510,6 +708,8 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let audio = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let audio_address = audio.local_addr().unwrap();
+        let control = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let control_address = control.local_addr().unwrap();
         let key = [7u8; 16];
         let iv = [9u8; 16];
 
@@ -519,6 +719,7 @@ mod tests {
             let mut volume = None;
             let mut sdp = None;
             let mut buffer = Vec::new();
+            let mut initial_rtp = None;
             for _ in 0..5 {
                 let req = loop {
                     if let Some(req) = rtsp::decode_request(&mut buffer).unwrap() {
@@ -530,7 +731,16 @@ mod tests {
                     buffer.extend_from_slice(&chunk[..n]);
                 };
                 methods.push(req.method.clone());
+                if req.method == "RECORD" || req.method == "SET_PARAMETER" {
+                    assert_eq!(req.headers.get("Session"), Some("test-session"));
+                }
+                if req.method == "RECORD" {
+                    assert_eq!(req.headers.get("Range"), Some("npt=0-"));
+                    initial_rtp = Some(req.headers.get("RTP-Info").unwrap().to_owned());
+                }
                 if req.method == "ANNOUNCE" {
+                    let challenge = req.headers.get("Apple-Challenge").unwrap();
+                    assert_eq!(STANDARD_NO_PAD.decode(challenge).unwrap().len(), 16);
                     sdp = Some(String::from_utf8(req.body.clone()).unwrap());
                 }
                 if req.method == "SET_PARAMETER" {
@@ -538,12 +748,39 @@ mod tests {
                 }
                 let mut response = rtsp::Response::to(&req, 200);
                 if req.method == "SETUP" {
+                    let transport = req.headers.get("Transport").unwrap();
+                    let port = |name: &str| {
+                        transport
+                            .split(';')
+                            .find_map(|part| part.strip_prefix(name))
+                            .unwrap()
+                            .parse::<u16>()
+                            .unwrap()
+                    };
+                    let timing_port = port("timing_port=");
+                    assert_ne!(timing_port, port("control_port="));
+                    let timing = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+                    let request = timesync::ntp::request_with_sequence(12);
+                    timing
+                        .send_to(&request, (Ipv4Addr::LOCALHOST, timing_port))
+                        .await
+                        .unwrap();
+                    let mut reply = [0u8; 64];
+                    let (n, _) = timeout(Duration::from_secs(2), timing.recv_from(&mut reply))
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!((n, reply[1]), (32, 0xd3));
+                    assert_eq!(&reply[8..16], &request[24..32]);
+                    response
+                        .headers
+                        .insert("Session", "test-session;timeout=60");
                     response.headers.insert(
                         "Transport",
                         format!(
                             "RTP/AVP/UDP;unicast;server_port={};control_port={};timing_port={}",
                             audio_address.port(),
-                            audio_address.port(),
+                            control_address.port(),
                             audio_address.port()
                         ),
                     );
@@ -552,6 +789,22 @@ mod tests {
                 response.encode(&mut wire);
                 tcp.write_all(&wire).await.unwrap();
             }
+            let mut sync = [0u8; 20];
+            let (n, _) = timeout(Duration::from_secs(2), control.recv_from(&mut sync))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!((n, sync[0], sync[1]), (20, 0x90, 0xd4));
+            let rtp_time = u32::from_be_bytes(sync[16..20].try_into().unwrap());
+            assert_eq!(
+                u32::from_be_bytes(sync[4..8].try_into().unwrap()),
+                rtp_time.wrapping_sub(88_200)
+            );
+            assert!(
+                initial_rtp
+                    .unwrap()
+                    .ends_with(&format!("rtptime={rtp_time}"))
+            );
             // Two audio packets, decrypted with the caller-supplied key/IV.
             let audio = audio.into_std().unwrap();
             audio.set_nonblocking(false).unwrap();
@@ -584,6 +837,7 @@ mod tests {
                 buffer.extend_from_slice(&chunk[..n]);
             };
             assert_eq!(req.method, "TEARDOWN");
+            assert_eq!(req.headers.get("Session"), Some("test-session"));
             methods.push(req.method.clone());
             let response = rtsp::Response::to(&req, 200);
             let mut wire = Vec::new();
@@ -596,6 +850,7 @@ mod tests {
         config.receiver.address = address;
         config.audio_key = Some(key);
         config.audio_iv = Some(iv);
+        config.rsa_wrapped_key = Some(vec![0xa5; 256]);
         let mut session = Session::connect(config).await.unwrap();
         let pcm: Vec<u8> = (0..PACKET_BYTES).map(|i| (i % 251) as u8).collect();
         session.send(&pcm).await.unwrap();
@@ -623,6 +878,20 @@ mod tests {
         );
         assert!(sdp.contains("m=audio 0 RTP/AVP 96"));
         assert!(sdp.contains("AppleLossless"));
+        let encoded_key = sdp
+            .lines()
+            .find_map(|line| line.strip_prefix("a=rsaaeskey:"))
+            .unwrap();
+        let encoded_iv = sdp
+            .lines()
+            .find_map(|line| line.strip_prefix("a=aesiv:"))
+            .unwrap();
+        assert_eq!(STANDARD_NO_PAD.decode(encoded_key).unwrap().len(), 256);
+        assert_eq!(STANDARD_NO_PAD.decode(encoded_iv).unwrap(), iv);
+        assert!(
+            sdp.lines()
+                .any(|line| line.starts_with("o=iTunes ") && !line.contains("rtsp://"))
+        );
         assert_eq!(volume, "volume: -12.000000\r\n");
         assert_eq!(packets.len(), 2);
         assert_eq!(alac_escape_frame(&pcm).unwrap(), packets[0]);

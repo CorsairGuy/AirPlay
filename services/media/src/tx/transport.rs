@@ -12,6 +12,17 @@ use tokio::{
 // the generic RTSP codec's limit, including when the header never terminates.
 const MAX_BUFFER: usize = 1024 * 1024;
 
+#[derive(Debug)]
+pub(crate) struct ReceiverStatus(pub u16);
+
+impl std::fmt::Display for ReceiverStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "receiver returned status {}", self.0)
+    }
+}
+
+impl std::error::Error for ReceiverStatus {}
+
 pub(crate) struct Connection {
     stream: TcpStream,
     channel: Option<Channel>,
@@ -83,13 +94,13 @@ impl Connection {
             req.encode(&mut bytes);
             self.send(&bytes).await?;
             let response = self.response().await?;
-            if response.status != 200 {
-                bail!("receiver returned status {}", response.status);
-            }
             if let Some(expected) = req.headers.get("CSeq") {
                 if response.headers.get("CSeq") != Some(expected) {
                     bail!("receiver response CSeq does not match request");
                 }
+            }
+            if response.status != 200 {
+                return Err(ReceiverStatus(response.status).into());
             }
             Ok(response)
         })

@@ -107,6 +107,7 @@ impl Cache {
 pub struct Service {
     sink: Arc<dyn Sink>,
     cache: Mutex<Cache>,
+    pub(crate) owner: Mutex<Option<u64>>,
 }
 
 impl Service {
@@ -114,6 +115,7 @@ impl Service {
         Arc::new(Self {
             sink,
             cache: Mutex::new(Cache::new()),
+            owner: Mutex::new(None),
         })
     }
 

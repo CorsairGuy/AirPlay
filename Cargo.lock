@@ -1258,6 +1258,7 @@ dependencies = [
  "anyhow",
  "audio",
  "audio_stream",
+ "base64 0.22.1",
  "clock",
  "codec",
  "coordinator",

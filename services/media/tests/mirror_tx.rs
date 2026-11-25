@@ -65,7 +65,16 @@ impl Conn {
     }
 
     async fn reply(&mut self, request: &rtsp::Request, body: Vec<u8>) -> Result<()> {
-        let mut response = rtsp::Response::to(request, 200);
+        self.reply_status(request, 200, body).await
+    }
+
+    async fn reply_status(
+        &mut self,
+        request: &rtsp::Request,
+        status: u16,
+        body: Vec<u8>,
+    ) -> Result<()> {
+        let mut response = rtsp::Response::to(request, status);
         response.body = body;
         let mut plain = Vec::new();
         response.encode(&mut plain);
@@ -139,6 +148,8 @@ struct Fixture {
     audio_socket: UdpSocket,
     audio_control_socket: UdpSocket,
     video_listener: TcpListener,
+    event_listener: TcpListener,
+    timing_socket: UdpSocket,
 }
 
 async fn serve_round(
@@ -157,6 +168,8 @@ async fn serve_round(
     let mut video_id = None;
     let mut audio_stream_id = None;
     let mut video_latency = 0i64;
+    let mut _event_connection = None;
+    let mut rejected_modern = false;
 
     loop {
         let request = conn.request().await?;
@@ -189,6 +202,16 @@ async fn serve_round(
                     .and_then(|v| v.as_unsigned_integer())
                     .ok_or_else(|| anyhow!("stream without type"))?;
                 if kind == 96 {
+                    if close_after_first_frame && !rejected_modern {
+                        assert!(stream.contains_key("streamConnections"));
+                        rejected_modern = true;
+                        conn.reply_status(&request, 415, Vec::new()).await?;
+                        continue;
+                    }
+                    if rejected_modern {
+                        assert!(!stream.contains_key("streamConnections"));
+                        assert!(stream.contains_key("controlPort"));
+                    }
                     // Первый SETUP: сессия и звук экрана.
                     assert_eq!(
                         body.get("timingProtocol").and_then(|v| v.as_string()),
@@ -216,25 +239,62 @@ async fn serve_round(
                     audio_stream_id = stream
                         .get("streamConnectionID")
                         .and_then(|v| v.as_unsigned_integer());
-                    let reply = dictionary(vec![(
-                        "streams",
-                        plist::Value::Array(vec![plist::Value::Dictionary(dictionary(vec![
-                            ("type", plist::Value::Integer(96u64.into())),
-                            (
-                                "dataPort",
-                                plist::Value::Integer(
-                                    (audio_socket.local_addr()?.port() as u64).into(),
-                                ),
+                    let reply = dictionary(vec![
+                        (
+                            "timingPort",
+                            plist::Value::Integer(
+                                (fixture.timing_socket.local_addr()?.port() as u64).into(),
                             ),
-                            (
-                                "controlPort",
-                                plist::Value::Integer(
-                                    (audio_control_socket.local_addr()?.port() as u64).into(),
-                                ),
+                        ),
+                        ("skipRecord", plist::Value::Boolean(close_after_first_frame)),
+                        (
+                            "eventPort",
+                            plist::Value::Integer(
+                                (fixture.event_listener.local_addr()?.port() as u64).into(),
                             ),
-                        ]))]),
-                    )]);
+                        ),
+                        (
+                            "streams",
+                            plist::Value::Array(vec![plist::Value::Dictionary(dictionary(vec![
+                                ("type", plist::Value::Integer(96u64.into())),
+                                (
+                                    "dataPort",
+                                    plist::Value::Integer(
+                                        (audio_socket.local_addr()?.port() as u64).into(),
+                                    ),
+                                ),
+                                (
+                                    "controlPort",
+                                    plist::Value::Integer(
+                                        (audio_control_socket.local_addr()?.port() as u64).into(),
+                                    ),
+                                ),
+                            ]))]),
+                        ),
+                    ]);
                     conn.reply(&request, binary(reply)).await?;
+                    let mut timing_packet = [0u8; 64];
+                    let expected_port = body["timingPort"].as_unsigned_integer().unwrap();
+                    let (n, peer) = tokio::time::timeout(Duration::from_secs(2), async {
+                        loop {
+                            let (n, peer) =
+                                fixture.timing_socket.recv_from(&mut timing_packet).await?;
+                            if peer.port() as u64 == expected_port {
+                                break Ok::<_, std::io::Error>((n, peer));
+                            }
+                        }
+                    })
+                    .await??;
+                    assert_eq!((n, timing_packet[1]), (32, 0xd2));
+                    assert_eq!(peer.port() as u64, expected_port);
+                    _event_connection = Some(
+                        tokio::time::timeout(
+                            Duration::from_secs(2),
+                            fixture.event_listener.accept(),
+                        )
+                        .await??
+                        .0,
+                    );
                 } else if kind == 110 {
                     assert!(shared.is_some(), "video SETUP before pair-verify");
                     assert_eq!(
@@ -263,6 +323,9 @@ async fn serve_round(
                         ]))]),
                     )]);
                     conn.reply(&request, binary(reply)).await?;
+                    if close_after_first_frame {
+                        break;
+                    }
                 } else {
                     bail!("unexpected stream type {kind}");
                 }
@@ -374,6 +437,8 @@ async fn mirror_sender_pairs_sets_up_streams_and_reconnects() {
         audio_socket: UdpSocket::bind("127.0.0.1:0").await.unwrap(),
         audio_control_socket: UdpSocket::bind("127.0.0.1:0").await.unwrap(),
         video_listener: TcpListener::bind("127.0.0.1:0").await.unwrap(),
+        event_listener: TcpListener::bind("127.0.0.1:0").await.unwrap(),
+        timing_socket: UdpSocket::bind("127.0.0.1:0").await.unwrap(),
     };
     fixture
         .store

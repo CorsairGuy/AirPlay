@@ -27,11 +27,18 @@ use pair::hap::{Accessory, ControllerVerify};
 use rand::RngCore;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpStream, UdpSocket};
-use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
 use crate::tx::session::{Identity, PairingCredentials};
-use crate::tx::transport::{Connection, Rtsp};
+use crate::tx::transport::{Connection, ReceiverStatus, Rtsp};
+
+struct AbortTask(JoinHandle<()>);
+
+impl Drop for AbortTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
 
 pub const VIDEO_HEADER_LEN: usize = 128;
 /// RTP payload type кадров звука зеркалирования.
@@ -144,7 +151,9 @@ pub struct MirrorSession {
     audio_nonce: u64,
     audio_seq: u16,
     session_uuid: String,
-    ntp_task: Option<JoinHandle<()>>,
+    ntp_task: Option<AbortTask>,
+    probe_task: Option<AbortTask>,
+    event_task: Option<AbortTask>,
     stopped: bool,
 }
 
@@ -179,6 +188,7 @@ impl MirrorSession {
         );
 
         let mut video_key = None;
+        let mut event_keys = None;
         let mut audio_key = [0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut audio_key);
         match &config.auth {
@@ -197,6 +207,7 @@ impl MirrorSession {
                 let shared = *verify
                     .session_key()
                     .context("pair-verify did not produce a shared secret")?;
+                event_keys = Some(ControlKeys::controller_events(&shared));
                 rtsp.conn.encrypt(keys);
                 video_key = Some(hkdf_sha512(
                     &shared,
@@ -209,8 +220,8 @@ impl MirrorSession {
 
         let timing = UdpSocket::bind((local_ip, 0)).await?;
         let timing_port = timing.local_addr()?.port();
-        let timing = Arc::new(Mutex::new(timing));
-        let ntp_task = Some(tokio::spawn(ntp_responder(timing.clone())));
+        let timing = Arc::new(timing);
+        let ntp_task = Some(AbortTask(tokio::spawn(ntp_responder(timing.clone()))));
 
         // Сокеты звука нужны до SETUP: локальный порт RTCP уходит в дескриптор.
         let audio = UdpSocket::bind((local_ip, 0)).await?;
@@ -256,13 +267,58 @@ impl MirrorSession {
             .request(
                 "SETUP",
                 None,
-                binary_plist(audio_setup)?,
+                binary_plist(audio_setup.clone())?,
                 Some("application/x-apple-binary-plist"),
                 &[],
             )
-            .await
-            .context("audio SETUP")?;
+            .await;
+        let response = match response {
+            Ok(response) => response,
+            Err(error)
+                if error
+                    .downcast_ref::<ReceiverStatus>()
+                    .is_some_and(|status| {
+                        matches!(status.0, 400 | 406 | 415 | 455 | 500 | 501)
+                    }) =>
+            {
+                let mut alternate = audio_setup;
+                let stream = alternate
+                    .get_mut("streams")
+                    .and_then(|v| v.as_array_mut())
+                    .and_then(|v| v.first_mut())
+                    .and_then(|v| v.as_dictionary_mut())
+                    .context("audio descriptor missing")?;
+                stream.remove("streamConnections");
+                stream.insert(
+                    "controlPort".into(),
+                    plist::Value::Integer((audio_control_port as u64).into()),
+                );
+                rtsp.request(
+                    "SETUP",
+                    None,
+                    binary_plist(alternate)?,
+                    Some("application/x-apple-binary-plist"),
+                    &[],
+                )
+                .await
+                .context("alternate audio SETUP")?
+            }
+            Err(error) => return Err(error.context("audio SETUP")),
+        };
         let response = plist::Value::from_reader(std::io::Cursor::new(response.body))?;
+        let mut probe_task = start_timing_probes(&response, config.endpoint, timing.clone())?;
+        let mut skip_record = response
+            .as_dictionary()
+            .and_then(|d| d.get("skipRecord"))
+            .and_then(|v| v.as_boolean())
+            .unwrap_or(false);
+        let mut event_task = connect_event(
+            &response,
+            config.endpoint,
+            config.request_timeout,
+            event_keys.clone(),
+        )
+        .await?;
         let audio_stream = response
             .as_dictionary()
             .and_then(|d| d.get("streams"))
@@ -302,6 +358,23 @@ impl MirrorSession {
             .await
             .context("video SETUP")?;
         let response = plist::Value::from_reader(std::io::Cursor::new(response.body))?;
+        if probe_task.is_none() {
+            probe_task = start_timing_probes(&response, config.endpoint, timing.clone())?;
+        }
+        skip_record |= response
+            .as_dictionary()
+            .and_then(|d| d.get("skipRecord"))
+            .and_then(|v| v.as_boolean())
+            .unwrap_or(false);
+        if event_task.is_none() {
+            event_task = connect_event(
+                &response,
+                config.endpoint,
+                config.request_timeout,
+                event_keys,
+            )
+            .await?;
+        }
         let video_stream = response
             .as_dictionary()
             .and_then(|d| d.get("streams"))
@@ -320,19 +393,21 @@ impl MirrorSession {
         .context("mirror video connect")?;
         video.set_nodelay(true)?;
 
-        rtsp.request(
-            "RECORD",
-            None,
-            Vec::new(),
-            None,
-            &[
-                ("Session", session_uuid.clone()),
-                ("Range", "npt=0-".into()),
-                ("RTP-Info", "seq=0;rtptime=0".into()),
-            ],
-        )
-        .await
-        .context("RECORD")?;
+        if !skip_record {
+            rtsp.request(
+                "RECORD",
+                None,
+                Vec::new(),
+                None,
+                &[
+                    ("Session", session_uuid.clone()),
+                    ("Range", "npt=0-".into()),
+                    ("RTP-Info", "seq=0;rtptime=0".into()),
+                ],
+            )
+            .await
+            .context("RECORD")?;
+        }
 
         audio
             .connect((config.endpoint.ip(), audio_data_port))
@@ -355,6 +430,8 @@ impl MirrorSession {
             audio_seq: 0,
             session_uuid,
             ntp_task,
+            probe_task,
+            event_task,
             stopped: false,
         })
     }
@@ -532,8 +609,10 @@ impl MirrorSession {
         }
         self.stopped = true;
         if let Some(task) = self.ntp_task.take() {
-            task.abort();
+            drop(task);
         }
+        self.event_task.take();
+        self.probe_task.take();
         let result = self
             .rtsp
             .request(
@@ -552,8 +631,199 @@ impl MirrorSession {
 impl Drop for MirrorSession {
     fn drop(&mut self) {
         if let Some(task) = self.ntp_task.take() {
-            task.abort();
+            drop(task);
         }
+    }
+}
+
+async fn connect_event(
+    response: &plist::Value,
+    endpoint: SocketAddr,
+    deadline: Duration,
+    keys: Option<ControlKeys>,
+) -> Result<Option<AbortTask>> {
+    let Some(value) = response.as_dictionary().and_then(|d| d.get("eventPort")) else {
+        return Ok(None);
+    };
+    let port = value
+        .as_unsigned_integer()
+        .and_then(|v| u16::try_from(v).ok())
+        .context("invalid eventPort")?;
+    if port == 0 {
+        return Ok(None);
+    }
+    let socket = tokio::time::timeout(deadline, TcpStream::connect((endpoint.ip(), port)))
+        .await
+        .context("event connect deadline")?
+        .context("event connect")?;
+    let mut conn = Connection::new(socket);
+    if let Some(keys) = keys {
+        conn.encrypt(keys);
+    }
+    Ok(Some(AbortTask(tokio::spawn(async move {
+        while let Ok(request) = conn.event_request().await {
+            if request.headers.get("CSeq").is_none() {
+                break;
+            }
+            let response = rtsp::Response::to(&request, 200);
+            let mut bytes = Vec::new();
+            response.encode(&mut bytes);
+            if conn.send(&bytes).await.is_err() {
+                break;
+            }
+        }
+    }))))
+}
+
+fn start_timing_probes(
+    response: &plist::Value,
+    endpoint: SocketAddr,
+    socket: Arc<UdpSocket>,
+) -> Result<Option<AbortTask>> {
+    let Some(value) = response.as_dictionary().and_then(|d| d.get("timingPort")) else {
+        return Ok(None);
+    };
+    let port = value
+        .as_unsigned_integer()
+        .and_then(|v| u16::try_from(v).ok())
+        .context("invalid timingPort")?;
+    if port == 0 {
+        return Ok(None);
+    }
+    let peer = SocketAddr::new(endpoint.ip(), port);
+    Ok(Some(AbortTask(tokio::spawn(async move {
+        for sequence in 1..=3 {
+            if socket
+                .send_to(&timesync::ntp::request_with_sequence(sequence), peer)
+                .await
+                .is_err()
+            {
+                break;
+            }
+            if sequence != 3 {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }))))
+}
+
+#[cfg(test)]
+mod event_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn zero_optional_ports_are_ignored() {
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let endpoint = socket.local_addr().unwrap();
+        let response = plist::Value::Dictionary(dictionary(vec![
+            ("eventPort", plist::Value::Integer(0u64.into())),
+            ("timingPort", plist::Value::Integer(0u64.into())),
+        ]));
+        assert!(
+            connect_event(&response, endpoint, Duration::from_secs(1), None)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            start_timing_probes(&response, endpoint, socket)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn encrypted_event_requests_are_acknowledged() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let shared = [42u8; 32];
+        let response = plist::Value::Dictionary(dictionary(vec![(
+            "eventPort",
+            plist::Value::Integer((endpoint.port() as u64).into()),
+        )]));
+        let task = connect_event(
+            &response,
+            endpoint,
+            Duration::from_secs(2),
+            Some(ControlKeys::controller_events(&shared)),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut channel = crypto::Channel::new(ControlKeys::accessory_events(&shared));
+        let mut request = rtsp::Request::new("POST", "/command", "RTSP/1.0");
+        request.headers.insert("CSeq", "17");
+        let mut plain = Vec::new();
+        request.encode(&mut plain);
+        let mut wire = Vec::new();
+        channel.seal(&plain, &mut wire);
+        socket.write_all(&wire).await.unwrap();
+        let mut size = [0u8; 2];
+        tokio::time::timeout(Duration::from_secs(2), socket.read_exact(&mut size))
+            .await
+            .unwrap()
+            .unwrap();
+        let mut raw = size.to_vec();
+        raw.resize(2 + u16::from_le_bytes(size) as usize + 16, 0);
+        socket.read_exact(&mut raw[2..]).await.unwrap();
+        let mut answer = Vec::new();
+        channel.open(&mut raw, &mut answer).unwrap();
+        let reply = rtsp::decode_response(&mut answer).unwrap().unwrap();
+        assert_eq!(reply.status, 200);
+        assert_eq!(reply.headers.get("CSeq"), Some("17"));
+        drop(task);
+    }
+
+    #[tokio::test]
+    async fn timing_responder_supports_airplay_requests() {
+        let timing = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let destination = timing.local_addr().unwrap();
+        let task = AbortTask(tokio::spawn(ntp_responder(Arc::new(timing))));
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut request = [0u8; 32];
+        request[..4].copy_from_slice(&[0x80, 0xd2, 0, 7]);
+        request[24..32].copy_from_slice(&123456u64.to_be_bytes());
+        peer.send_to(&request, destination).await.unwrap();
+        let mut response = [0u8; 64];
+        let (len, _) = tokio::time::timeout(Duration::from_secs(2), peer.recv_from(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(len, 32);
+        assert_eq!(response[1], 0xd3);
+        assert_eq!(&response[8..16], &request[24..32]);
+        drop(task);
+    }
+
+    #[tokio::test]
+    async fn timing_probes_use_advertised_port_and_shared_clock() {
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = peer.local_addr().unwrap();
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let source = socket.local_addr().unwrap();
+        let response = plist::Value::Dictionary(dictionary(vec![(
+            "timingPort",
+            plist::Value::Integer((endpoint.port() as u64).into()),
+        )]));
+        let task = start_timing_probes(&response, endpoint, socket)
+            .unwrap()
+            .unwrap();
+        for sequence in 1u16..=3 {
+            let mut packet = [0u8; 64];
+            let (n, from) =
+                tokio::time::timeout(Duration::from_secs(2), peer.recv_from(&mut packet))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!((n, from), (32, source));
+            assert_eq!(&packet[..2], &[0x80, 0xd2]);
+            assert_eq!(u16::from_be_bytes([packet[2], packet[3]]), sequence);
+            assert_ne!(&packet[24..32], &[0; 8]);
+        }
+        drop(task);
     }
 }
 
@@ -694,16 +964,17 @@ fn uuid_v4() -> String {
 
 /// Минимальный NTP-ответчик на `timingPort`: приёмник проверяет по нему
 /// доступность часов отправителя. Движок NTP не изменяется.
-async fn ntp_responder(socket: Arc<Mutex<UdpSocket>>) {
+async fn ntp_responder(socket: Arc<UdpSocket>) {
     let mut buf = [0u8; 128];
     loop {
-        let (n, peer) = {
-            let socket = socket.lock().await;
-            match socket.recv_from(&mut buf).await {
-                Ok(value) => value,
-                Err(_) => return,
-            }
+        let (n, peer) = match socket.recv_from(&mut buf).await {
+            Ok(value) => value,
+            Err(_) => return,
         };
+        if let Some(reply) = timesync::ntp::reply(&buf[..n]) {
+            let _ = socket.send_to(&reply, peer).await;
+            continue;
+        }
         if n < 48 || buf[0] & 0x07 != 3 {
             continue;
         }
@@ -717,7 +988,6 @@ async fn ntp_responder(socket: Arc<Mutex<UdpSocket>>) {
         reply[24..32].copy_from_slice(&buf[40..48]);
         reply[32..40].copy_from_slice(&now.to_be_bytes());
         reply[40..48].copy_from_slice(&now.to_be_bytes());
-        let socket = socket.lock().await;
         let _ = socket.send_to(&reply, peer).await;
     }
 }

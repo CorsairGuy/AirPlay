@@ -25,6 +25,7 @@ hls = { workspace = true, optional = true }
 video = { workspace = true, optional = true }
 coordinator.workspace = true
 anyhow.workspace = true
+base64 = "0.22"
 clock.workspace = true
 tokio = { workspace = true, features = ["process"] }
 plist.workspace = true

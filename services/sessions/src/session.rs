@@ -176,6 +176,7 @@ impl SessionGroup for Context {
 
 pub struct Session {
     ctx: Arc<Context>,
+    photo_owner: u64,
     peer: String,
     /// Сырые байты из сокета (шифротекст, если канал зашифрован).
     wire: Vec<u8>,
@@ -202,6 +203,10 @@ impl Session {
             session_group: ctx.clone(),
         };
         Self {
+            photo_owner: {
+                static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            },
             media: Media::new(&media_ctx, local, peer.ip()),
             peer: peer.to_string(),
             ctx,
@@ -304,12 +309,19 @@ impl Session {
             ("PUT" | "DELETE", "/photo") if self.ctx.require_pin && self.channel.is_none() => {
                 (Response::to(req, 403), None)
             }
+            ("POST", "/stop") if self.ctx.require_pin && self.channel.is_none() => {
+                (Response::to(req, 403), None)
+            }
             ("PUT", "/photo") => (self.photo_put(req), None),
             ("DELETE", "/photo") => (self.photo_delete(req), None),
             ("GET", "/slideshow-features") => (self.slideshow_features(req), None),
             ("POST", "/stop") => {
                 if let Some(photo) = &self.ctx.photo {
-                    photo.clear();
+                    let mut owner = photo.owner.lock().unwrap_or_else(|e| e.into_inner());
+                    if *owner == Some(self.photo_owner) {
+                        photo.clear();
+                        *owner = None;
+                    }
                 }
                 (
                     self.media
@@ -323,7 +335,11 @@ impl Session {
                     if req.method.eq_ignore_ascii_case("TEARDOWN")
                         && let Some(photo) = &self.ctx.photo
                     {
-                        photo.clear();
+                        let mut owner = photo.owner.lock().unwrap_or_else(|e| e.into_inner());
+                        if *owner == Some(self.photo_owner) {
+                            photo.clear();
+                            *owner = None;
+                        }
                     }
                     return (resp, None);
                 }
@@ -416,6 +432,7 @@ impl Session {
         let Some(photo) = &self.ctx.photo else {
             return Response::to(req, 501);
         };
+        let mut owner = photo.owner.lock().unwrap_or_else(|e| e.into_inner());
         let asset = req.headers.get("X-Apple-AssetKey").unwrap_or_default();
         let transition = req.headers.get("X-Apple-Transition");
         let action = req
@@ -423,13 +440,19 @@ impl Session {
             .get("X-Apple-AssetAction")
             .unwrap_or_default()
             .to_ascii_lowercase();
+        if owner.is_some_and(|current| current != self.photo_owner) {
+            return Response::to(req, 403);
+        }
         let result = if action == "displaycached" {
             photo.display_cached(asset, transition)
         } else {
             photo.put(asset, transition, &req.body, action == "cacheonly")
         };
         match result {
-            Ok(()) => Response::to(req, 200),
+            Ok(()) => {
+                *owner = Some(self.photo_owner);
+                Response::to(req, 200)
+            }
             Err(error) => {
                 debug!(peer = %self.peer, "photo: {}", error.message());
                 Response::to(req, error.status())
@@ -441,6 +464,10 @@ impl Session {
         let Some(photo) = &self.ctx.photo else {
             return Response::to(req, 501);
         };
+        let owner = photo.owner.lock().unwrap_or_else(|e| e.into_inner());
+        if *owner != Some(self.photo_owner) {
+            return Response::to(req, 403);
+        }
         let asset = req
             .headers
             .get("X-Apple-AssetKey")
@@ -503,6 +530,18 @@ impl Session {
             Err(e) => {
                 warn!(peer = %self.peer, "legacy pair-verify: {e}");
                 Response::to(req, 403)
+            }
+        }
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        if let Some(photo) = &self.ctx.photo {
+            let mut owner = photo.owner.lock().unwrap_or_else(|e| e.into_inner());
+            if *owner == Some(self.photo_owner) {
+                photo.clear();
+                *owner = None;
             }
         }
     }
@@ -1926,6 +1965,90 @@ mod tests {
         assert_eq!(
             log.0.lock().unwrap().last().map(String::as_str),
             Some("clear")
+        );
+    }
+
+    #[test]
+    fn another_session_cannot_clear_photo() {
+        let log = Arc::new(PhotoLog::default());
+        let mut context = ctx();
+        Arc::get_mut(&mut context).unwrap().photo = Some(crate::photo::Service::new(log.clone()));
+        let mut first = Client::new(context.clone());
+        let mut second = Client::new(context);
+        assert_eq!(
+            first
+                .call(
+                    "PUT",
+                    "/photo",
+                    &[("X-Apple-AssetKey", "A")],
+                    jpeg(100, 100)
+                )
+                .status,
+            200
+        );
+        second.call("POST", "/stop", &[], vec![]);
+        second.call("TEARDOWN", "rtsp://x/1", &[], vec![]);
+        assert_eq!(
+            second
+                .call(
+                    "PUT",
+                    "/photo",
+                    &[
+                        ("X-Apple-AssetKey", "B"),
+                        ("X-Apple-AssetAction", "cacheOnly")
+                    ],
+                    jpeg(10, 10)
+                )
+                .status,
+            403
+        );
+        assert_eq!(
+            second
+                .call(
+                    "PUT",
+                    "/photo",
+                    &[
+                        ("X-Apple-AssetKey", "A"),
+                        ("X-Apple-AssetAction", "displayCached")
+                    ],
+                    vec![]
+                )
+                .status,
+            403
+        );
+        assert_eq!(*log.0.lock().unwrap(), ["display A 100x100"]);
+        first.call("POST", "/stop", &[], vec![]);
+        assert_eq!(
+            log.0.lock().unwrap().last().map(String::as_str),
+            Some("clear")
+        );
+    }
+
+    #[test]
+    fn disconnected_photo_owner_releases_the_profile() {
+        let log = Arc::new(PhotoLog::default());
+        let mut context = ctx();
+        Arc::get_mut(&mut context).unwrap().photo = Some(crate::photo::Service::new(log.clone()));
+        let mut first = Client::new(context.clone());
+        let mut second = Client::new(context);
+        assert_eq!(
+            first
+                .call("PUT", "/photo", &[("X-Apple-AssetKey", "A")], jpeg(10, 10))
+                .status,
+            200
+        );
+        assert_eq!(
+            second
+                .call("PUT", "/photo", &[("X-Apple-AssetKey", "B")], jpeg(10, 10))
+                .status,
+            403
+        );
+        drop(first);
+        assert_eq!(
+            second
+                .call("PUT", "/photo", &[("X-Apple-AssetKey", "B")], jpeg(10, 10))
+                .status,
+            200
         );
     }
 
