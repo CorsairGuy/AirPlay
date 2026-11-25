@@ -64,7 +64,18 @@ const USAGE: &str = "\
   --video-delay МС
                   выдавать кадры по часам iPhone с этой задержкой, вровень
                   со звуком; без параметра — сразу после декодирования
-  --display ШxВ@К экран для зеркалирования (по умолчанию 1920x1080@60)
+  --display ШxВ@К экран для зеркалирования: пиксели и предел кадров
+                  (по умолчанию 1920x1080@60)
+  --display-refresh ГЦ
+                  частота обновления экрана в /info (по умолчанию 60)
+  --display-features N
+                  биты возможностей дисплея в /info (по умолчанию 0xE, как у Apple TV)
+  --display-rotation ГРАД
+                  поворот экрана: 0, 90, 180 или 270
+  --display-overscanned
+                  сообщить отправителю, что картинка с запасом под обрезку
+  --screen-hevc   разрешить H.265 для экрана (бит 42 возможностей); без --display
+                  по умолчанию просим 3840x2160@30
   --audio ВЫВОД   куда играть: default, null (никуда) или устройство ALSA,
                   например hw:0,0 (по умолчанию default)
   --buffer МС     буфер звуковой карты, мс (по умолчанию 100; меньше —
@@ -148,13 +159,11 @@ fn parse_serve(args: &[String]) -> Result<serve::Options, String> {
         source_version: "366.0".into(),
         enclosure_color: None,
         time: None,
-        display: device::Display {
-            width: 1920,
-            height: 1080,
-            fps: 60,
-        },
+        display: device::Display::default(),
     };
     let mut mirror = false;
+    let mut display_set = false;
+    let mut screen_hevc = false;
     let mut dump: Option<String> = None;
     let mut player: Option<String> = None;
     let mut player_args = Vec::new();
@@ -179,6 +188,11 @@ fn parse_serve(args: &[String]) -> Result<serve::Options, String> {
                     | "--video-player"
                     | "--video-player-arg"
                     | "--video-player-framed"
+                    | "--display-refresh"
+                    | "--display-features"
+                    | "--display-rotation"
+                    | "--display-overscanned"
+                    | "--screen-hevc"
             )
         {
             return Err(format!("{arg}: build with --features mirroring"));
@@ -244,7 +258,30 @@ fn parse_serve(args: &[String]) -> Result<serve::Options, String> {
             "--video-player-arg" => player_args.push(value()?),
             "--video-decoder" => decoder = Some(value()?),
             "--video-delay" => delay = Some(ms(value()?, "--video-delay")?),
-            "--display" => opts.display = parse_display(&value()?)?,
+            "--display" => {
+                opts.display = parse_display(&value()?)?;
+                display_set = true;
+            }
+            "--display-refresh" => {
+                let refresh = value()?
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|hz| (1.0..=240.0).contains(hz))
+                    .ok_or("--display-refresh: нужно число Гц от 1 до 240".to_string())?;
+                opts.display.refresh_rate = refresh;
+            }
+            "--display-features" => {
+                opts.display.features = parse_unsigned(&value()?, "--display-features")?
+            }
+            "--display-rotation" => {
+                let rotation = parse_unsigned(&value()?, "--display-rotation")?;
+                if ![0, 90, 180, 270].contains(&rotation) {
+                    return Err("--display-rotation: нужно 0, 90, 180 или 270".into());
+                }
+                opts.display.rotation = rotation as u32;
+            }
+            "--display-overscanned" => opts.display.overscanned = true,
+            "--screen-hevc" => screen_hevc = true,
             "--audio" => opts.audio.device = value()?,
             "--buffer" => opts.audio.output_latency = ms(value()?, "--buffer")?,
             "--latency" => opts.audio.fallback_latency = ms(value()?, "--latency")?,
@@ -270,6 +307,28 @@ fn parse_serve(args: &[String]) -> Result<serve::Options, String> {
     }
     if delay.is_some() && decoder.is_none() {
         return Err("--video-delay только вместе с --video-decoder".into());
+    }
+    if screen_hevc && !mirror {
+        return Err("--screen-hevc требует --mirror".into());
+    }
+    // В сборке без зеркалирования флаг не читается: экран там не объявляется.
+    let _ = display_set;
+    #[cfg(feature = "mirroring")]
+    if screen_hevc {
+        // Бит 42 (UxPlay: ScreenMultiCodec) — иначе отправитель шлёт H.264.
+        let base = opts.features.unwrap_or(device::Features::MIRROR_RECEIVER).0;
+        opts.features = Some(device::Features(
+            base | device::Features::SCREEN_MULTI_CODEC,
+        ));
+        if !display_set {
+            // Как у UxPlay: с H.265 по умолчанию просим 4K и 30 к/с.
+            opts.display = device::Display {
+                width: 3840,
+                height: 2160,
+                fps: 30,
+                ..device::Display::default()
+            };
+        }
     }
     #[cfg(feature = "mirroring")]
     if mirror {
@@ -400,10 +459,20 @@ fn parse_display(v: &str) -> Result<device::Display, String> {
     let err = || format!("--display: нужно ШxВ@К, например 1920x1080@60, а не {v}");
     let (size, fps) = v.split_once('@').unwrap_or((v, "60"));
     let (w, h) = size.split_once('x').ok_or_else(err)?;
+    let width: u32 = w.parse().map_err(|_| err())?;
+    let height: u32 = h.parse().map_err(|_| err())?;
+    let fps: u32 = fps.parse().map_err(|_| err())?;
+    if !(16..=16384).contains(&width) || !(16..=16384).contains(&height) {
+        return Err(format!("--display: размер {width}x{height} вне 16..16384"));
+    }
+    if !(1..=240).contains(&fps) {
+        return Err(format!("--display: частота кадров {fps} вне 1..240"));
+    }
     Ok(device::Display {
-        width: w.parse().map_err(|_| err())?,
-        height: h.parse().map_err(|_| err())?,
-        fps: fps.parse().map_err(|_| err())?,
+        width,
+        height,
+        fps,
+        ..device::Display::default()
     })
 }
 
@@ -518,5 +587,108 @@ mod tests {
         let options = parse_serve(&["--mirror".into()]).unwrap_or_else(|e| panic!("{e}"));
         assert!(options.mirror.is_some());
         assert_eq!(options.model, "AppleTV3,2");
+    }
+
+    /// По умолчанию объявляем такой же дисплей, как Apple TV в наблюдённом
+    /// `/info`: число битов дисплея 0xE, 60 Гц, без поворота и overscan.
+    #[test]
+    fn display_defaults_match_apple_tv_descriptor() {
+        let d = device::Display::default();
+        assert_eq!((d.width, d.height, d.fps), (1920, 1080, 60));
+        assert_eq!(d.refresh_rate, 60.0);
+        assert_eq!(d.rotation, 0);
+        assert!(!d.overscanned);
+        assert_eq!(d.features, 0x0E);
+    }
+
+    #[cfg(feature = "mirroring")]
+    #[test]
+    fn display_flags_reach_the_advertised_descriptor() {
+        let options = parse_serve(&[
+            "--mirror".into(),
+            "--display".into(),
+            "2560x1440@30".into(),
+            "--display-refresh".into(),
+            "59.94".into(),
+            "--display-features".into(),
+            "0x2".into(),
+            "--display-rotation".into(),
+            "90".into(),
+            "--display-overscanned".into(),
+        ])
+        .unwrap_or_else(|e| panic!("{e}"));
+        let d = options.display;
+        assert_eq!((d.width, d.height, d.fps), (2560, 1440, 30));
+        assert_eq!(d.refresh_rate, 59.94);
+        assert_eq!(d.features, 2);
+        assert_eq!(d.rotation, 90);
+        assert!(d.overscanned);
+    }
+
+    #[test]
+    fn display_flags_reject_out_of_range_values() {
+        for args in [
+            vec!["--display", "8x1080"],
+            vec!["--display", "1920x1080@0"],
+            vec!["--display", "1920x1080@241"],
+            vec!["--display", "1920x1080", "--display-refresh", "0"],
+            vec!["--display", "1920x1080", "--display-rotation", "45"],
+        ] {
+            let args: Vec<String> = args.into_iter().map(Into::into).collect();
+            assert!(
+                parse_serve(&args).is_err(),
+                "приняты недопустимые значения: {args:?}"
+            );
+        }
+    }
+
+    /// Без бита 42 отправитель шлёт только H.264, поэтому флаг обязан попасть
+    /// и в `/info`, и в TXT (оба строятся из `Options::features`).
+    #[cfg(feature = "mirroring")]
+    #[test]
+    fn screen_hevc_sets_codec_bit_and_4k_default() {
+        let options = parse_serve(&["--mirror".into(), "--screen-hevc".into()])
+            .unwrap_or_else(|e| panic!("{e}"));
+        let features = options.features.expect("features set by --screen-hevc");
+        assert_eq!(
+            features.0 & device::Features::SCREEN_MULTI_CODEC,
+            device::Features::SCREEN_MULTI_CODEC
+        );
+        assert_eq!(features.0, device::Features::MIRROR_RECEIVER_HEVC.0);
+        assert_eq!(
+            (
+                options.display.width,
+                options.display.height,
+                options.display.fps
+            ),
+            (3840, 2160, 30)
+        );
+        assert_eq!(options.display.refresh_rate, 60.0);
+    }
+
+    #[cfg(feature = "mirroring")]
+    #[test]
+    fn screen_hevc_keeps_explicit_display_and_features() {
+        let options = parse_serve(&[
+            "--mirror".into(),
+            "--screen-hevc".into(),
+            "--display".into(),
+            "1920x1080@60".into(),
+            "--features".into(),
+            "0x527FFEE6".into(),
+        ])
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(options.display.width, 1920);
+        assert_eq!(options.display.fps, 60);
+        assert_eq!(options.features.unwrap().0, 0x400_527F_FEE6);
+    }
+
+    #[test]
+    fn screen_hevc_requires_mirroring() {
+        let error = match parse_serve(&["--screen-hevc".into()]) {
+            Ok(_) => panic!("--screen-hevc принят без --mirror"),
+            Err(error) => error,
+        };
+        assert!(error.contains("--mirror"), "{error}");
     }
 }

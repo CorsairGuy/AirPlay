@@ -78,7 +78,7 @@ GET /info → 200, Content-Type `application/x-apple-binary-plist`; request body
 | sourceVersion, protocolVersion | string | R→C; соответствуют version hints |
 | audioFormats | array<dict> | type, audioInputFormats/audioOutputFormats bitmasks |
 | audioLatencies | array<dict> | type/audioType/inputLatencyMicros/outputLatencyMicros |
-| displays | array<dict> | uuid,widthPixels,heightPixels,maxFPS,features; UxPlay также dimensions/refreshRate |
+| displays | array<dict> | width,height,widthPixels,heightPixels,widthPhysical,heightPhysical,refreshRate,maxFPS,features,overscanned,rotation,uuid — полный набор наблюдённого `/info` Apple TV; core отдаёт все ключи, значения из `device::Display` |
 | playbackCapabilities | dict | например supportsUIForAudioOnlyContent:boolean; profile-specific |
 | igl/gcgl/gid/psi | bool/string, когда присутствуют | core публикует; **не обязательны top-level у всех Apple TV** |
 

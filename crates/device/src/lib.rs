@@ -26,6 +26,9 @@ impl Features {
     pub const UNIFIED_MEDIA_CONTROL: u64 = 1 << 38;
     pub const BUFFERED_AUDIO: u64 = 1 << 40;
     pub const PTP: u64 = 1 << 41;
+    /// HEVC для экрана (UxPlay: «ScreenMultiCodec»). Без бита отправитель
+    /// шлёт только H.264, с ним может выбрать H.265 выше 1080p.
+    pub const SCREEN_MULTI_CODEC: u64 = 1 << 42;
     pub const HK_PAIRING_AND_ACCESS_CONTROL: u64 = 1 << 46;
     pub const SYSTEM_PAIRING: u64 = 1 << 47;
     pub const COREUTILS_PAIRING_AND_ENCRYPTION: u64 = 1 << 48;
@@ -56,6 +59,10 @@ impl Features {
     /// 48) и без legacy-сопряжения (бит 27). Только с ним iOS 18 присылает
     /// ключ видео `ekey` (проверено shairplay-rust).
     pub const MIRROR_RECEIVER: Features = Features(0x527F_FEE6);
+
+    /// То же плюс H.265 для экрана (бит 42): так UxPlay включает 4K/HEVC.
+    pub const MIRROR_RECEIVER_HEVC: Features =
+        Features(Self::MIRROR_RECEIVER.0 | Self::SCREEN_MULTI_CODEC);
 
     /// Запись для TXT: `0xНИЖНИЕ32,0xВЕРХНИЕ32`.
     pub fn to_txt(self) -> String {
@@ -93,11 +100,48 @@ pub struct DeviceInfo {
     pub pgid: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Экран, который предлагаем отправителю. Набор полей — как в `displays`
+/// реального Apple TV (`width`, `height`, `widthPixels`, `heightPixels`,
+/// `widthPhysical`, `heightPhysical`, `refreshRate`, `maxFPS`, `features`,
+/// `overscanned`, `rotation`, `uuid`). UxPlay задаёт геометрию, частоту и
+/// предел кадров; отправитель по ним выбирает формат потока.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Display {
+    /// Ширина кадра, пиксели (в `displays` — `width` и `widthPixels`).
     pub width: u32,
+    /// Высота кадра, пиксели (`height` и `heightPixels`); по наблюдению
+    /// UxPlay именно высота определяет формат, который выберет клиент.
     pub height: u32,
+    /// `maxFPS`: предел кадров в секунду, который просим у отправителя.
     pub fps: u32,
+    /// `refreshRate`: частота обновления экрана, Гц.
+    pub refresh_rate: f64,
+    /// `rotation`: поворот экрана, градусы (0, 90, 180, 270).
+    pub rotation: u32,
+    /// `overscanned`: отдаём ли картинку с запасом под обрезку.
+    pub overscanned: bool,
+    /// `displays[].features`: биты возможностей дисплея. По умолчанию —
+    /// значение, которое сообщает Apple TV (0xE).
+    pub features: u64,
+}
+
+impl Display {
+    /// `displays[].features` реального Apple TV из публичного дампа `/info`.
+    pub const APPLE_TV_FEATURES: u64 = 0x0E;
+}
+
+impl Default for Display {
+    fn default() -> Self {
+        Self {
+            width: 1920,
+            height: 1080,
+            fps: 60,
+            refresh_rate: 60.0,
+            rotation: 0,
+            overscanned: false,
+            features: Self::APPLE_TV_FEATURES,
+        }
+    }
 }
 
 impl DeviceInfo {
@@ -227,11 +271,22 @@ impl DeviceInfo {
         d.insert("vv".into(), Value::Integer(2.into()));
         if let Some(display) = self.display {
             let mut s = Dictionary::new();
+            s.insert("width".into(), Value::Integer(display.width.into()));
+            s.insert("height".into(), Value::Integer(display.height.into()));
             s.insert("widthPixels".into(), Value::Integer(display.width.into()));
             s.insert("heightPixels".into(), Value::Integer(display.height.into()));
+            // Физический размер Apple TV не сообщает (0 в наблюдённом дампе).
+            s.insert("widthPhysical".into(), Value::Integer(0.into()));
+            s.insert("heightPhysical".into(), Value::Integer(0.into()));
+            s.insert("refreshRate".into(), Value::Real(display.refresh_rate));
             s.insert("maxFPS".into(), Value::Integer(display.fps.into()));
+            s.insert(
+                "features".into(),
+                Value::Integer((display.features as i64).into()),
+            );
+            s.insert("overscanned".into(), display.overscanned.into());
+            s.insert("rotation".into(), Value::Integer(display.rotation.into()));
             s.insert("uuid".into(), format!("{}-display", self.pairing_id).into());
-            s.insert("features".into(), Value::Integer(2.into()));
             d.insert("displays".into(), Value::Array(vec![s.into()]));
         }
         let mut out = Vec::new();
@@ -405,7 +460,7 @@ mod tests {
         dev.display = Some(Display {
             width: 1280,
             height: 720,
-            fps: 60,
+            ..Display::default()
         });
         let v = Value::from_reader(std::io::Cursor::new(dev.info_plist())).unwrap();
         let d = v.as_dictionary().unwrap();
@@ -415,6 +470,71 @@ mod tests {
         assert_eq!(display["widthPixels"].as_unsigned_integer(), Some(1280));
         assert_eq!(display["maxFPS"].as_unsigned_integer(), Some(60));
         assert_eq!(dev.features.to_txt(), "0x527FFEE6,0x0");
+    }
+
+    /// Набор ключей `displays` как в публичном дампе `/info` Apple TV:
+    /// отправитель по нему выбирает размер и частоту потока.
+    #[test]
+    fn display_descriptor_matches_apple_tv_shape() {
+        let mut dev = info();
+        dev.display = Some(Display {
+            width: 2560,
+            height: 1440,
+            fps: 30,
+            refresh_rate: 59.94,
+            rotation: 90,
+            overscanned: true,
+            features: 0x2,
+        });
+        let v = Value::from_reader(std::io::Cursor::new(dev.info_plist())).unwrap();
+        let d = v.as_dictionary().unwrap();
+        let display = d["displays"].as_array().unwrap()[0]
+            .as_dictionary()
+            .unwrap();
+        for key in [
+            "width",
+            "height",
+            "widthPixels",
+            "heightPixels",
+            "widthPhysical",
+            "heightPhysical",
+            "refreshRate",
+            "maxFPS",
+            "features",
+            "overscanned",
+            "rotation",
+            "uuid",
+        ] {
+            assert!(display.contains_key(key), "нет ключа {key}");
+        }
+        assert_eq!(display["width"].as_unsigned_integer(), Some(2560));
+        assert_eq!(display["height"].as_unsigned_integer(), Some(1440));
+        assert_eq!(display["widthPixels"].as_unsigned_integer(), Some(2560));
+        assert_eq!(display["refreshRate"].as_real(), Some(59.94));
+        assert_eq!(display["maxFPS"].as_unsigned_integer(), Some(30));
+        assert_eq!(display["features"].as_unsigned_integer(), Some(2));
+        assert_eq!(display["overscanned"].as_boolean(), Some(true));
+        assert_eq!(display["rotation"].as_unsigned_integer(), Some(90));
+        assert_eq!(display["widthPhysical"].as_unsigned_integer(), Some(0));
+    }
+
+    #[test]
+    fn hevc_screen_bit_is_advertised_everywhere() {
+        let mut dev = info();
+        dev.features = Features::MIRROR_RECEIVER_HEVC;
+        assert_eq!(
+            dev.features.0,
+            Features::MIRROR_RECEIVER.0 | Features::SCREEN_MULTI_CODEC
+        );
+        assert_eq!(dev.features.0, 0x400_527F_FEE6);
+        let value = Value::from_reader(std::io::Cursor::new(dev.info_plist())).unwrap();
+        let d = value.as_dictionary().unwrap();
+        assert_eq!(d["features"].as_unsigned_integer(), Some(0x400_527F_FEE6));
+        assert!(
+            dev.airplay_txt()
+                .contains(&("features".into(), "0x527FFEE6,0x400".into()))
+        );
+        assert_eq!(dev.fex().len(), 11);
     }
 
     #[test]
