@@ -154,6 +154,7 @@ fn options(
             ..Default::default()
         },
         photo: None,
+        profile: None,
         ownership: Default::default(),
         remote: Default::default(),
         mrp: serve::Mrp::Off,

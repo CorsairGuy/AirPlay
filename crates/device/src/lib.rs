@@ -3,6 +3,9 @@
 
 use plist::{Dictionary, Value};
 
+pub mod profile;
+pub use profile::Profile;
+
 /// Биты поля Features. Названия по публичным описаниям протокола
 /// (openairplay, shairport-sync); значения части битов Apple не раскрывает.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,6 +101,8 @@ pub struct DeviceInfo {
     pub group: Option<String>,
     /// `pgid`: случайный UUID на запуск, как у shairport-sync.
     pub pgid: String,
+    /// Объявлять `_raop._tcp`; профиль может оставить только `_airplay._tcp`.
+    pub raop: bool,
 }
 
 /// Экран, который предлагаем отправителю. Набор полей — как в `displays`
@@ -403,6 +408,7 @@ mod tests {
             enclosure_color: None,
             group: None,
             pgid: "00000000-0000-4000-8000-000000000000".into(),
+            raop: true,
         }
     }
 

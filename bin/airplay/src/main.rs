@@ -38,6 +38,10 @@ const USAGE: &str = "\
   --pin PIN       PIN для сопряжения (по умолчанию случайный, пишется в лог)
   --state КАТАЛОГ где хранить ключи (по умолчанию ~/.local/state/airplay)
   --model МОДЕЛЬ  модель для iOS (по умолчанию AirPlay)
+  --profile ПУТЬ  профиль устройства (plist): model, features, status_flags,
+                  source_version, accessory_type, display, audio_only_ui,
+                  enclosure_color и raop (объявлять _raop._tcp); значения
+                  профиля заменяют соответствующие параметры выше
   --no-mdns       не объявлять себя в Bonjour
   --ptp-bind IP   использовать интерфейс IP для общей службы PTP
   --require-pin   пускать только после сопряжения по PIN (без transient)
@@ -151,6 +155,7 @@ fn parse_serve(args: &[String]) -> Result<serve::Options, String> {
         pin: None,
         state_dir: state::default_dir(),
         mdns: true,
+        profile: None,
         model: "AirPlay".into(),
         features: None,
         status_flags: None,
@@ -220,6 +225,12 @@ fn parse_serve(args: &[String]) -> Result<serve::Options, String> {
             "--pin" => opts.pin = Some(value()?),
             "--state" => opts.state_dir = value()?.into(),
             "--model" => opts.model = value()?,
+            "--profile" => {
+                opts.profile = Some(
+                    device::Profile::load(std::path::Path::new(&value()?))
+                        .map_err(|e| format!("--profile: {e}"))?,
+                )
+            }
             "--no-mdns" => opts.mdns = false,
             "--require-pin" => opts.require_pin = true,
             "--source-version" => opts.source_version = value()?,
@@ -579,6 +590,18 @@ mod tests {
         assert!(super::parse_serve(&["--features".into(), "0xno".into()]).is_err());
     }
     use super::*;
+    #[test]
+    fn profile_flag_loads_a_device_profile() {
+        let options = parse_serve(&[
+            "--profile".into(),
+            "../../docs/profiles/tv.plist".into(),
+        ])
+        .unwrap();
+        let profile = options.profile.expect("профиль загружен");
+        assert_eq!(profile.model, "AppleTV6,2");
+        assert_eq!(profile.display.unwrap().width, 1920);
+    }
+
     #[test]
     fn daemon_is_default_and_old_subcommand_is_rejected() {
         assert!(starts_daemon(&[]));

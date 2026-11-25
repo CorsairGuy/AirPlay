@@ -338,6 +338,7 @@ fn receiver_context(require_pin: bool) -> Arc<sessions::session::Context> {
         group: None,
         pgid: "00000000-0000-4000-8000-000000000000".into(),
         enclosure_color: None,
+        raop: true,
     };
     Arc::new(sessions::session::Context::for_test(
         identity,
