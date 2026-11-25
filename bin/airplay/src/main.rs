@@ -146,6 +146,7 @@ fn parse_serve(args: &[String]) -> Result<serve::Options, String> {
         apply_volume: true,
         source_version: "366.0".into(),
         enclosure_color: None,
+        time: None,
         display: device::Display {
             width: 1920,
             height: 1080,
