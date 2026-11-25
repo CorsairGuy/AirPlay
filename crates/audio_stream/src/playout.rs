@@ -243,6 +243,18 @@ impl Playout {
         self.changed();
     }
 
+    /// Classic FLUSH: отправитель объявил весь буфер недействительным
+    /// (перемотка, смена трека).
+    pub fn clear(&self) {
+        let mut s = self.lock();
+        let dropped = s.packets.len();
+        s.packets.clear();
+        s.epoch += 1;
+        debug!(dropped, "FLUSH: буфер очищен");
+        drop(s);
+        self.changed();
+    }
+
     pub fn set_volume(&self, db: f32) {
         self.lock().volume_db = db;
     }

@@ -30,6 +30,7 @@ use tracing::{debug, info, warn};
 
 use crate::control::{self, BPLIST, Command, MrpService, OCTETS, Remote};
 use crate::events::{Events, Metadata, NoEvents, Progress};
+use crate::raop::Raop;
 #[cfg(feature = "hls")]
 use crate::hls::HlsOptions;
 
@@ -270,6 +271,8 @@ pub struct Media {
     hls_v2_setup: bool,
     #[cfg(feature = "hls")]
     hls_v2_recorded: bool,
+    /// Classic AirPlay 1: формат из ANNOUNCE и UDP-порты SETUP.
+    raop: Raop,
 }
 
 impl Media {
@@ -313,6 +316,7 @@ impl Media {
             hls_v2_setup: false,
             #[cfg(feature = "hls")]
             hls_v2_recorded: false,
+            raop: Raop::default(),
         }
     }
 
@@ -336,6 +340,7 @@ impl Media {
                     Response::to(req, 400)
                 }
             },
+            ("ANNOUNCE", _) => self.raop.announce(req),
             ("SETUP", _) => {
                 #[cfg(feature = "hls")]
                 {
@@ -360,7 +365,14 @@ impl Media {
                 self.flush(req);
                 ok()
             }
-            ("FLUSH", _) => ok(),
+            ("FLUSH", _) => {
+                // Classic FLUSH: отправитель перемотал или сменил трек.
+                if req.headers.get("RTP-Info").is_some() {
+                    self.player.with(self.id, |s| s.playout().clear());
+                    debug!("FLUSH AirPlay 1: буфер очищен");
+                }
+                ok()
+            }
             ("SETPEERS", _) | ("SETPEERSX", _) => {
                 let peers = parse_peers(&req.body);
                 let grouped = other_receivers(&req.body, &self.sender_addrs) > 0;
@@ -391,6 +403,7 @@ impl Media {
                 #[cfg(feature = "hls")]
                 self.stop_hls();
                 let streams_only = plist_dict(&req.body).is_some_and(|d| d.contains_key("streams"));
+                self.raop.reset();
                 self.player.release(self.id);
                 if self.anchor.take().is_some_and(|a| a.playing) {
                     self.player.events.playing(false);
@@ -639,8 +652,7 @@ impl Media {
 
     fn setup(&mut self, req: &Request) -> Response {
         let Some(body) = plist_dict(&req.body) else {
-            warn!("SETUP без plist: отправители AirPlay 1 пока не поддерживаются");
-            return Response::to(req, 400);
+            return self.setup_raop(req);
         };
         let reply = match body.get("streams").and_then(Value::as_array) {
             Some(streams) => self.setup_streams(streams),
@@ -652,6 +664,19 @@ impl Media {
                 warn!("SETUP: {e}");
                 Response::to(req, 500)
             }
+        }
+    }
+
+    /// SETUP classic AirPlay 1: `Transport` без plist, порты занимает
+    /// [`Raop`], медиачасть ставит поток в плеер.
+    fn setup_raop(&mut self, req: &Request) -> Response {
+        match self.raop.setup(req, self.player.audio.clone()) {
+            Ok((resp, stream)) => {
+                self.anchor = None;
+                self.player.replace(self.id, stream);
+                resp
+            }
+            Err(resp) => resp,
         }
     }
 

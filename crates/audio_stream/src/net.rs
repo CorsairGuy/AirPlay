@@ -37,11 +37,14 @@ pub enum StreamKey {
     ChaCha([u8; 32]),
     /// AirPlay 1 и звук зеркалирования: ключ сессии и `eiv`, AES-128-CBC.
     AesCbc { key: [u8; 16], iv: [u8; 16] },
+    /// AirPlay 1 без шифрования (`et:0`, без `rsaaeskey`): payload открыт.
+    Plain,
 }
 
 enum Decrypt {
     ChaCha(AudioCipher),
     Cbc(Box<AudioCbc>),
+    Plain,
 }
 
 impl Decrypt {
@@ -53,6 +56,10 @@ impl Decrypt {
                 let body = &mut packet[HEADER_LEN..];
                 c.decrypt(body);
                 Some((header, body))
+            }
+            Decrypt::Plain => {
+                let header = Header::parse(packet)?;
+                Some((header, &packet[HEADER_LEN..]))
             }
         }
     }
@@ -75,6 +82,8 @@ pub struct Stream {
     pub kind: StreamKind,
     pub data_port: u16,
     pub control_port: u16,
+    /// Порт запросов времени RAOP; 0 — не открыт.
+    pub timing_port: u16,
     playout: Arc<Playout>,
     tasks: Vec<JoinHandle<()>>,
     started: Option<watch::Receiver<bool>>,
@@ -107,6 +116,7 @@ impl Stream {
             kind: StreamKind::Buffered,
             data_port,
             control_port,
+            timing_port: 0,
             playout,
             tasks,
             connection: Some(connection),
@@ -127,6 +137,7 @@ impl Stream {
         let cipher = Arc::new(match key {
             StreamKey::ChaCha(shk) => Decrypt::ChaCha(AudioCipher::new(&shk)),
             StreamKey::AesCbc { key, iv } => Decrypt::Cbc(Box::new(AudioCbc::new(&key, &iv))),
+            StreamKey::Plain => Decrypt::Plain,
         });
         let (started_tx, started) = watch::channel(false);
         let tasks = vec![
@@ -143,6 +154,46 @@ impl Stream {
             kind: StreamKind::Realtime,
             data_port,
             control_port,
+            timing_port: 0,
+            playout,
+            tasks,
+            connection: None,
+        })
+    }
+
+    /// AirPlay 1 (RAOP): звук по UDP, управляющий канал и отдельный порт
+    /// запросов времени. Часов отправителя у нас нет: воспроизведение
+    /// начинается с первого пакета по своим часам.
+    pub fn raop(cfg: Config, key: StreamKey, format: Format) -> io::Result<Stream> {
+        let data = bind_udp()?;
+        let control = bind_udp()?;
+        let timing = bind_udp()?;
+        let data_port = data.local_addr()?.port();
+        let control_port = control.local_addr()?.port();
+        let timing_port = timing.local_addr()?.port();
+        let playout = Arc::new(Playout::start(cfg, Arc::new(clock::NoTime), Some(format)));
+        let cipher = Arc::new(match key {
+            StreamKey::ChaCha(shk) => Decrypt::ChaCha(AudioCipher::new(&shk)),
+            StreamKey::AesCbc { key, iv } => Decrypt::Cbc(Box::new(AudioCbc::new(&key, &iv))),
+            StreamKey::Plain => Decrypt::Plain,
+        });
+        let (started_tx, started) = watch::channel(false);
+        let tasks = vec![
+            tokio::spawn(receive_realtime(
+                data,
+                cipher.clone(),
+                playout.clone(),
+                started_tx,
+            )),
+            tokio::spawn(receive_control(control, cipher, playout.clone())),
+            tokio::spawn(receive_timing(timing)),
+        ];
+        Ok(Stream {
+            started: Some(started),
+            kind: StreamKind::Realtime,
+            data_port,
+            control_port,
+            timing_port,
             playout,
             tasks,
             connection: None,
@@ -445,4 +496,90 @@ async fn receive_control(socket: UdpSocket, cipher: Arc<Decrypt>, playout: Arc<P
 async fn drain(socket: UdpSocket) {
     let mut buf = vec![0u8; MAX_DATAGRAM];
     while socket.recv(&mut buf).await.is_ok() {}
+}
+
+/// Порт времени AirPlay 1: отправитель шлёт 32-байтный запрос `0xD2` и
+/// ждёт ответ `0xD3` с его transmit-меткой как origin и нашим временем.
+/// Без ответа отправитель не выставляет часы и не начинает звук.
+async fn receive_timing(socket: UdpSocket) {
+    let mut buf = [0u8; 128];
+    loop {
+        let Ok((n, from)) = socket.recv_from(&mut buf).await else {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            continue;
+        };
+        if let Some(reply) = timing_reply(&buf[..n])
+            && let Err(e) = socket.send_to(&reply, from).await
+        {
+            debug!("ответ времени: {e}");
+        }
+    }
+}
+
+fn timing_reply(request: &[u8]) -> Option<[u8; 32]> {
+    if request.len() < 32 || request[1] & 0x7F != 0x52 {
+        return None;
+    }
+    let mut reply = [0u8; 32];
+    reply.copy_from_slice(&request[..32]);
+    reply[0] = 0x80;
+    reply[1] = 0xD3;
+    // Origin — transmit-метка запроса, затем наши receive/transmit.
+    reply[8..16].copy_from_slice(&request[24..32]);
+    let now = ntp_now();
+    reply[16..24].copy_from_slice(&now.to_be_bytes());
+    reply[24..32].copy_from_slice(&now.to_be_bytes());
+    Some(reply)
+}
+
+/// NTP-время от 1900 года, 32.32: отправитель сверяет по нему часы.
+fn ntp_now() -> u64 {
+    let since_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = since_unix.as_secs() + 2_208_988_800;
+    let frac = ((since_unix.subsec_nanos() as u64) << 32) / 1_000_000_000;
+    (secs << 32) | frac
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timing_reply_echoes_origin_and_stamps_now() {
+        let mut request = [0u8; 32];
+        request[0] = 0x80;
+        request[1] = 0xD2;
+        request[4..8].copy_from_slice(&[0, 0, 0, 7]);
+        request[8..16].copy_from_slice(&[1; 8]);
+        request[24..32].copy_from_slice(&[2; 8]);
+        let reply = timing_reply(&request).unwrap();
+        assert_eq!(reply[1], 0xD3);
+        assert_eq!(reply[4..8], request[4..8]);
+        assert_eq!(reply[8..16], request[24..32]);
+        assert_eq!(reply[16..24], reply[24..32]);
+        assert_ne!(reply[16..24], [0; 8]);
+        assert!(timing_reply(&request[..31]).is_none());
+        let mut sync = request;
+        sync[1] = 0xD4;
+        assert!(timing_reply(&sync).is_none());
+    }
+
+    #[test]
+    fn plain_audio_is_not_decrypted() {
+        let header = Header {
+            marker: true,
+            payload_type: 96,
+            seq: 1,
+            timestamp: 352,
+            ssrc: 0x1234,
+        };
+        let mut packet = header.encode().to_vec();
+        packet.extend_from_slice(b"alac");
+        let cipher = Decrypt::Plain;
+        let (h, body) = cipher.open(&mut packet).unwrap();
+        assert_eq!(h, header);
+        assert_eq!(body, b"alac");
+    }
 }
