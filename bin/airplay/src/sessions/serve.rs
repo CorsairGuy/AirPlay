@@ -53,6 +53,14 @@ pub struct Options {
     pub source_version: String,
     /// `deviceEnclosureColor` в `/info`.
     pub enclosure_color: Option<String>,
+    /// Общая служба времени (PTP), если экземпляры должны делить один движок.
+    ///
+    /// `None` — экземпляр заводит свою, как раньше. Движок PTP не рассчитан на
+    /// два независимых хоста в одном процессе: сокеты 319/320 займёт только
+    /// первый. Приложение, которому нужны несколько экземпляров с битом PTP,
+    /// создаёт `TimeSync` один раз и передаёт клон сюда всем; тогда часы общие,
+    /// а identity, порт и сессии остаются раздельными.
+    pub time: Option<timesync::TimeSync>,
 }
 
 /// MediaRemote: карточка «Сейчас играет» на iPhone.
@@ -84,7 +92,70 @@ fn random_pgid() -> String {
     )
 }
 
-pub async fn run(opts: Options) -> Result<()> {
+/// Запущенный приёмник: своя identity, порт, Bonjour, вывод и сессии.
+///
+/// Экземпляры не делят изменяемое состояние: у каждого свой `Context`, свой
+/// `Player`, свой каталог состояния и свой `JoinSet` соединений. Остановка
+/// одного не трогает остальные. Явно общие ресурсы — сетевые порты (у каждого
+/// экземпляра свои), служба PTP (`Options::time`) и звуковое устройство,
+/// которое приложение выбирает каждому экземпляру само.
+pub struct Receiver {
+    ctx: Arc<Context>,
+    shutdown: tokio::sync::watch::Sender<bool>,
+    accepts: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl Receiver {
+    pub fn name(&self) -> &str {
+        &self.ctx.device.name
+    }
+
+    pub fn device_id(&self) -> &str {
+        &self.ctx.device.device_id
+    }
+
+    pub fn port(&self) -> u16 {
+        self.ctx.port
+    }
+
+    pub fn device(&self) -> &DeviceInfo {
+        &self.ctx.device
+    }
+
+    /// Останавливает приём, объявление и соединения этого экземпляра.
+    /// Остальные экземпляры процесса продолжают работать.
+    pub async fn stop(mut self) {
+        self.shutdown.send_replace(true);
+        // Принимающие задачи дождутся своего `JoinSet`: соединения этого
+        // экземпляра закрываются, чужие не затрагиваются.
+        for task in self.accepts.drain(..) {
+            let _ = task.await;
+        }
+        // Снять объявления сразу, не дожидаясь, пока сессии отпустят Context.
+        self.ctx.mdns.lock().unwrap().take();
+    }
+
+    fn abort(&self) {
+        self.shutdown.send_replace(true);
+        for task in &self.accepts {
+            task.abort();
+        }
+    }
+}
+
+impl Drop for Receiver {
+    /// Без явного [`Receiver::stop`] соединения обрываются, а не продолжают
+    /// жить в фоне: у экземпляра нет обязательств перед остальными.
+    fn drop(&mut self) {
+        self.abort();
+    }
+}
+
+/// Поднимает экземпляр приёмника и возвращает ручку управления им.
+///
+/// Один процесс может запустить несколько экземпляров: у каждого свой
+/// `Options` (имя, профиль, `state_dir` с identity, порт, вывод).
+pub async fn start(opts: Options) -> Result<Receiver> {
     let identity = state::load_identity(&opts.state_dir)?;
     let store = state::FileStore::open(&opts.state_dir)?;
     let device_id = state::device_id(&identity);
@@ -139,16 +210,18 @@ pub async fn run(opts: Options) -> Result<()> {
     }
     // Media direction does not select the clock protocol. A combined receiver
     // owns the same PTP service for screen and audio sessions.
-    let time = if device.features.0 & Features::PTP != 0 {
-        if let Some(ip) = opts.ptp_bind {
-            timesync::TimeSync::start_host(clock_id(&device_id), ip)
-                .await
-                .context("PTP host startup")?
-        } else {
-            timesync::TimeSync::start(clock_id(&device_id))
+    let time = match opts.time {
+        Some(shared) => shared,
+        None if device.features.0 & Features::PTP != 0 => {
+            if let Some(ip) = opts.ptp_bind {
+                timesync::TimeSync::start_host(clock_id(&device_id), ip)
+                    .await
+                    .context("PTP host startup")?
+            } else {
+                timesync::TimeSync::start(clock_id(&device_id))
+            }
         }
-    } else {
-        timesync::TimeSync::idle(clock_id(&device_id))
+        None => timesync::TimeSync::idle(clock_id(&device_id)),
     };
     info!(device = %opts.audio.device, buffer_ms = opts.audio.output_latency.as_millis(), "вывод звука");
     let mut player = Player::new(opts.audio, time);
@@ -195,11 +268,28 @@ pub async fn run(opts: Options) -> Result<()> {
         *ctx.mdns.lock().unwrap() = Some(advertiser);
     }
 
+    let (shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
+    let mut accepts = Vec::new();
     for listener in listeners {
-        tokio::spawn(::sessions::transport::accept_loop(listener, ctx.clone()));
+        accepts.push(tokio::spawn(::sessions::transport::accept_loop(
+            listener,
+            ctx.clone(),
+            shutdown_rx.clone(),
+        )));
     }
+    Ok(Receiver {
+        ctx,
+        shutdown,
+        accepts,
+    })
+}
+
+/// Демон: один экземпляр до Ctrl-C. Приложения запускают [`start`] сами.
+pub async fn run(opts: Options) -> Result<()> {
+    let receiver = start(opts).await?;
     tokio::signal::ctrl_c().await?;
     info!("остановка");
+    receiver.stop().await;
     Ok(())
 }
 

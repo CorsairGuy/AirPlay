@@ -9,28 +9,48 @@ use std::sync::Arc;
 use anyhow::Result;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::watch;
+use tokio::task::JoinSet;
 use tracing::{info, warn};
 
 use crate::session::{Context, Session};
 
-pub async fn accept_loop(listener: TcpListener, ctx: Arc<Context>) {
+/// Принимает соединения, пока `shutdown` не станет `true`.
+///
+/// Соединения принадлежат этому вызову (`JoinSet`): при остановке они
+/// обрываются вместе с ним и не задевают другие экземпляры приёмника в том
+/// же процессе. `Context` уже свой у каждого экземпляра.
+pub async fn accept_loop(
+    listener: TcpListener,
+    ctx: Arc<Context>,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let mut sessions = JoinSet::new();
     loop {
-        let (stream, addr) = match listener.accept().await {
-            Ok(a) => a,
-            Err(e) => {
-                warn!("accept: {e}");
-                continue;
+        tokio::select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow_and_update() {
+                    break;
+                }
             }
-        };
-        let ctx = ctx.clone();
-        tokio::spawn(async move {
-            let peer = addr.to_string();
-            info!(%peer, "подключение");
-            match serve_connection(stream, ctx, addr).await {
-                Ok(()) => info!(%peer, "отключение"),
-                Err(e) => warn!(%peer, "соединение закрыто: {e:#}"),
-            }
-        });
+            accepted = listener.accept() => match accepted {
+                Ok((stream, addr)) => {
+                    sessions.spawn(serve_peer(stream, ctx.clone(), addr));
+                }
+                Err(e) => warn!("accept: {e}"),
+            },
+            Some(_) = sessions.join_next(), if !sessions.is_empty() => {}
+        }
+    }
+    sessions.shutdown().await;
+}
+
+async fn serve_peer(stream: TcpStream, ctx: Arc<Context>, addr: SocketAddr) {
+    let peer = addr.to_string();
+    info!(%peer, "подключение");
+    match serve_connection(stream, ctx, addr).await {
+        Ok(()) => info!(%peer, "отключение"),
+        Err(e) => warn!(%peer, "соединение закрыто: {e:#}"),
     }
 }
 
