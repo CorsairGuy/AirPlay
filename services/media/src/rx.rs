@@ -1108,6 +1108,11 @@ impl Drop for Media {
             mrp.abort();
         }
         self.control.detach(self.id);
+        // Соединение оборвалось без TEARDOWN: сессия отправителя закончилась,
+        // иначе gid/card остаются висеть после краткого или долгого разрыва.
+        if !self.rc_only {
+            self.group.set_group(None);
+        }
     }
 }
 

@@ -1327,4 +1327,52 @@ mod tests {
             vec!["playing true", "playing false", "playing true"]
         );
     }
+
+    /// S3/S4/S6: обрыв без TEARDOWN освобождает сессию и gid, а новое
+    /// соединение может снова открыть SETUP на том же контексте.
+    #[test]
+    fn abrupt_disconnect_clears_group_and_reconnect_succeeds() {
+        use plist::{Dictionary, Value};
+        let ctx = ctx();
+        let to_plist = |group: &str| {
+            let mut d = Dictionary::new();
+            d.insert("timingProtocol".into(), "PTP".into());
+            d.insert("groupUUID".into(), group.into());
+            let mut out = Vec::new();
+            Value::Dictionary(d).to_writer_binary(&mut out).unwrap();
+            out
+        };
+        let mut first = Client::new(ctx.clone());
+        assert_eq!(
+            first
+                .call("SETUP", "rtsp://x/1", &[], to_plist("group-1"))
+                .status,
+            200
+        );
+        assert_eq!(
+            *ctx.session_group.lock().unwrap(),
+            Some("group-1".to_string())
+        );
+        // Краткий обрыв: клиент исчезает без TEARDOWN.
+        drop(first);
+        assert_eq!(*ctx.session_group.lock().unwrap(), None);
+        assert_eq!(ctx.player.active_packets(), None);
+
+        let mut second = Client::new(ctx.clone());
+        assert_eq!(
+            second
+                .call("SETUP", "rtsp://x/1", &[], to_plist("group-2"))
+                .status,
+            200
+        );
+        assert_eq!(
+            *ctx.session_group.lock().unwrap(),
+            Some("group-2".to_string())
+        );
+        assert_eq!(
+            second.call("TEARDOWN", "rtsp://x/1", &[], vec![]).status,
+            200
+        );
+        assert_eq!(*ctx.session_group.lock().unwrap(), None);
+    }
 }

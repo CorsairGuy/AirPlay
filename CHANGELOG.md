@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Reconnect (S3/S4/S6): dropping a session without TEARDOWN now clears the sender group and card state, so an abrupt disconnect or network change no longer leaves a stale gid; added a reconnect test that opens a new SETUP on the same context. No automatic reconnect or Station route changes; long half-open socket detection remains with the OS.
+
 - HLS seek clears buffered audio; multichannel HLS audio is rejected rather than silently dropping channels. A replacement buffered-audio connection must deliver an authenticated packet before replacing the active reader; replay protection remains outside this change.
 
 - Fixed audio receive defects that caused silence or a stuck session: realtime UDP datagrams were truncated at 2048 bytes (an ALAC 24-bit packet is 2156), a second buffered TCP connection was not accepted while the previous one stayed open, an unknown SSRC stalled playback permanently, the packet queue and the partial-packet buffer had no bound, `recv` errors spun a busy loop, and a failed decoder was recreated on every packet. End-to-end tests in `crates/audio_stream/tests/pcm.rs` send known AAC/PCM and compare the PCM that reaches the sink; the realtime path is covered with PCM because no ALAC encoder is available, so ALAC playback still needs an iPhone check.
