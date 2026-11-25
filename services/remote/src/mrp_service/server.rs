@@ -328,6 +328,9 @@ async fn handle(
         *subscribed = true;
         let mut out = model::topology(identity, feed);
         out.extend(model::announcement(identity, feed));
+        // Переподключившийся контроллер получает текущий трек сразу, не
+        // дожидаясь следующего события отправителя.
+        out.push(model::state(identity, feed, None, id.clone()));
         if id.is_some() {
             out.push(reply(id, 0));
         }
@@ -838,5 +841,50 @@ mod tests {
                 Some(expected)
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod phase6_server_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn subscribe_replays_current_track_for_a_reconnecting_controller() {
+        use mrp::schema::{field as mf, kind as mk};
+        let identity = Identity {
+            device: "local".into(),
+            group: "group".into(),
+        };
+        let current = Feed {
+            source: "airplay".into(),
+            title: "Текущий трек".into(),
+            artist: "Артист".into(),
+            playing: true,
+            ..Default::default()
+        };
+        let (feed, _) = watch::channel(current.clone());
+        let control = Control::new(feed, media::control::Remote::new());
+        let mut subscribed = false;
+        let message = model::envelope(
+            "CLIENT_UPDATES_CONFIG_MESSAGE",
+            Node::default(),
+            Some("sub-1"),
+        );
+        let out = handle(message, &identity, &current, &control, &mut subscribed)
+            .await
+            .unwrap();
+        assert!(subscribed);
+        let state = out
+            .iter()
+            .find(|n| n.number(mf::ProtocolMessage::r#type) == Some(mk::SET_STATE_MESSAGE as u64))
+            .expect("snapshot state after subscribe");
+        let body = state.nested(mf::ProtocolMessage::setStateMessage).unwrap();
+        let queue = body.nested(mf::SetStateMessage::playbackQueue).unwrap();
+        let item = queue.nested(mf::PlaybackQueue::contentItems).unwrap();
+        let md = item.nested(mf::ContentItem::metadata).unwrap();
+        assert_eq!(
+            md.string(mf::ContentItemMetadata::title),
+            Some("Текущий трек")
+        );
     }
 }
