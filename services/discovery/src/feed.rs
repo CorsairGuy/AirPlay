@@ -13,7 +13,15 @@ pub enum Input {
 impl Input {
     async fn recv(&mut self) -> Option<ServiceEvent> {
         match self {
-            Self::Browser(browser) => browser.events().recv_async().await.ok(),
+            // Both browsed types feed one table; whichever answers first wins.
+            Self::Browser(browser) => match browser.receivers() {
+                [one] => one.recv_async().await.ok(),
+                [airplay, raop] => tokio::select! {
+                    event = airplay.recv_async() => event.ok(),
+                    event = raop.recv_async() => event.ok(),
+                },
+                _ => None,
+            },
             Self::Offline(events) => events.recv().await,
         }
     }
@@ -80,7 +88,9 @@ pub async fn run(
     status: watch::Sender<Status>,
     mut stop: watch::Receiver<bool>,
 ) {
-    let mut table = ServiceTable::new(Kind::AirPlay);
+    // Store both `_airplay._tcp` and `_raop._tcp`: capabilities need both
+    // records, while the catalogue keeps building only AirPlay routes.
+    let mut table = ServiceTable::new(Kind::Both);
     loop {
         if *stop.borrow() {
             break;

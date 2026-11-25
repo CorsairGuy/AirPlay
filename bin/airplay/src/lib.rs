@@ -12,7 +12,9 @@ pub use ::remote::card;
 pub use ::remote::card_transport;
 pub use ::remote::continuous_control;
 pub use discovery;
-pub use discovery::{catalog as discovery_catalog, feed as discovery_feed};
+pub use discovery::{
+    capabilities as discovery_capabilities, catalog as discovery_catalog, feed as discovery_feed,
+};
 pub use identity;
 #[cfg(target_os = "linux")]
 pub use identity::daemon_identity;

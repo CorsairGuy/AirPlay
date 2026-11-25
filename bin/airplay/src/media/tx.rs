@@ -227,6 +227,33 @@ pub async fn run_selected<R: AsyncRead + Unpin>(
     run_controlled(options, input, stop, control).await
 }
 
+/// Same selection as [`run_selected`], but refuses logical rows whose discovered
+/// capabilities do not prove a profile this build can send. A receiver with
+/// missing or contradictory TXT is not started optimistically.
+pub async fn run_selected_discovered<R: AsyncRead + Unpin>(
+    options: Options,
+    catalog: &::discovery::catalog::OutputCatalog,
+    table: &::discovery::mdns::discovery::ServiceTable,
+    selected: &[String],
+    input: R,
+    stop: watch::Receiver<bool>,
+    control: crate::send_control::RelayControl,
+) -> Result<()> {
+    for uid in selected {
+        if let ::discovery::capabilities::Selection::Refuse(refusal) =
+            ::discovery::capabilities::select_for_output(
+                table,
+                catalog,
+                uid,
+                ::discovery::capabilities::Want::Audio,
+            )
+        {
+            bail!("{uid}: {}", refusal.reason);
+        }
+    }
+    run_selected(options, catalog, selected, input, stop, control).await
+}
+
 /// Optional platform renderer, fed from the same clock and immutable packet queue.
 /// The adapter owns its output latency, gain, startup gate and resource cleanup.
 /// No route is changed by this API; platform handoff requires separate validation.
