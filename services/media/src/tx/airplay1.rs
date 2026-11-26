@@ -5,7 +5,15 @@
 //! volume and teardown. It does not share the AirPlay 2 session/PTP engine.
 //!
 //! AES-CBC keys are wrapped with RSA-OAEP/SHA-1 by the core crypto module.
-//! Apple-Response verification is not implemented here.
+//!
+//! `Apple-Challenge` goes into `ANNOUNCE` only for an encrypted session, as in
+//! OwnTone `612d6b3c` `src/outputs/raop.c:1215`: the receiver answers with
+//! `Apple-Response`, and a sending side never verifies it; that file has no
+//! sender-side `Apple-Response` handling at all. Do not invent a check for a
+//! header an AirPlay 1 sender never receives.
+//! The `_raop._tcp` `et` list is only recorded as declared values: in that
+//! reference `et` token `4` means auth-setup support (line 4448), not payload
+//! encryption, and the reference does not derive encryption from `et`.
 //! No hardware compatibility is claimed.
 
 use std::collections::BTreeMap;
@@ -48,10 +56,12 @@ pub struct Receiver {
     pub address: SocketAddr,
     pub pcm: bool,
     pub alac: bool,
-    /// `et` includes an observed nonzero mode (1 or 4); informational only.
-    pub encryption: bool,
-    /// Declared encryption modes; `None` means the advertisement omitted `et`.
+    /// Declared `et` modes; `None` means the advertisement omitted `et`. Their
+    /// numeric meanings are not inferred from the name of the field.
     pub encryption_types: Option<Vec<u8>>,
+    /// `et` advertises auth-setup support (token `4`), not payload encryption;
+    /// see OwnTone `612d6b3c` `src/outputs/raop.c:4448`.
+    pub auth_setup: bool,
 }
 
 impl Receiver {
@@ -76,9 +86,9 @@ impl Receiver {
             bail!("invalid RAOP codec list");
         }
         // Preserve the advertised numeric modes; their exact meaning is not inferred here.
-        let encryption = txt
+        let auth_setup = txt
             .get("et")
-            .is_some_and(|et| et.split(',').any(|v| v.trim() == "1" || v.trim() == "4"));
+            .is_some_and(|et| et.split(',').any(|v| v.trim() == "4"));
         let encryption_types = txt
             .get("et")
             .map(|et| {
@@ -98,8 +108,8 @@ impl Receiver {
             address,
             pcm: parsed.contains(&0),
             alac: parsed.contains(&1),
-            encryption,
             encryption_types,
+            auth_setup,
         })
     }
 
@@ -196,6 +206,13 @@ impl SessionConfig {
     }
 }
 
+/// A fresh `Apple-Challenge` value: 16 random bytes, base64 without padding
+/// (22 characters), exactly as OwnTone `612d6b3c` builds it. It is only sent
+/// for an encrypted session; the receiver answers with `Apple-Response`.
+fn announce_challenge() -> String {
+    STANDARD_NO_PAD.encode(rand::random::<[u8; 16]>())
+}
+
 /// One connected AirPlay 1 audio session. The caller supplies packets already
 /// in the stream clock; this module owns RAOP framing and the RTSP lifecycle.
 pub struct Session {
@@ -270,10 +287,7 @@ impl Session {
         );
         // OPTIONS proves the peer is RAOP and exposes methods without changing state.
         session.request("OPTIONS", "*", &[], &[]).await?;
-        let challenge = session
-            .config
-            .audio_key
-            .map(|_| STANDARD_NO_PAD.encode(rand::random::<[u8; 16]>()));
+        let challenge = session.config.audio_key.map(|_| announce_challenge());
         let mut announce_headers = vec![("Content-Type", "application/sdp")];
         if let Some(challenge) = &challenge {
             announce_headers.push(("Apple-Challenge", challenge));
@@ -660,7 +674,8 @@ mod tests {
         assert_eq!(both.name, "Kitchen");
         assert_eq!(both.negotiate(true).unwrap(), Codec::Alac);
         assert_eq!(both.negotiate(false).unwrap(), Codec::Pcm);
-        assert!(both.encryption);
+        assert!(!both.auth_setup);
+        assert!(raop("0,1", "0,4").auth_setup);
         let alac = raop("1", "0");
         assert_eq!(alac.negotiate(true).unwrap(), Codec::Alac);
         assert_eq!(
@@ -710,6 +725,14 @@ mod tests {
         assert!(config.validate().is_err(), "invalid RSA block length");
         config.rsa_wrapped_key = Some(vec![0; 256]);
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn announce_challenge_is_sixteen_unpadded_base64_bytes() {
+        let challenge = announce_challenge();
+        assert_eq!(challenge.len(), 22);
+        assert!(!challenge.contains('='));
+        assert_eq!(STANDARD_NO_PAD.decode(&challenge).unwrap().len(), 16);
     }
 
     #[test]

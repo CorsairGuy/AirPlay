@@ -56,8 +56,8 @@ async fn airplay1_sender_and_receiver_exchange_pcm() {
         address: ([127, 0, 0, 1], port).into(),
         pcm: true,
         alac: false,
-        encryption: false,
         encryption_types: Some(vec![0]),
+        auth_setup: false,
     };
     let mut sender = Session::connect(SessionConfig::new(target, Codec::Pcm))
         .await
