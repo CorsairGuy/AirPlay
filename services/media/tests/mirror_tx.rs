@@ -530,3 +530,109 @@ async fn mirror_sender_pairs_sets_up_streams_and_reconnects() {
     assert_eq!(rounds[0].audio_plain, AUDIO_FRAME);
     assert_eq!(rounds[0].video_latency, 50);
 }
+
+/// Отказ видео-SETUP после удачного аудио-SETUP не оставляет сессию: уходит
+/// TEARDOWN с тем же Session, а RECORD не отправляется.
+#[tokio::test]
+async fn rejected_video_setup_tears_down_the_partial_session() {
+    let accessory = PairIdentity::from_seed("accessory:mirror-fail", &[21u8; 32]);
+    let controller = PairIdentity::from_seed("controller:mirror-fail", &[23u8; 32]);
+    let store = MemoryStore::default();
+    store.add(controller.pairing_id.as_bytes(), controller.public_key());
+    let credentials = PairingCredentials::new(
+        controller.clone(),
+        accessory.pairing_id.as_bytes().to_vec(),
+        accessory.public_key(),
+    )
+    .unwrap();
+
+    let event_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let control = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = control.local_addr().unwrap();
+    let receiver = tokio::spawn(async move {
+        let (stream, _) = control.accept().await?;
+        stream.set_nodelay(true)?;
+        let mut conn = Conn::new(stream);
+        let mut verify = PairVerify::new(accessory.clone());
+        let mut session_uuid = None;
+        loop {
+            let request = conn.request().await?;
+            match (request.method.as_str(), request.uri.as_str()) {
+                ("POST", "/pair-verify") => match verify.handle(&request.body, &store)? {
+                    VerifyOutcome::Continue(body) => conn.reply(&request, body).await?,
+                    VerifyOutcome::Verified { reply, keys, .. } => {
+                        conn.reply(&request, reply).await?;
+                        conn.channel = Some(Channel::new(keys));
+                    }
+                    VerifyOutcome::Rejected(_) => bail!("pair-verify rejected"),
+                },
+                ("SETUP", _) => {
+                    let body = plist(&request.body)?;
+                    let stream = streams(&body)?;
+                    match stream.get("type").and_then(|v| v.as_unsigned_integer()) {
+                        Some(96) => {
+                            session_uuid = body
+                                .get("sessionUUID")
+                                .and_then(|v| v.as_string())
+                                .map(str::to_owned);
+                            let reply = dictionary(vec![
+                                (
+                                    "eventPort",
+                                    plist::Value::Integer(
+                                        (event_listener.local_addr()?.port() as u64).into(),
+                                    ),
+                                ),
+                                (
+                                    "streams",
+                                    plist::Value::Array(vec![plist::Value::Dictionary(
+                                        dictionary(vec![
+                                            ("type", plist::Value::Integer(96u64.into())),
+                                            ("dataPort", plist::Value::Integer(7000u64.into())),
+                                            ("controlPort", plist::Value::Integer(7001u64.into())),
+                                        ]),
+                                    )]),
+                                ),
+                            ]);
+                            conn.reply(&request, binary(reply)).await?;
+                        }
+                        Some(110) => conn.reply_status(&request, 500, Vec::new()).await?,
+                        other => bail!("unexpected stream type {other:?}"),
+                    }
+                }
+                ("RECORD", _) => bail!("RECORD must not follow a rejected video SETUP"),
+                ("TEARDOWN", _) => {
+                    return Ok::<_, anyhow::Error>((
+                        session_uuid,
+                        request.headers.get("Session").map(str::to_owned),
+                    ));
+                }
+                (method, uri) => bail!("unexpected {method} {uri}"),
+            }
+        }
+    });
+
+    let mut identity = Identity::new("controller:mirror-fail", "Mirror TX");
+    identity.model = "iPhone".into();
+    let mut config = MirrorConfig::new(
+        endpoint,
+        identity,
+        MirrorAuth::Paired(Box::new(credentials)),
+    );
+    config.audio = AudioFormat::AAC_ELD;
+    let error = MirrorSession::connect(config)
+        .await
+        .err()
+        .expect("video SETUP must fail");
+    assert!(format!("{error:#}").contains("video SETUP"), "{error:#}");
+
+    let (session_uuid, torn_down) = tokio::time::timeout(Duration::from_secs(5), receiver)
+        .await
+        .expect("receiver timeout")
+        .expect("receiver task")
+        .expect("protocol");
+    assert!(session_uuid.is_some(), "audio SETUP carries sessionUUID");
+    assert_eq!(
+        torn_down, session_uuid,
+        "TEARDOWN names the partial session"
+    );
+}
