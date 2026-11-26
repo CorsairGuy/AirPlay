@@ -39,6 +39,9 @@ pub struct Packetized {
     pub audio: Vec<u8>,
     pub header: Header,
     pub sync: [u8; 20],
+    /// First audio packet of this stream. Sync/d7 first-packet signalling uses
+    /// this, not the header marker bit, which a seek also raises.
+    pub first: bool,
 }
 
 /// AirPlay NTP sync packet. RTP source/destination differ by latency_frames.
@@ -90,6 +93,7 @@ pub struct PcmPacketizer {
     mapping_lead_frames: u32,
     first_index: Option<u64>,
     next_min_index: Option<u64>,
+    marker_pending: bool,
     cache: Vec<Option<(u16, Vec<u8>)>>,
 }
 
@@ -104,6 +108,7 @@ impl PcmPacketizer {
             mapping_lead_frames: latency_frames,
             first_index: None,
             next_min_index: None,
+            marker_pending: false,
             cache: (0..RETRANSMIT_CACHE_PACKETS).map(|_| None).collect(),
         }
     }
@@ -144,6 +149,14 @@ impl PcmPacketizer {
         self.cache.fill(None);
     }
 
+    /// A source discontinuity (seek or track change) starts a new RTP talkspurt:
+    /// the next packet alone carries the header marker bit. Sequence, nonce,
+    /// timestamp origin and the sync/d7 first-packet flag stay untouched, so the
+    /// shared media epoch is preserved. A failed packetize keeps it pending.
+    pub fn restart_spurt(&mut self) {
+        self.marker_pending = true;
+    }
+
     pub fn packetize(
         &mut self,
         pcm: &[u8],
@@ -168,8 +181,9 @@ impl PcmPacketizer {
         let timestamp = self
             .latency_frames
             .wrapping_add(frame_index.wrapping_sub(origin) as u32);
+        let marker = first || self.marker_pending;
         let header = Header {
-            marker: first,
+            marker,
             payload_type: 96,
             seq: self.sequence,
             timestamp,
@@ -181,12 +195,14 @@ impl PcmPacketizer {
             Some((self.sequence, audio.clone()));
         self.first_index = Some(origin);
         self.next_min_index = Some(next_index);
+        self.marker_pending = false;
         self.sequence = self.sequence.wrapping_add(1);
         self.next_nonce = nonce.checked_add(1);
         Ok(Packetized {
             audio,
             header,
             sync,
+            first,
         })
     }
 
@@ -266,6 +282,35 @@ mod tests {
             next.audio.as_slice()
         );
     }
+    #[test]
+    fn seek_marks_one_new_talkspurt_without_moving_the_media_epoch() {
+        let mut sender = sender(7);
+        let first = sender.packetize(&[1; 1408], 1000, 1).unwrap();
+        let later = sender.packetize(&[2; 1408], 1352, 2).unwrap();
+        sender.clear_retransmit_cache();
+        sender.restart_spurt();
+        // A late frame of the old generation is rejected before packetize: it
+        // spends neither sequence/nonce nor the pending seek marker.
+        assert!(matches!(
+            sender.packetize(&[3; 1408], 1000, 3),
+            Err(PacketizeError::NonMonotonicFrameIndex)
+        ));
+        let seek = sender.packetize(&[4; 1408], 2000, 4).unwrap();
+        let after = sender.packetize(&[5; 1408], 2352, 5).unwrap();
+        assert!(seek.header.marker);
+        assert!(!after.header.marker);
+        assert!(first.first && !later.first && !seek.first && !after.first);
+        assert_eq!(first.sync[0], 0x90);
+        assert_eq!(seek.sync[0], 0x80, "seek keeps the stream-first flag");
+        assert_eq!(seek.header.seq, 9);
+        assert_eq!(
+            seek.header.timestamp,
+            first.header.timestamp.wrapping_add(1000)
+        );
+        assert_eq!(&seek.audio[seek.audio.len() - 8..], &2u64.to_le_bytes());
+        assert!(sender.retransmit(&request(later.header.seq, 1)).is_empty());
+    }
+
     #[test]
     fn pcm_encrypts_once_with_first_marker_and_shared_producer_epoch() {
         let mut sender = sender(7);

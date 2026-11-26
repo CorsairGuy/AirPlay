@@ -565,6 +565,12 @@ impl TargetPacketizer {
             Self::Ptp(packetizer) => packetizer.clear_retransmit_cache(),
         }
     }
+    fn restart_spurt(&mut self) {
+        match self {
+            Self::Ntp(packetizer) => packetizer.restart_spurt(),
+            Self::Ptp(packetizer) => packetizer.restart_spurt(),
+        }
+    }
     fn initial_timestamp(&self) -> u32 {
         match self {
             Self::Ntp(p) => p.initial_timestamp(),
@@ -1092,6 +1098,9 @@ impl Session {
                     if !chunk.source_is_current() { continue; }
                     if last_source.as_ref().is_some_and(|previous| !previous.same_source_revision(&chunk)) {
                         self.packetizer.clear_retransmit_cache();
+                        // A seek/track change continues the same media epoch but
+                        // starts a new talkspurt: only this next packet is marked.
+                        self.packetizer.restart_spurt();
                     }
                     let packet = self.packetizer.packetize(&chunk)?;
                     if last_sync.elapsed() >= Duration::from_secs(1) {

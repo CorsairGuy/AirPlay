@@ -89,7 +89,7 @@ impl PtpPacketizer {
             packetized.header.timestamp,
             self.inner.mapping_lead_frames(),
             reading,
-            packetized.header.marker,
+            packetized.first,
         )?;
         Ok(PtpPacket {
             audio: packetized.audio,
@@ -102,6 +102,12 @@ impl PtpPacketizer {
     }
     pub fn clear_retransmit_cache(&mut self) {
         self.inner.clear_retransmit_cache();
+    }
+    /// Mark the next audio packet as the start of a new talkspurt after a seek.
+    /// The d7 anchor keeps its stream-first flag, so the clock mapping does not
+    /// move with the discontinuity.
+    pub fn restart_spurt(&mut self) {
+        self.inner.restart_spurt();
     }
 }
 impl PtpPlan {
