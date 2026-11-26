@@ -3,7 +3,7 @@
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use clock::{Anchor, TimeSource};
@@ -228,9 +228,10 @@ impl Stream {
     }
 
     /// AirPlay 1 (RAOP): звук по UDP, управляющий канал и отдельный порт
-    /// запросов времени. Часов отправителя у нас нет: воспроизведение
-    /// начинается с первого пакета по своим часам. `sender_control` —
-    /// `control_port` из `Transport`: туда шлём запросы пересылки потерь.
+    /// запросов времени. Смещение часов отправителя оценивается по его же
+    /// запросам времени ([`RaopTiming`]); пока согласованных замеров нет,
+    /// воспроизведение идёт по своим часам. `sender_control` — `control_port`
+    /// из `Transport`: туда шлём запросы пересылки потерь.
     pub fn raop(
         cfg: Config,
         key: StreamKey,
@@ -248,7 +249,8 @@ impl Stream {
             socket: control.clone(),
             target: SocketAddr::new(sender, port),
         });
-        let playout = Arc::new(Playout::start(cfg, Arc::new(clock::NoTime), Some(format)));
+        let timing_clock = Arc::new(RaopTiming::default());
+        let playout = Arc::new(Playout::start(cfg, timing_clock.clone(), Some(format)));
         let cipher = Arc::new(match key {
             StreamKey::ChaCha(shk) => Decrypt::ChaCha(AudioCipher::new(&shk)),
             StreamKey::AesCbc { key, iv } => Decrypt::Cbc(Box::new(AudioCbc::new(&key, &iv))),
@@ -265,7 +267,7 @@ impl Stream {
                 Some(sender),
             )),
             tokio::spawn(receive_control(control, cipher, playout.clone(), Some(sender))),
-            tokio::spawn(receive_timing(timing)),
+            tokio::spawn(receive_timing(timing, timing_clock)),
         ];
         Ok(Stream {
             started: Some(started),
@@ -593,22 +595,87 @@ async fn drain(socket: UdpSocket) {
     while socket.recv(&mut buf).await.is_ok() {}
 }
 
-/// Отвечает на 32-байтные запросы времени `0xD2`. Полноценный RAOP RX
-/// также должен запрашивать часы отправителя и учитывать ответы; здесь
-/// это не реализовано, поэтому воспроизведение использует fallback-часы.
-async fn receive_timing(socket: UdpSocket) {
+/// Отвечает на 32-байтные запросы времени `0xD2` и пополняет оценку часов
+/// отправителя из передающих меток этих запросов.
+async fn receive_timing(socket: UdpSocket, timing: Arc<RaopTiming>) {
     let mut buf = [0u8; 128];
     loop {
         let Ok((n, from)) = socket.recv_from(&mut buf).await else {
             tokio::time::sleep(Duration::from_millis(10)).await;
             continue;
         };
-        if let Some(reply) = timing_reply(&buf[..n])
-            && let Err(e) = socket.send_to(&reply, from).await
-        {
-            debug!("ответ времени: {e}");
+        let packet = &buf[..n];
+        if let Some(reply) = timing_reply(packet) {
+            // Метка [24..32] — когда отправитель послал запрос по своим часам.
+            let sent = u64::from_be_bytes(packet[24..32].try_into().unwrap());
+            timing.observe(clock::ntp_to_ns(sent), local_ntp_ns());
+            if let Err(e) = socket.send_to(&reply, from).await {
+                debug!("ответ времени: {e}");
+            }
         }
     }
+}
+
+/// Сколько последних замеров часов отправителя AirPlay 1 держим.
+const RAOP_TIMING_SAMPLES: usize = 8;
+/// Меньше этого числа согласованных замеров смещение не применяется: один
+/// запрос не отличает часы отправителя от задержки сети.
+const RAOP_TIMING_MIN_SAMPLES: usize = 3;
+/// Разброс выборки, выше которого оценка считается неустойчивой, нс.
+const RAOP_TIMING_SPREAD_NS: i64 = 50_000_000;
+
+/// Смещение часов отправителя AirPlay 1 относительно наших.
+///
+/// Классический RAOP не сообщает порт времени отправителя, к которому можно
+/// обратиться с собственным запросом (наши `control_port`/`timing_port` из
+/// `SETUP` — это то, куда отправляет он). Поэтому смещение оценивается по его
+/// же запросам `0xD2`: передающая метка запроса (часы отправителя) сравнивается
+/// с моментом приёма (наши часы). Односторонняя задержка неизвестна и только
+/// увеличивает оценку, поэтому берётся медиана окна, а при разбросе больше
+/// 50 мс оценка отвергается — тогда вывод остаётся на fallback-часах.
+#[derive(Default)]
+struct RaopTiming {
+    samples: Mutex<Vec<i64>>,
+}
+
+impl RaopTiming {
+    fn observe(&self, sender_ns: u64, received_ns: u64) {
+        let delta = sender_ns as i64 - received_ns as i64;
+        let mut samples = self.samples.lock().unwrap_or_else(|e| e.into_inner());
+        if samples.len() == RAOP_TIMING_SAMPLES {
+            samples.remove(0);
+        }
+        samples.push(delta);
+    }
+
+    fn estimate(&self) -> Option<i64> {
+        let samples = self.samples.lock().unwrap_or_else(|e| e.into_inner());
+        if samples.len() < RAOP_TIMING_MIN_SAMPLES {
+            return None;
+        }
+        let mut sorted = samples.clone();
+        sorted.sort_unstable();
+        let spread = sorted[sorted.len() - 1] - sorted[0];
+        (spread <= RAOP_TIMING_SPREAD_NS).then(|| sorted[sorted.len() / 2])
+    }
+}
+
+impl TimeSource for RaopTiming {
+    fn offset(&self, timeline: u64) -> Option<i64> {
+        (timeline == clock::NTP_TIMELINE)
+            .then(|| self.estimate())?
+            .map(|offset| offset + ntp_base_ns())
+    }
+}
+
+fn local_ntp_ns() -> u64 {
+    clock::ntp_to_ns(ntp_now())
+}
+
+/// Наше NTP-время минус монотонные часы процесса; постоянно с запуска.
+fn ntp_base_ns() -> i64 {
+    static BASE: OnceLock<i64> = OnceLock::new();
+    *BASE.get_or_init(|| local_ntp_ns() as i64 - clock::now_ns() as i64)
 }
 
 fn timing_reply(request: &[u8]) -> Option<[u8; 32]> {
@@ -659,6 +726,51 @@ mod tests {
         let mut sync = request;
         sync[1] = 0xD4;
         assert!(timing_reply(&sync).is_none());
+    }
+
+    #[test]
+    fn raop_timing_needs_three_consistent_sender_samples() {
+        let timing = RaopTiming::default();
+        let local = 10_000_000_000u64;
+        timing.observe(local + 5_000_000, local);
+        assert!(
+            timing.offset(clock::NTP_TIMELINE).is_none(),
+            "one request is not a clock"
+        );
+        timing.observe(local + 6_000_000, local + 1_000_000);
+        assert!(timing.offset(clock::NTP_TIMELINE).is_none());
+        timing.observe(local + 7_000_000, local + 2_000_000);
+        let offset = timing.offset(clock::NTP_TIMELINE).unwrap();
+        assert_eq!(offset, 5_000_000 + ntp_base_ns());
+        // Чужая шкала времени якорь не получает.
+        assert!(timing.offset(1).is_none());
+    }
+
+    #[test]
+    fn raop_timing_rejects_a_window_whose_spread_is_not_a_clock() {
+        let timing = RaopTiming::default();
+        let local = 20_000_000_000u64;
+        for (index, delay) in [1_000_000u64, 2_000_000, 200_000_000]
+            .into_iter()
+            .enumerate()
+        {
+            timing.observe(local + delay, local + index as u64);
+        }
+        assert!(
+            timing.offset(clock::NTP_TIMELINE).is_none(),
+            "spread over 50 ms must not move playout"
+        );
+    }
+
+    #[test]
+    fn raop_timing_keeps_a_bounded_window() {
+        let timing = RaopTiming::default();
+        let local = 30_000_000_000u64;
+        for index in 0..RAOP_TIMING_SAMPLES + 2 {
+            timing.observe(local + 5_000_000, local + index as u64);
+        }
+        assert_eq!(timing.samples.lock().unwrap().len(), RAOP_TIMING_SAMPLES);
+        assert!(timing.offset(clock::NTP_TIMELINE).is_some());
     }
 
     #[test]
