@@ -11,7 +11,7 @@ use clock::{follower, probe, role};
 use std::{
     collections::{BTreeMap, VecDeque},
     io,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     sync::Arc,
     time::Duration,
 };
@@ -38,8 +38,20 @@ pub struct Service {
 struct PeerRequest {
     owner: u128,
     peers: Vec<Peer>,
+    inbound: bool,
     deadline: Option<std::time::Instant>,
     reply: oneshot::Sender<io::Result<()>>,
+}
+
+fn dual_union(inbound: &OwnerInterests, outbound: &OwnerInterests) -> io::Result<BTreeMap<IpAddr, Ports>> {
+    let mut all = inbound.union().clone();
+    for (ip, ports) in outbound.union() {
+        if all.insert(*ip, *ports).is_some() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "peer cannot be both timing source and receiver"));
+        }
+    }
+    if all.len() > 64 { return Err(io::Error::new(io::ErrorKind::InvalidInput, "too many timing peers")); }
+    Ok(all)
 }
 
 #[cfg(test)]
@@ -243,6 +255,73 @@ mod tests {
         let _event = UdpSocket::bind(addresses.0).await.unwrap();
         let _general = UdpSocket::bind(addresses.1).await.unwrap();
     }
+    #[tokio::test]
+    async fn dual_service_follows_a_source_and_serves_receivers_on_one_pair() {
+        let event = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let general = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let peer = Peer {
+            ip: "127.0.0.1".parse().unwrap(),
+            ports: Ports {
+                event: event.local_addr().unwrap().port(),
+                general: general.local_addr().unwrap().port(),
+            },
+        };
+        let service = Service::bind_dual(
+            config(peer, Policy::FollowOnly(peer.ip)),
+            Arc::new(TestClock),
+        )
+        .await
+        .unwrap();
+        let receiver_event = UdpSocket::bind("127.0.0.3:0").await.unwrap();
+        let receiver_general = UdpSocket::bind("127.0.0.3:0").await.unwrap();
+        let receiver = Peer { ip: receiver_event.local_addr().unwrap().ip(), ports: Ports {
+            event: receiver_event.local_addr().unwrap().port(),
+            general: receiver_general.local_addr().unwrap().port(),
+        }};
+        service.set_group_peers(1, vec![receiver]).await.unwrap();
+        service.set_group_peers(2, vec![receiver]).await.unwrap();
+        service.set_group_peers(1, vec![]).await.unwrap();
+        assert!(service.set_group_peers(2, vec![peer]).await.is_err(), "source cannot be a receiver");
+        assert!(service.set_session_peers(3, vec![receiver]).await.is_err(), "receiver cannot become source");
+        let addresses = service.addresses();
+        let mut status = service.subscribe();
+        let mut remote = Master::new(Domain::new(50, 1).unwrap()).unwrap();
+        remote.set_peers(&[peer.ip]).unwrap();
+        let mut buffer = [0u8; 1024];
+        let followed = timeout(Duration::from_secs(2), async {
+            let mut round = 0;
+            loop {
+                emit(&mut remote, round, &event, &general, addresses).await;
+                round += 1;
+                let value = *status.borrow_and_update();
+                if value.selection.role == Role::Follower(peer.ip) && value.mapping.is_some() {
+                    break value;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("inbound evidence must be followed");
+        assert_eq!(followed.quality, Some(Quality::OneWay));
+        assert_eq!(followed.selection.domain.unwrap().id(), 50);
+        let outbound = followed
+            .outbound
+            .expect("outbound mapping survives following");
+        assert_eq!(outbound.domain().id(), 100);
+        assert_ne!(outbound.domain(), followed.selection.domain.unwrap());
+        // The same socket pair still serves receivers while we follow.
+        while receiver_event.try_recv(&mut buffer).is_ok() {}
+        let (size, _) = timeout(Duration::from_secs(1), receiver_event.recv_from(&mut buffer))
+            .await
+            .expect("outbound Sync while following")
+            .unwrap();
+        assert!(size >= 44);
+        assert_eq!(buffer[0] & 15, 0);
+        assert_eq!(&buffer[20..28], &100u64.to_be_bytes());
+        assert!(event.try_recv(&mut buffer).is_err(), "no outbound Sync to source");
+        service.shutdown().await.unwrap();
+    }
+
     #[tokio::test]
     async fn opt_in_probe_completes_over_loopback_without_changing_mapping_quality() {
         let event = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -484,6 +563,21 @@ impl Drop for StatusGuard {
 }
 impl Service {
     pub async fn bind(config: Config, clock: Arc<dyn ClockSource>) -> io::Result<Self> {
+        Self::bind_mode(config, clock, false).await
+    }
+
+    /// One socket pair and one physical source with an explicit co-resident
+    /// outbound master. Receivers are served from our own domain while the
+    /// selected role may follow an inbound source; domains never mix.
+    pub async fn bind_dual(config: Config, clock: Arc<dyn ClockSource>) -> io::Result<Self> {
+        Self::bind_mode(config, clock, true).await
+    }
+
+    async fn bind_mode(
+        config: Config,
+        clock: Arc<dyn ClockSource>,
+        dual: bool,
+    ) -> io::Result<Self> {
         let network = config.network;
         if network.bind_ip.is_unspecified()
             || network.bind_ip.is_multicast()
@@ -496,6 +590,7 @@ impl Service {
         }
         peer_table(network.bind_ip, &network.peers)?;
         let mut interests = OwnerInterests::new(network.bind_ip);
+        let mut output_interests = OwnerInterests::new(network.bind_ip);
         if !network.peers.is_empty() {
             interests.set(0, network.peers.clone(), None)?;
         }
@@ -513,13 +608,23 @@ impl Service {
             local: initial.clock(),
         };
         let ips = network.peers.iter().map(|peer| peer.ip).collect::<Vec<_>>();
-        let mut engine = Engine::new(
-            network.domain,
-            initial,
-            &ips,
-            config.election,
-            config.follow,
-        )?;
+        let mut engine = if dual {
+            Engine::new_dual(
+                network.domain,
+                initial,
+                &ips,
+                config.election,
+                config.follow,
+            )?
+        } else {
+            Engine::new(
+                network.domain,
+                initial,
+                &ips,
+                config.election,
+                config.follow,
+            )?
+        };
         if let Some(probe) = config.probe {
             engine.enable_probe(probe)?;
         }
@@ -543,14 +648,17 @@ impl Service {
                     _=&mut stopped=>return Ok(()),
                     _=tick.tick()=>{
                         // A silent owner expires exactly like an explicit release.
-                        if let Some(change) = interests.expire(std::time::Instant::now()) {
+                        let input_change = interests.expire(std::time::Instant::now());
+                        let output_change = output_interests.expire(std::time::Instant::now());
+                        if input_change.is_some() || output_change.is_some() {
                             let (local, own) = source.sample()?;
-                            engine.set_peers(
-                                &change.union().keys().copied().collect::<Vec<_>>(),
-                                local,
-                                own,
-                            )?;
-                            peers = change.union().clone();
+                            if dual {
+                                engine.set_dual_peers(&interests.union().keys().copied().collect::<Vec<_>>(), &output_interests.union().keys().copied().collect::<Vec<_>>(), local, own)?;
+                                peers = dual_union(&interests, &output_interests)?;
+                            } else {
+                                engine.set_peers(&interests.union().keys().copied().collect::<Vec<_>>(), local, own)?;
+                                peers = interests.union().clone();
+                            }
                             worker_status.send_replace(engine.snapshot());
                         }
                         let (local,own)=source.sample()?;
@@ -561,7 +669,26 @@ impl Service {
                         // A cancelled caller must reconcile state: once queued,
                         // an update may still apply. Ack means applied locally,
                         // never receiver adoption or measured synchronization.
-                        let result = match interests.set(request.owner, request.peers, request.deadline) {
+                        let result = if dual {
+                            let mut input = interests.clone();
+                            let mut output = output_interests.clone();
+                            let selected = if request.inbound { &mut input } else { &mut output };
+                            match selected.set(request.owner, request.peers, request.deadline) {
+                                Err(error) => Err(error),
+                                Ok(_) => match dual_union(&input, &output) {
+                                    Err(error) => Err(error),
+                                    Ok(next) => {
+                                        let (local, own) = source.sample()?;
+                                        engine.set_dual_peers(&input.union().keys().copied().collect::<Vec<_>>(), &output.union().keys().copied().collect::<Vec<_>>(), local, own)?;
+                                        peers = next;
+                                        interests = input;
+                                        output_interests = output;
+                                        worker_status.send_replace(engine.snapshot());
+                                        Ok(())
+                                    }
+                                }
+                            }
+                        } else { match interests.set(request.owner, request.peers, request.deadline) {
                             Err(error) => Err(error),
                             Ok(change) => {
                                 if let Some(change) = change {
@@ -576,7 +703,7 @@ impl Service {
                                 }
                                 Ok(())
                             },
-                        };
+                        }};
                         let _ = request.reply.send(result);
                         continue;
                     },
@@ -611,7 +738,12 @@ impl Service {
     /// retained independently. Sockets/source remain alive, including no peers.
     /// Bounded queue: retry WouldBlock; cancellation after enqueue is not rollback.
     pub async fn set_peers(&self, peers: Vec<Peer>) -> io::Result<()> {
-        self.update_peers(0, peers, None).await
+        self.update_peers(0, peers, None, true).await
+    }
+    /// Peers belonging to an incoming session, distinct from group receivers.
+    pub async fn set_session_peers(&self, owner: u128, peers: Vec<Peer>) -> io::Result<()> {
+        if owner == 0 { return Err(io::Error::new(io::ErrorKind::InvalidInput, "reserved timing owner")); }
+        self.update_peers(owner, peers, None, true).await
     }
     /// Lease the owner's peers for at most `lease`. A consumer that stops
     /// refreshing releases its peers without an explicit call; other owners are
@@ -636,7 +768,7 @@ impl Service {
                 "unbounded timing-owner lease",
             ));
         }
-        self.update_peers(owner, peers, deadline).await
+        self.update_peers(owner, peers, deadline, false).await
     }
     /// Replace one consumer's peers in the common service's union. Owner is an
     /// application lifecycle token, not proof of native AirPlay group adoption.
@@ -648,13 +780,14 @@ impl Service {
                 "reserved timing owner",
             ));
         }
-        self.update_peers(owner, peers, None).await
+        self.update_peers(owner, peers, None, false).await
     }
     async fn update_peers(
         &self,
         owner: u128,
         peers: Vec<Peer>,
         deadline: Option<std::time::Instant>,
+        inbound: bool,
     ) -> io::Result<()> {
         peer_table(self.addresses.0.ip(), &peers)?;
         let (reply, result) = oneshot::channel();
@@ -662,6 +795,7 @@ impl Service {
             .try_send(PeerRequest {
                 owner,
                 peers,
+                inbound,
                 deadline,
                 reply,
             })
