@@ -104,7 +104,7 @@ impl Raop {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum SdpError {
+pub(crate) enum SdpError {
     Malformed,
     /// `rsaaeskey`/`fpaeskey`/`aesiv`/`et` не 0.
     Encrypted,
@@ -119,7 +119,7 @@ enum TransportError {
 
 /// Минимальный разбор SDP: `m=audio`, `a=rtpmap`, `a=fmtp` и признаки
 /// шифрования. Прочие строки не обязательны.
-fn parse_sdp(body: &[u8]) -> Result<Format, SdpError> {
+pub(crate) fn parse_sdp(body: &[u8]) -> Result<Format, SdpError> {
     let text = std::str::from_utf8(body).map_err(|_| SdpError::Malformed)?;
     let mut audio = false;
     let mut name: Option<String> = None;
