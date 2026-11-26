@@ -60,6 +60,10 @@ pub fn may_support_auth_setup(receiver: &Receiver) -> bool {
     receiver.encryption_types.as_ref().is_some_and(|types| types.contains(&4))
 }
 
+fn announce_challenge() -> String {
+    STANDARD_NO_PAD.encode(rand::random::<[u8; 16]>())
+}
+
 impl Receiver {
     /// `_raop._tcp` instance is normally `AABBCCDDEEFF@Name`.
     pub fn from_raop(
@@ -314,7 +318,7 @@ impl Session {
         let challenge = session
             .config
             .audio_key
-            .map(|_| STANDARD_NO_PAD.encode(rand::random::<[u8; 16]>()));
+            .map(|_| announce_challenge());
         let mut announce_headers = vec![("Content-Type", "application/sdp")];
         if let Some(challenge) = &challenge {
             announce_headers.push(("Apple-Challenge", challenge));
@@ -758,6 +762,13 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn announce_challenge_is_unpadded_sixteen_byte_nonce() {
+        let value = announce_challenge();
+        assert_eq!(value.len(), 22);
+        assert_eq!(STANDARD_NO_PAD.decode(value).unwrap().len(), 16);
     }
 
     #[test]
