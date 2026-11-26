@@ -9,10 +9,11 @@
 //! добавляем или из него выбрасываем один кадр. На слух это незаметно, в
 //! отличие от ресемплинга не стоит процессору ничего.
 //!
-//! Долгая сессия переживает перезапуск отправителя: шкала меток времени
-//! начинается заново только после серии пакетов с новой меткой. Одиночный
-//! запоздавший пакет из прошлой эпохи не меняет шкалу и не сдвигает
-//! `played_through`: он отбрасывается. При подтверждённой смене очередь
+//! Долгая сессия переживает перезапуск отправителя: новую шкалу меток
+//! объявляет сам отправитель (`FLUSH` с `RTP-Info`, [`Playout::rebase`]), а
+//! без объявления шкала начинается заново только после серии пакетов с новой
+//! меткой. Одиночный запоздавший пакет из прошлой эпохи не меняет шкалу и не
+//! сдвигает `played_through`: он отбрасывается. При подтверждённой смене очередь
 //! очищается, отметка о проигранном сбрасывается, якорь переставляется на
 //! новую метку, и до следующего якоря отправителя вывод идёт по своим часам.
 //! Без этого сброс метки заворачивался через 32-битную арифметику в «далёкое
@@ -414,6 +415,38 @@ impl Playout {
         self.changed();
     }
 
+    /// Отправитель сам объявил метку новой шкалы (`FLUSH` с `RTP-Info`):
+    /// очередь и отметка о проигранном сбрасываются, отсчёт начинается с
+    /// `rtp`. Это надёжный сигнал смены эпохи — серия пакетов для него не
+    /// нужна, первый же пакет новой шкалы попадает в очередь. Остаётся
+    /// эвристика по скачку для потока, который сменил шкалу без объявления.
+    pub fn rebase(&self, rtp: u32) {
+        let mut s = self.lock();
+        s.pending = None;
+        let dropped = s.packets.len();
+        s.packets.clear();
+        s.unwrap.reset(rtp);
+        s.played_through = None;
+        // Опорная точка новой шкалы: пакеты прежней шкалы далеко позади не
+        // попадут в очередь, а станут кандидатом на новую смену.
+        s.high_water = Some(rtp as i64);
+        if let Some(anchor) = s.anchor {
+            s.anchor = Some(Anchor {
+                rtp,
+                network_ns: 0,
+                timeline: 0,
+                playing: anchor.playing,
+            });
+            s.local_anchor = true;
+            s.fallback_local_ns = now_ns() as i64;
+        }
+        s.epoch += 1;
+        s.resyncs += 1;
+        info!(rtp, dropped, "отправитель объявил новую шкалу меток");
+        drop(s);
+        self.changed();
+    }
+
     pub fn set_volume(&self, db: f32) {
         self.lock().volume_db = db;
     }
@@ -445,9 +478,9 @@ impl Playout {
         self.lock().packets.len()
     }
 
-    /// Сколько раз шкала меток времени начиналась заново (перезапуск
-    /// отправителя). Штатный FLUSH меняет эпоху, но не метку, и счётчик не
-    /// увеличивает.
+    /// Сколько раз шкала меток времени начиналась заново: объявленная
+    /// отправителем (`FLUSH` с `RTP-Info`) или подтверждённая серией пакетов.
+    /// Штатный FLUSH без смены метки меняет эпоху, но счётчик не увеличивает.
     pub fn resync_count(&self) -> u64 {
         self.lock().resyncs
     }
@@ -913,6 +946,81 @@ mod epoch_tests {
         p.flush(None, 1_000_000_000);
         assert!(p.lock().pending.is_none());
         assert_eq!(p.resync_count(), 0);
+    }
+
+    #[test]
+    fn declared_scale_rebases_without_waiting_for_a_series() {
+        let p = Playout::inert();
+        p.play_from(1_000_000_000);
+        p.push(1_000_000_000, AAC_44100, vec![1]);
+        p.lock().played_through = Some(1_000_000_000);
+        p.rebase(0);
+        assert_eq!(p.resync_count(), 1);
+        assert_eq!(p.buffered_packets(), 0, "очередь прежней шкалы брошена");
+        p.push(0, AAC_44100, vec![2]);
+        assert_eq!(keys(&p), vec![0], "первый пакет сразу на новой шкале");
+        let s = p.lock();
+        assert_eq!(s.played_through, None, "старая отметка не действует");
+        assert_eq!(s.high_water, Some(0));
+        let anchor = s.anchor.as_ref().expect("якорь есть");
+        assert!(anchor.playing, "играть продолжаем");
+        assert_eq!(anchor.rtp, 0);
+        assert!(s.local_anchor, "до нового якоря — свои часы");
+    }
+
+    #[test]
+    fn packets_from_the_previous_scale_wait_after_a_declared_rebase() {
+        let p = Playout::inert();
+        p.push(1_000_000_000, AAC_44100, vec![1]);
+        p.rebase(0);
+        // Запоздавший пакет прежней шкалы не попадает в очередь нового потока.
+        p.push(1_000_000_352, AAC_44100, vec![2]);
+        assert_eq!(p.buffered_packets(), 0);
+        assert_eq!(p.resync_count(), 1, "шкала уже объявлена отправителем");
+        p.push(352, AAC_44100, vec![3]);
+        assert_eq!(keys(&p), vec![352]);
+        assert!(p.lock().pending.is_none(), "кандидат отброшен потоком");
+    }
+
+    #[test]
+    fn alternating_scales_never_confirm_a_new_epoch() {
+        let p = Playout::inert();
+        p.push(500_000_000, AAC_44100, vec![0]);
+        // Два получателя/две шкалы: пары пакетов чередуются и серия не набирается.
+        for round in 0..8u32 {
+            p.push(round, AAC_44100, vec![1]);
+            p.push(500_000_000 + round * 352, AAC_44100, vec![2]);
+        }
+        assert_eq!(p.resync_count(), 0);
+        // Пакеты действующей шкалы идут в очередь, пакеты-выскочки — нет.
+        let scale: Vec<i64> = (0..=7).map(|r| 500_000_000 + r * 352).collect();
+        assert_eq!(keys(&p), scale, "прежняя шкала не тронута");
+    }
+
+    #[test]
+    fn long_session_keeps_one_scale_through_losses_and_reordering() {
+        let p = Playout::inert();
+        // Около трёх минут 44,1 кГц: потери и перестановки внутри окна.
+        let mut last = 0u32;
+        for i in 0..20_000u32 {
+            let ts = i.wrapping_mul(352);
+            if i % 97 == 0 {
+                continue; // потеря
+            }
+            if i % 53 == 0 && i > 0 {
+                p.push(last, AAC_44100, vec![1]); // повтор
+            }
+            p.push(ts, AAC_44100, vec![2]);
+            last = ts;
+        }
+        assert_eq!(p.resync_count(), 0, "без объявления шкала не менялась");
+        let s = p.lock();
+        assert_eq!(s.packets.len(), MAX_BUFFERED_PACKETS);
+        assert_eq!(s.high_water, Some(19_999 * 352));
+        assert!(
+            s.played_through.is_none(),
+            "без вывода отметка не выставляется сама"
+        );
     }
 
     #[test]

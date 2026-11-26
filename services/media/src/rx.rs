@@ -399,10 +399,16 @@ impl Media {
                 ok()
             }
             ("FLUSH", _) => {
-                // Classic FLUSH: отправитель перемотал или сменил трек.
-                if req.headers.get("RTP-Info").is_some() {
-                    self.player.with(self.id, |s| s.playout().clear());
-                    debug!("FLUSH AirPlay 1: буфер очищен");
+                // Classic FLUSH: отправитель перемотал или сменил трек, а
+                // `RTP-Info` объявляет метку нового потока — это надёжный
+                // сигнал новой шкалы, серия пакетов для неё не нужна.
+                if let Some(info) = req.headers.get("RTP-Info") {
+                    let rtp = flush_scale(info);
+                    self.player.with(self.id, |s| match rtp {
+                        Some(rtp) => s.playout().rebase(rtp),
+                        None => s.playout().clear(),
+                    });
+                    debug!(?rtp, "FLUSH AirPlay 1: буфер очищен");
                 }
                 ok()
             }
@@ -1436,6 +1442,17 @@ fn other_receivers(body: &[u8], sender: &[IpAddr]) -> usize {
 }
 
 /// SETPEERS — массив адресов, SETPEERSX — массив словарей с `Addresses`.
+/// Метка нового потока из `RTP-Info` классического `FLUSH`. Её наличие и
+/// делает `FLUSH` надёжным сигналом смены шкалы; без `rtptime` отправитель
+/// новую шкалу не объявил, и поток продолжается по эвристике из [`Playout`].
+fn flush_scale(info: &str) -> Option<u32> {
+    info.split(';').find_map(|part| {
+        part.trim()
+            .strip_prefix("rtptime=")
+            .and_then(|value| value.trim().parse::<u32>().ok())
+    })
+}
+
 fn parse_peers(body: &[u8]) -> Vec<IpAddr> {
     let Some(Value::Array(items)) = rtsp::plist::parse(body) else {
         return Vec::new();
@@ -1475,6 +1492,17 @@ impl From<&str> for SetupError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classic_flush_declares_the_new_scale_only_through_rtptime() {
+        assert_eq!(flush_scale("seq=12;rtptime=4048"), Some(4048));
+        assert_eq!(flush_scale("seq=1; rtptime=7"), Some(7));
+        assert_eq!(flush_scale("rtptime=4294967295"), Some(u32::MAX));
+        assert_eq!(flush_scale("seq=12"), None, "нет объявления шкалы");
+        assert_eq!(flush_scale("rtptime="), None);
+        assert_eq!(flush_scale("rtptime=4294967296"), None, "не влезает в u32");
+        assert_eq!(flush_scale("rtptime=-1"), None);
+    }
 
     #[test]
     fn now_playing_command_maps_to_the_existing_events() {
