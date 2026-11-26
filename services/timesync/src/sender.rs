@@ -28,12 +28,12 @@ use tokio::{
 pub trait ClockSource: Send + Sync + 'static {
     fn sample(&self) -> io::Result<(LocalInstant, Reading)>;
 }
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Ports {
     pub event: u16,
     pub general: u16,
 }
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Peer {
     pub ip: IpAddr,
     pub ports: Ports,

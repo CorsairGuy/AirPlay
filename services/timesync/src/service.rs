@@ -2,7 +2,7 @@
 //! Exactly one socket pair and one injected physical ClockSource serve all
 //! selected roles. Snapshot mappings are local/one-way estimates, NOT lock or
 //! acoustic readiness. No multicast or complete BMCA topology implementation.
-use crate::peer_interests::{peer_table, peer_union};
+use crate::peer_interests::{OwnerInterests, peer_table};
 use crate::{
     engine::{Emission, Engine, Snapshot},
     sender::{ClockSource, Config as NetworkConfig, Peer, Ports, Source},
@@ -38,6 +38,7 @@ pub struct Service {
 struct PeerRequest {
     owner: u128,
     peers: Vec<Peer>,
+    deadline: Option<std::time::Instant>,
     reply: oneshot::Sender<io::Result<()>>,
 }
 
@@ -349,6 +350,7 @@ mod tests {
 mod peer_update_tests {
     use super::tests::{TestClock, config, wait_for};
     use super::*;
+    use crate::peer_interests::peer_union;
     use clock::role::{Policy, Role};
     #[test]
     fn shared_peers_survive_one_owner_removal_and_conflicts_are_atomic() {
@@ -447,6 +449,32 @@ mod peer_update_tests {
         assert!(status.borrow().mapping.is_some());
         service.shutdown().await.unwrap();
     }
+
+    #[tokio::test]
+    async fn expired_owner_stops_receiving_without_stopping_other_owners() {
+        let base_event = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let base_general = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let base = Peer { ip: base_event.local_addr().unwrap().ip(), ports: Ports {
+            event: base_event.local_addr().unwrap().port(), general: base_general.local_addr().unwrap().port()
+        }};
+        let event = UdpSocket::bind("127.0.0.3:0").await.unwrap();
+        let general = UdpSocket::bind("127.0.0.3:0").await.unwrap();
+        let leased = Peer { ip: event.local_addr().unwrap().ip(), ports: Ports {
+            event: event.local_addr().unwrap().port(), general: general.local_addr().unwrap().port()
+        }};
+        let service = Service::bind(config(base, Policy::Elect), Arc::new(TestClock)).await.unwrap();
+        let mut status = service.subscribe();
+        wait_for(&mut status, |s| s.selection.role == Role::Master).await;
+        service.set_group_peers_for(1, vec![leased], Some(Duration::from_millis(300))).await.unwrap();
+        let mut buffer = [0; 1024];
+        timeout(Duration::from_secs(1), event.recv_from(&mut buffer)).await.unwrap().unwrap();
+        tokio::time::sleep(Duration::from_millis(450)).await;
+        while event.try_recv(&mut buffer).is_ok() {}
+        assert!(timeout(Duration::from_millis(300), event.recv_from(&mut buffer)).await.is_err());
+        while base_event.try_recv(&mut buffer).is_ok() {}
+        timeout(Duration::from_secs(1), base_event.recv_from(&mut buffer)).await.unwrap().unwrap();
+        service.shutdown().await.unwrap();
+    }
 }
 struct StatusGuard(watch::Sender<Snapshot>);
 impl Drop for StatusGuard {
@@ -466,11 +494,12 @@ impl Service {
                 "specific bind IP and <=64 peers required",
             ));
         }
-        let mut peers = peer_table(network.bind_ip, &network.peers)?;
-        let mut owners = BTreeMap::new();
+        peer_table(network.bind_ip, &network.peers)?;
+        let mut interests = OwnerInterests::new(network.bind_ip);
         if !network.peers.is_empty() {
-            owners.insert(0, network.peers.clone());
+            interests.set(0, network.peers.clone(), None)?;
         }
+        let mut peers = interests.union().clone();
         let (initial, reading) = clock.sample()?;
         if reading.domain() != network.domain {
             return Err(io::Error::new(
@@ -512,20 +541,39 @@ impl Service {
                 let batch = tokio::select! {
                     biased;
                     _=&mut stopped=>return Ok(()),
-                    _=tick.tick()=>{let (local,own)=source.sample()?;engine.tick(local,own)?},
+                    _=tick.tick()=>{
+                        // A silent owner expires exactly like an explicit release.
+                        if let Some(change) = interests.expire(std::time::Instant::now()) {
+                            let (local, own) = source.sample()?;
+                            engine.set_peers(
+                                &change.union().keys().copied().collect::<Vec<_>>(),
+                                local,
+                                own,
+                            )?;
+                            peers = change.union().clone();
+                            worker_status.send_replace(engine.snapshot());
+                        }
+                        let (local,own)=source.sample()?;
+                        engine.tick(local,own)?
+                    },
                     request=peer_requests.recv()=>{
                         let Some(request) = request else { return Ok(()); };
                         // A cancelled caller must reconcile state: once queued,
                         // an update may still apply. Ack means applied locally,
                         // never receiver adoption or measured synchronization.
-                        let result = match peer_union(network.bind_ip, &owners, request.owner, request.peers) {
+                        let result = match interests.set(request.owner, request.peers, request.deadline) {
                             Err(error) => Err(error),
-                            Ok((next_owners, next)) => {
-                                let (local, own) = source.sample()?;
-                                engine.set_peers(&next.keys().copied().collect::<Vec<_>>(), local, own)?;
-                                peers = next;
-                                owners = next_owners;
-                                worker_status.send_replace(engine.snapshot());
+                            Ok(change) => {
+                                if let Some(change) = change {
+                                    let (local, own) = source.sample()?;
+                                    engine.set_peers(
+                                        &change.union().keys().copied().collect::<Vec<_>>(),
+                                        local,
+                                        own,
+                                    )?;
+                                    peers = change.union().clone();
+                                    worker_status.send_replace(engine.snapshot());
+                                }
                                 Ok(())
                             },
                         };
@@ -563,7 +611,32 @@ impl Service {
     /// retained independently. Sockets/source remain alive, including no peers.
     /// Bounded queue: retry WouldBlock; cancellation after enqueue is not rollback.
     pub async fn set_peers(&self, peers: Vec<Peer>) -> io::Result<()> {
-        self.update_peers(0, peers).await
+        self.update_peers(0, peers, None).await
+    }
+    /// Lease the owner's peers for at most `lease`. A consumer that stops
+    /// refreshing releases its peers without an explicit call; other owners are
+    /// untouched. The deadline is armed when the request is made, not when the
+    /// worker happens to process it.
+    pub async fn set_group_peers_for(
+        &self,
+        owner: u128,
+        peers: Vec<Peer>,
+        lease: Option<Duration>,
+    ) -> io::Result<()> {
+        if owner == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "reserved timing owner",
+            ));
+        }
+        let deadline = lease.and_then(|lease| std::time::Instant::now().checked_add(lease));
+        if lease.is_some() && deadline.is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "unbounded timing-owner lease",
+            ));
+        }
+        self.update_peers(owner, peers, deadline).await
     }
     /// Replace one consumer's peers in the common service's union. Owner is an
     /// application lifecycle token, not proof of native AirPlay group adoption.
@@ -575,15 +648,21 @@ impl Service {
                 "reserved timing owner",
             ));
         }
-        self.update_peers(owner, peers).await
+        self.update_peers(owner, peers, None).await
     }
-    async fn update_peers(&self, owner: u128, peers: Vec<Peer>) -> io::Result<()> {
+    async fn update_peers(
+        &self,
+        owner: u128,
+        peers: Vec<Peer>,
+        deadline: Option<std::time::Instant>,
+    ) -> io::Result<()> {
         peer_table(self.addresses.0.ip(), &peers)?;
         let (reply, result) = oneshot::channel();
         self.peers
             .try_send(PeerRequest {
                 owner,
                 peers,
+                deadline,
                 reply,
             })
             .map_err(|error| {
