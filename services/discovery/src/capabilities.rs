@@ -1031,6 +1031,55 @@ mod tests {
         ));
     }
 
+    /// Семейство адреса и объявленный порт не перепутываются между записями.
+    #[test]
+    fn each_address_family_keeps_its_own_declared_port() {
+        let txt: &[(&str, &str)] = &[("deviceid", "AA:BB:CC:DD:EE:FF"), ("features", "0x200,0x0")];
+        let table = table(vec![
+            record(
+                mdns::AIRPLAY,
+                "Кухня",
+                "speaker.local.",
+                "192.0.2.10",
+                7000,
+                txt,
+            ),
+            record(
+                mdns::AIRPLAY,
+                "Кухня-ipv6",
+                "speaker6.local.",
+                "2001:db8::10",
+                7001,
+                txt,
+            ),
+        ]);
+        let device = &devices(&table)[0];
+        assert_eq!(
+            device.endpoint(false),
+            Some("192.0.2.10:7000".parse::<SocketAddr>().unwrap())
+        );
+        assert_eq!(
+            device.endpoint(true),
+            Some("[2001:db8::10]:7001".parse::<SocketAddr>().unwrap())
+        );
+    }
+
+    /// Отсутствующее семейство адресов не подменяется адресом другого.
+    #[test]
+    fn a_missing_address_family_has_no_endpoint() {
+        let table = table(vec![record(
+            mdns::AIRPLAY,
+            "Кухня",
+            "speaker.local.",
+            "2001:db8::10",
+            7000,
+            &[("deviceid", "AA:BB:CC:DD:EE:FF"), ("features", "0x200,0x0")],
+        )]);
+        let device = &devices(&table)[0];
+        assert!(device.endpoint(false).is_none());
+        assert!(device.endpoint(true).is_some());
+    }
+
     /// Неизвестный каталогу идентификатор — свой отказ, а не «нет _airplay».
     #[test]
     fn unresolved_catalog_identifier_has_its_own_refusal() {

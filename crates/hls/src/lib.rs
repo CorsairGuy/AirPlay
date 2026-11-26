@@ -322,6 +322,61 @@ fn attr_u64(attrs: &str, name: &str) -> Option<u64> {
 mod tests {
     use super::*;
 
+    /// Векторы SSRF-защиты: адреса написаны руками, без DNS и сети.
+    #[test]
+    fn cast_urls_must_be_public_http_or_https() {
+        for url in [
+            "file:///etc/passwd",
+            "ftp://example.com/x.m3u8",
+            "data:text/plain,hello",
+            "https://user:pass@cdn.example/x.m3u8",
+            "http://127.0.0.1/x.m3u8",
+            "http://10.0.0.1/x.m3u8",
+            "http://169.254.1.1/x.m3u8",
+            "http://0.0.0.0/x.m3u8",
+            "http://224.0.0.1/x.m3u8",
+            "http://100.64.0.1/x.m3u8",
+            "http://192.0.2.1/x.m3u8",
+            "http://198.18.0.1/x.m3u8",
+            "http://[::1]/x.m3u8",
+            "http://[::ffff:127.0.0.1]/x.m3u8",
+            "http://[::ffff:10.0.0.1]/x.m3u8",
+            "http://[fe80::1]/x.m3u8",
+            "http://[fd00::1]/x.m3u8",
+            "http://[2001:db8::1]/x.m3u8",
+            "http://[2002:7f00:1::]/x.m3u8",
+            "http://[ff02::1]/x.m3u8",
+        ] {
+            assert!(Url::parse(url).is_err(), "{url} must be refused");
+        }
+        for url in [
+            "https://cdn.example/video/master.m3u8",
+            "http://8.8.8.8/x.m3u8",
+            "http://[2606:4700:4700::1111]/x.m3u8",
+            "http://[::ffff:8.8.8.8]/x.m3u8",
+        ] {
+            assert!(Url::parse(url).is_ok(), "{url} must be allowed");
+        }
+    }
+
+    /// Ссылка в плейлисте и редирект не обходят проверку адреса.
+    #[test]
+    fn playlist_references_and_redirects_are_revalidated() {
+        let base = Url::parse("https://cdn.example/video/master.m3u8").unwrap();
+        assert!(base.join("seg-1.ts").is_ok());
+        assert!(base.join("http://127.0.0.1/seg.ts").is_err());
+        assert!(base.join("//[::1]/seg.ts").is_err());
+        assert!(base.join("file:///etc/passwd").is_err());
+        let https = Url::parse("https://cdn.example/a").unwrap();
+        let downgrade = Url::parse("http://cdn.example/b").unwrap();
+        let upgrade = Url::parse("https://cdn.example/c").unwrap();
+        assert_eq!(
+            validate_redirect(&https, &downgrade),
+            Err(Error::UnsafeRedirect)
+        );
+        assert_eq!(validate_redirect(&https, &upgrade), Ok(()));
+    }
+
     #[test]
     fn parses_master_and_media_playlists() {
         let base = Url::parse("https://cdn.example/video/master.m3u8").unwrap();
