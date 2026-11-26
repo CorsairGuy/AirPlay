@@ -54,6 +54,12 @@ pub struct Receiver {
     pub encryption_types: Option<Vec<u8>>,
 }
 
+/// OwnTone treats `et=4` as a possible auth-setup capability, not a
+/// requirement. This is observational and must not enable a pairing flow.
+pub fn may_support_auth_setup(receiver: &Receiver) -> bool {
+    receiver.encryption_types.as_ref().is_some_and(|types| types.contains(&4))
+}
+
 impl Receiver {
     /// `_raop._tcp` instance is normally `AABBCCDDEEFF@Name`.
     pub fn from_raop(
@@ -724,6 +730,8 @@ mod tests {
         assert_eq!(both.negotiate(true).unwrap(), Codec::Alac);
         assert_eq!(both.negotiate(false).unwrap(), Codec::Pcm);
         assert!(both.encryption);
+        assert!(!may_support_auth_setup(&both));
+        assert!(may_support_auth_setup(&raop("0,1", "0,4")));
         let alac = raop("1", "0");
         assert_eq!(alac.negotiate(true).unwrap(), Codec::Alac);
         assert_eq!(
