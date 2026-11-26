@@ -1,53 +1,22 @@
-# Индекс документов
+# Документация AirPlay
 
-Актуальное состояние12ноября2026: [STATUS](STATUS.md). Единственная текущая матрица реализации; исторические TODO не заменяют её.
+Документация разделяет текущий код, задания и исторические исследования. При противоречии датированной заметки и текущего состояния проверять код, [статус](STATUS.md) и [задачи](AGENT-TASKS.md); старые результаты тестов не переносятся на новые коммиты.
 
-Порядок по уточнению пользователя: сначала завершить перевод Станции на ядро и проверки, затем выполнять будущие этапы AP1/AP2 из v11. Указание §0 п.7 плана о параллельном выполнении фаз2–3 уступает этому уточнению. Исходная редакция v10 сохранена в истории Git; в v11 внесено согласованное уточнение D9 и объединено дополнение D57–D63.
+## Начать здесь
 
-| Документ | Назначение |
-|---|---|
-| [TESTING.md](TESTING.md) | Единый чек-лист обоих репозиториев, текущий прогон и будущая приёмка |
-| ../README.md | Обзор и существующие команды |
-| [AGENT-PLAN-AP12-20261112-v12.md](AGENT-PLAN-AP12-20261112-v12.md) | Единый план AP1/AP2: D1–D99 с зарезервированными ID, L-1–L-100, OBS и тест-матрица |
-| [GROUP-BUTTON-EXPERIMENTS.md](GROUP-BUTTON-EXPERIMENTS.md) | План эталонных захватов и экспериментов с групповой кнопкой |
-| ARCHITECTURE.md | Текущие слои, общие часы и перенос адаптера |
-| PROTOCOL.md | Профили и границы достоверности |
-| [FAIRPLAY-V2.md](FAIRPLAY-V2.md) | Что нужно для FairPlay v2, версия vs mode и план захвата с Mac |
-| AIRPLAY-WIRE-SPEC.md | Wire reference с закреплёнными источниками и датированными наблюдениями |
-| VALIDATION.md | Выполненные проверки и отсутствующие доказательства |
-| SESSION_PROFILES.md | Границы AP1/AP2/control/mirroring |
-| [PCM_HOST.md](PCM_HOST.md) | Библиотечная композиция raw tap → Card/PTP/local pipeline |
-| BUILD_PROFILES.md | Audio-only/default, границы feature и проверки |
-| ROUTE_AUTHORIZATION.md | Connection-scoped PIN путь и проверки |
-| CARD_UPDATES.md | История artwork/timeline/framing и ограничения UI |
-| RELAY_IPC.md | Существующий Unix IPC contract; не native group adoption |
-| AUDIO_RATE_ESTIMATOR.md | Измеритель аппаратной частоты; не автоматическая синхронизация |
-| STATION_MIGRATION_20261111.md | Хронология переносов, не текущий backlog |
-| HANDOFF.md | Продолжение работы и ограничения |
-| history/ | Старые обзоры, сохранённые для происхождения решений |
-| ../reference/ | Исторические исходники/черновики; не production implementation |
+- [Состояние реализации и ограничения](STATUS.md) — что существует и что ещё не подтверждено.
+- [Задачи агентов](AGENT-TASKS.md) — приоритеты, исполнители, критерии и команды тестирования.
+- [Архитектура](ARCHITECTURE.md) и [компоненты и имена](COMPONENTS-AND-NAMING.md) — границы кода и история реорганизации.
+- [План v12](AGENT-PLAN-AP12-20261112-v12.md) — требования, референсы и открытые вопросы, а не свидетельство реализации.
+- [Протокол](PROTOCOL.md), [wire reference](AIRPLAY-WIRE-SPEC.md), [аудит референсов](REFERENCE-AUDIT-20261125.md) — факты и источники.
+- [Тестирование](TESTING.md) и [результаты проверок](VALIDATION.md) — методика и датированные свидетельства.
 
-Нормативные лицензии/provenance не заменяются статусными заметками. Modern mirroring research остаётся исследованием; прежние физические подтверждения относятся к конкретным станционным сборкам.
+## Возможности
 
-- [README](../README.md)
+- Аудио: [AP2 RX](AUDIO-RECEIVE-20261125.md), [AP1 RX](RAOP-RX-20261125.md), [AP1 TX](AIRPLAY1-TX-20261125.md), [buffered TX](BUFFERED-TX.md), [кодеки](AUDIO-CODEC-MATRIX.md), [multichannel](MULTICHANNEL-20261125.md).
+- Видео: [mirroring TX](MIRROR-TX-20261125.md), [fanout](MIRROR-FANOUT-20261125.md), [исследование](MIRRORING-AIRPLAY2-RESEARCH.md), [фото](PHOTO-PROFILE-PHASE8-20261125.md), [Windows TV](WINDOWS-TV.md).
+- Управление: [MRP](MRP-CARD-PHASE6-20261125.md), [Companion](COMPANION-REMOTE-20261125.md), [touch](COMPANION-TOUCH-20261125.md), [доверие](ROUTE_AUTHORIZATION.md).
+- Устройства и группы: [профили](DEVICE-PROFILES-20261125.md), [discovery](DISCOVERY-PROFILES-20261125.md), [continuous relay](CONTINUOUS_RELAY.md), [эксперименты групп](GROUP-BUTTON-EXPERIMENTS.md).
+- Разработка: [сборочные профили](BUILD_PROFILES.md), [безопасность](SECURITY.md), [сеансы](SESSION_PROFILES.md), [передача работы](HANDOFF.md).
 
-- [Архитектура](ARCHITECTURE.md)
-
-- [Протокол](PROTOCOL.md)
-
-- [Wire reference](AIRPLAY-WIRE-SPEC.md)
-
-- [Статус](STATUS.md)
-
-- [Проверки](VALIDATION.md)
-
-- [Передача](HANDOFF.md)
-
-## Ранее загруженные вручную черновики
-
-Корневые AIRPLAY-PROTOCOL.md и AIRPLAY-ARCHITECTURE-AND-MIGRATION.md были старым аудитом30октября. Их исходные версии сохранены в history; актуальные тексты — PROTOCOL.md и ARCHITECTURE.md. Прежний HANDOFF также в history; новый — HANDOFF.md. Исследование зеркалирования перенесено в docs без изменения результатов опытов. Даты в истории не заменены на дату обновления. README компонентов и лицензионные/provenance файлы остаются возле компонентов.
-
-- [Continuous relay: перенесённое состояние источника и оставшаяся интеграция](CONTINUOUS_RELAY.md)
-
-
-[Компоненты, протоколы, имена и устранение дублей](COMPONENTS-AND-NAMING.md) — инвентаризация workspace и целевая runtime-схема.
+Датированные документы об отдельных ветках сохраняют исходные наблюдения и команды, а не актуальный статус веток. История переносов и ранние документы сохранены для происхождения решений; файлы лицензий и референсы находятся рядом с соответствующим кодом.

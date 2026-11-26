@@ -1,72 +1,23 @@
-# Текущее состояние — 13 ноября 2026
+# Состояние ядра — 26 ноября 2026
 
+Срез `main` на момент документа: `f4c0faf`. Наличие кода и локальных тестов не означает совместимости с реальным устройством. Текущая очередь — [AGENT-TASKS](AGENT-TASKS.md), требования и референсы — [план v12](AGENT-PLAN-AP12-20261112-v12.md).
 
-## Обновление: собственные часы и имена — 24 ноября 2026
-
-NQPTP-специфичные ABI, reader и управление удалены из ядра. NTP приёма и собственные PTP-примитивы/служба остаются; отдельные loopback-тесты проверяют unicast master/follower, Delay_Req и grant, но не подтверждают полноценную совместимость с реальными AirPlay-устройствами. Встроенный unified host включается при явном `--ptp-bind`; без него используется прежний PTP-слушатель. Multicast, автоматический выбор интерфейса и полная проверка PTP-domain/синхронизации остаются открытыми задачами. Последний подтверждённый быстрый сеанс зеркалирования выбрал NTP.
-
-Имена и фактические перемещения описаны в [карте компонентов](COMPONENTS-AND-NAMING.md). Адаптер Станции закреплён за прежним коммитом; при обновлении ему понадобится миграция удалённого интерфейса внешних часов. Установленная Станция не менялась.
-
-Остальная страница ниже — исторический срез 13 ноября и может использовать старые имена/интеграцию.
-
-База последнего полного библиотечного прогона: `dd23261f2b8eebd8cae9b9c211361ba698c57a08`. Более поздние scoped-проверки continuous pipeline перечислены в [VALIDATION.md](VALIDATION.md). Дата документа не означает новую установку на устройство.
-
-Будущие этапы выполняются после завершения перевода Станции на ядро и его проверки (уточнение пользователя). Они описаны в [плане AP1/AP2 v12](AGENT-PLAN-AP12-20261112-v12.md); работа над групповой кнопкой — в [плане экспериментов](GROUP-BUTTON-EXPERIMENTS.md). Фактическая реализация и выполненные проверки отражены ниже и в VALIDATION.md.
-
-## Матрица реализации
-
-| Область | В коде | Ограничение / следующий шаг |
+| Область | Реализовано в ядре | Остаётся подтвердить или сделать |
 |---|---|---|
-| Приём аудио | AP2 realtime96 и buffered103; codec/format выбираются сессией; receiver events и команды источнику | Полная матрица отправителей/кодеков/ошибок не подтверждена; classic AP1 audio остаётся отдельным пробелом |
-| Отправка | Экспериментальный realtime96 PCM S16BE/44.1kHz/stereo; HAP, RTSP, RTP/crypto/retransmit | Не buffered TX, не AP1 TX и не готовый универсальный релиз |
-| Timing TX | Явные NTP или PTP; PtpPlan/SETPEERS/d7, общий MediaClock | Для группового профиля выбран PTP; явный отказ PTP не вызывает скрытый NTP fallback |
-| Общие часы | Одна внешне созданная Service с одним источником времени/парой сокетов; union адресатов разных владельцев | Не отдельный PTP на группу. MasterTimeline принимает local-master; новый cached external timeline подключён к producer/lease, но daemon attestation, sampling owner и peer-control/frontend ещё не связаны; follower TX не объявлен готовым |
-| Группа TX | SessionPool, add/remove, реальные running members, live SETPEERS, общий producer, PtpGroup/local supervision | SETUP/SETPEERS ACK и Running не доказывают native adoption или акустическую синхронность |
-| Отмена | Потеря роли/эпохи/свежести, stop и local failure завершают передачу; finish освобождает интерес группы | Общая PTP-служба не выключается. Stop + await обязателен для гарантированного graceful cleanup; hard abort не равнозначен |
-| Pairing | Transient, PIN setup, постоянные credentials/pair-verify, store и MRP59/60/61 helper | MRP reader → request context → worker/PTP wrapper → явная InteractivePinForUnpaired policy соединены; сквозной MRP/PIN/persistent RTSP loopback проверен; iPhone interop ещё нужен |
-| Discovery | DNS-SD browser/feed, logical/physical catalog, aliases/cluster/leader descriptors | Объявление возможностей не заменяет проверку транспорта; весь runtime не включается автоматически |
-| MRP | Карточка, frame boundaries, команды/таймлайн, кеш обложки, outputs backend и отдельная/общая громкости | Общая подпись кнопки и удержание ползунков в реальной группе не подтверждены исправленными |
-| Continuous relay | Source Timeline/pump/broadcast, acquisition/queue/cache guards, raw PCM host и opt-in MRP-card SourceControl с playback observer/grace | Default frontend composition, native/BT adapters, receiver/hardware buffers и полный control автомат остаются; [подробности](CONTINUOUS_RELAY.md) |
-| Mirroring/video | Отдельный существующий профиль и декодирующие компоненты | Modern mirroring вместе с AP2/PTP/group остаётся исследованием; 60fps не гарантируются для любого железа |
-| Минимальная сборка | --no-default-features исключает mirror/video/hls/capture/mediaserver из дерева airplay; default сохраняет mirroring | Оба профиля и CLI проверены на Pi/Linux; FFmpeg/cross-platform матрица отдельно; [профили](BUILD_PROFILES.md) |
-| Станция | Отдельный адаптер Quasar/Glagol, ALSA tap/output, BT/focus, LED, install/recovery | Не переведён на новое ядро. Готовые guard/recovery Claude сохраняются, не реализуются заново |
+| AirPlay 2 аудио RX | realtime type 96 и buffered type 103; формат, шифрование, очередь и тайминг | Матрица кодеков и отправителей, потери, длительные сессии и реальные устройства. [Приём](AUDIO-RECEIVE-20261125.md), [кодеки](AUDIO-CODEC-MATRIX.md) |
+| AirPlay 1 аудио RX | RAOP ANNOUNCE/SETUP, открытый PCM/ALAC, обнаружение потерь и запрос повтора | Шифрованный RX не заявлен; независимые векторы и реальные отправители. [RAOP RX](RAOP-RX-20261125.md) |
+| Аудио TX | AP2 realtime PCM, buffered AAC type 103; экспериментальный AP1 PCM/ALAC, RSA-OAEP/AES | Проверить `et`, ключи, timing и retransmit по референсам и на приёмниках; buffered TX на устройстве не подтверждён. [AP1 TX](AIRPLAY1-TX-20261125.md), [buffered TX](BUFFERED-TX.md) |
+| Зеркалирование RX | Приём и декодирование, внешние профили устройства, fanout сжатых кадров | Ранее iPhone подтвердил быстрый старт и ТВ-иконку в тестовой конфигурации; это не проверка нынешнего коммита. Стабильные 60 FPS не гарантированы. 80 мс — настройка Windows-просмотрщика, не универсальная настройка ядра |
+| Зеркалирование TX | Экспериментальные RTSP SETUP, видео и аудио, event/timing, cleanup частичной сессии | Независимое подтверждение обмена и реальные приёмники; FairPlay и PTP не считать доказанными. [TX](MIRROR-TX-20261125.md) |
+| Время | Собственные NTP/PTP-примитивы и сервис `timesync`; loopback-проверки | Полный AirPlay PTP, multicast, выбор интерфейса и синхронизация реальных устройств. NQPTP как зависимость ядра не используется |
+| MRP и управление | Framing, команды, карточка, совместимый разбор незнакомых полей, начальный DeviceInfo и обновления now-playing | Независимые векторы, непроверенные поля, взаимодействие с реальным iPhone. [Карточка](MRP-CARD-PHASE6-20261125.md) |
+| Companion | Экспериментальные OPACK, framing, pair-verify, команды пульта и touch | Физическая совместимость и независимые wire-векторы не подтверждены. [Companion](COMPANION-REMOTE-20261125.md) |
+| Discovery и профили | Поиск, сопоставление идентичностей, внешние plist-профили, семь каталогов services | Проверить неоднозначные объявления, selection и соответствие рекламируемых возможностей фактическим. [Профили](DEVICE-PROFILES-20261125.md) |
+| Фото / видео / HLS | Есть отдельные реализации профилей и экспериментальные тесты | Независимая проверка жизненного цикла, ограничений ресурсов и совместимости; наличие HLS не означает поддержку DRM или всех URL |
+| Релей и группы | Компоненты группового управления и общих часов, continuous pipeline | Сквозной путь, поведение реальной группы и акустическая синхронизация не доказаны. [Релей](CONTINUOUS_RELAY.md) |
 
-## Что подтверждено
+## Проверки и приоритеты
 
-- Glagol deadline/Retry-After и standalone MRP probe опубликованы в [Station ce8277f](https://github.com/CorsairGuy/yandex_station_airplay/commit/ce8277f):25 тестов контроллера + cargo check и6 wire-проб (499 mappings). Это адаптерный код, не установка и не runtime миграция ядра.
+Последние локальные проверки интеграции включали `cargo test --offline -p audio_stream -p media -p sessions` и отдельные тесты mirroring TX на Windows/MSYS2. Это результаты отдельных crate, не полная CI-матрица и не устройство. Исторические результаты — [VALIDATION](VALIDATION.md); команды — [AGENT-TASKS](AGENT-TASKS.md) и [TESTING](TESTING.md).
 
-- Последний полный автономный прогон: `cargo test --workspace --lib --locked --offline` — **311 passed**, Linux/Pi, контейнер `--network none`. Базовый код + удаление неиспользуемых private methods; диагностические незакоммиченные файлы исключены.
-- Объединённый исходный срез Станции4ead45f:137 Rust-тестов (MRP80, sender28, control19, broker10) и C focus-state check. Документ обзора старого MRP-черновика добавлен отдельно; установки не было.
-- Это не результат всей CI-матрицы, ffmpeg/cross-clippy или нового физического теста. Ранее физически подтверждённый станционный звук не доказывает правильность новой сборки ядра.
-- При одном более раннем прогоне старый PCM loopback test увидел0 совпавших кадров; полный повтор без изменения сборки прошёл. Случай сохранён в журнале, не скрыт как доказанная стабильность.
-
-## Остаток работ
-
-1. Довести continuous runtime до frontend/адаптеров и комплексной проверки нескольких получателей. Opt-in композиция карточки и pipeline уже проверена:164 теста (application86 + sender78), включая MRP Pause/Play → PCM в памяти; реальное оборудование не проверялось.
-2. iPhone interop connection-scoped PIN пути (автономный сквозной обмен уже проверен); комплексные add/remove/failure проверки PTP-группы. Отказ одного из двух настоящих NTP/RTSP loopback-получателей уже проверен без остановки второго; это не PTP native-group interop.
-3. Native group topology/подпись кнопки/ползунки: сверять с захватами, не менять gid и capability flags наугад.
-5. Подключить frontend/адаптер Станции к общему ядру с pin версии и сохранить capture/routes/recovery/BT/LED.
-5. Отдельно разрешённые домашние проверки всех источников, голоса Алисы, синхронизации и сбоев. Проверку buffered-only Яндекс Музыки делать на отдельном тихом приёмнике.
-
-Голос Алисы остаётся локально. Контент HomePod во время ответа не приглушать по решению пользователя. Согласие на push/main не является согласием на установку или воспроизведение.
-
-## Навигация
-
-- [Архитектура и перенос](ARCHITECTURE.md)
-- [Протокол и границы достоверности](PROTOCOL.md), [wire reference](AIRPLAY-WIRE-SPEC.md)
-- [Журнал переносов](STATION_MIGRATION_20261111.md) — хронология, не текущий TODO.
-- [Проверки](VALIDATION.md), [индекс документов](README.md), [передача работы](HANDOFF.md).
-
-
-## Runtime-схема и имена
-
-Workspace:24 пакета, а не24 службы; три каталога services не равны трём демонам.
-Companion пока заглушка; Coordinator — существующая библиотечная модель и runtime-части.
-Цель: один daemon `airplay` с семью логическими компонентами и включаемыми профилями.
-[Карта кода, владельцев протоколов, дублей и имён](COMPONENTS-AND-NAMING.md).
-
-External acquisition: `timesync::external_acquisition::Acquisition` now joins the
-ordered NQPTP reader, two-observation RAW/Instant estimator and cached publisher.
-Caller supplies evidence before/after every bounded poll; failures revoke the
-selection. It does not attest a daemon from SHM, manage peers, start a task/socket
-or enable the Station backend. Actual host evidence and scheduling remain required.
+Открыты: сверка оставшихся изменений агента по AP1 TX и безопасное восстановление долгой сессии без ложного сброса по запоздавшему RTP. Не считать ветки полностью проверенными. Windows-приложение и его профиль/настройки — отдельный проект.

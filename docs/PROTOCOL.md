@@ -6,7 +6,7 @@
 
 - [Консолидированный wire reference](AIRPLAY-WIRE-SPEC.md): последовательности, framing/байтовые форматы, pairing, RTP, timing, MRP, screen mirroring и закреплённые первичные источники. Его исходные замеры/схема помечены своим срезом; они не являются автоматически актуальным отчётом о реализации.
 - [Текущая матрица реализации](STATUS.md) и [проверки](VALIDATION.md).
-- [Разделение профилей](SESSION_PROFILES.md), [sender API](../crates/sender/README.md).
+- [Разделение профилей](SESSION_PROFILES.md), [отправка аудио](AIRPLAY1-TX-20261125.md) и [buffered TX](BUFFERED-TX.md).
 - Текущие typed field mappings: crates/mrp/src/schema.rs и proto provenance. Исторический AppendixA wire reference относится к указанному там snapshot, не к нынешнему числу полей.
 
 ## Профили, которые нельзя подменять друг другом
@@ -15,7 +15,7 @@
 |---|---|---|
 | Classic AP1 | Собственный RAOP/RTSP профиль | NTP-подобный обмен; DACP в соответствующем профиле |
 | AP2 realtime | type96, согласованные codec/format/ключи; PCM TX в ядре экспериментален | NTP или PTP согласно выбранному профилю; нельзя менять незаметно после SETUP |
-| AP2 buffered | type103, согласованные codec/format и buffering | Поддержка RX не означает наличие buffered TX или принудительный выбор этого режима приложением iPhone |
+| AP2 buffered | type103, согласованные codec/format и buffering | Отдельный экспериментальный buffered TX существует; выбор этого режима iPhone и совместимость с устройствами не подтверждены |
 | AP2 MRP control-only | Зашифрованный data/control tunnel; отдельная media ownership | MRP — управление/состояние, не RTP payload и не доказательство играющей media-сессии |
 | Mirroring | Отдельный согласованный video/audio/key profile | Современный AP2/PTP/group вариант не доказывается наличием legacy mirroring |
 

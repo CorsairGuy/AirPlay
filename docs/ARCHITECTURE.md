@@ -1,118 +1,23 @@
-# Архитектура ядра и перенос Станции
+# Архитектура ядра
 
-Актуализировано24ноября2026. [Статус и проверки](STATUS.md).
+Срез 26 ноября 2026. Текущая зрелость возможностей и ограничения — [STATUS](STATUS.md), требования — [план v12](AGENT-PLAN-AP12-20261112-v12.md).
 
-## Принятое устройство проекта
+Ядро — Rust workspace. В нём семь **логических пакетов** в `services/`, а не семь обязательных процессов. Обычная композиция использует один бинарник `bin/airplay`; приложение может встраивать библиотеки. Windows-приложение с интерфейсом и настройками предполагается в отдельном репозитории; его будущую архитектуру пользователь ещё не определил.
 
-Собственное единое ядро на Rust; перенос проверенных идей, структуры и wire-фактов в общие слои; новый собственный код пишется с нуля (политика §0.5 v12). Временный внешний backend допустим, но не становится второй независимой реализацией тех же часов/криптографии. Цель — универсальное ядро с явными профилями, а не программа для Mini2. GPL-3.0-or-later и provenance заимствований сохраняются.
-
-| Слой | Ответственность |
+| Компонент | Ответственность |
 |---|---|
-| crates/pair, crypto, rtsp, rtp, mrp | Общие кодеки и протоколы; независимое состояние каждой сессии |
-| services/timesync | Общий источник времени, role/mapping; явно созданная Service, общие сокеты и union адресатов |
-| services/media | Приём медиа (Player, SETUP потоков, канал событий, пульт и канал MRP), передача, физические media sessions, PtpPlan, SessionPool и платформо-нейтральный `LocalSink`; без каталога/выбора выходов и Quasar/ALSA paths |
-| services/discovery | Browsing и валидированный snapshot устройств, логических групп и физических адресатов |
-| services/coordinator | Модели групп, пользовательский выбор, разрешение логических строк в физические операции и protocol-neutral runtime policy |
-| services/identity, sessions, remote | Доверие и сопряжения; RTSP-сессия, транспорт и output worker; MRP-карточка и очередь вывода |
-| bin/airplay | Frontend и композиция: аргументы, DeviceInfo/Player/Bonjour/Context, видео-вывод зеркалирования, PTP-группы и CLI `send` |
-| Репозиторий Станции | Glagol/Quasar, native PCM tap, BT/focus, ALSA маршруты, LED, supervisor, install и rollback |
+| `services/discovery` | DNS-SD, сервисы и сопоставление идентичностей устройств |
+| `services/identity` | Идентичность, доверие и хранилище сопряжений |
+| `services/sessions` | Жизненный цикл входящих сессий, RTSP, транспорт и авторизация |
+| `services/media` | Медиа RX/TX, входы/выходы и физические сессии |
+| `services/remote` | MediaRemote, карточка и управление |
+| `services/coordinator` | Логический выбор, планы выходов и политика координации |
+| `services/timesync` | Собственные общие часы и PTP/NTP-компоненты |
+| `crates/` | Общие протоколы, криптография, парсеры, кодеки, аудио/видео и транспорт |
+| `bin/airplay` | CLI и соединение компонентов с платформенными адаптерами |
 
-Локальный вывод не является отдельным core-сервисом: `media::tx::LocalSink` и `run_local`
-задают общий PCM/presentation-time контракт, необходимый для синхронного локального
-и сетевого воспроизведения. Перечисление устройств, драйверы и запуск конкретного
-backend-а принадлежат адаптеру приложения или устройства. `media::output::local_process`
-— узкий Linux process adapter, а не владелец устройств.
+Discovery предоставляет сведения, coordinator разрешает пользовательский выбор в физические операции; media работает с физическими сессиями. Конкретные источники звука, интерфейс и платформенные драйверы принадлежат приложению/адаптеру. Внешние профили позволяют менять объявление устройства без пересборки; примерные plist находятся в `docs/profiles/`.
 
-Discovery публикует только последний валидный snapshot и не принимает пользовательский
-выбор, не аутентифицирует получателей и не запускает сессии. Coordinator получает
-snapshot через интерфейс `coordinator::outputs::OutputSnapshot`, применяет user intent и
-планирует additions/removals физических receiver sessions. `services/media` не знает
-логических строк, алиасов, каталогов или планов выбора: он добавляет, удаляет и сообщает
-состояние физических сессий. `services/sessions` ведёт RTSP-сессию, транспорт соединения и
-output worker; PIN authorization выполняется им же по `PairingStore` и PIN, которые
-передаёт приложение. Приложение остаётся host adapter: выбирает `PairingStore`, `Events`,
-видеосинки и поднимает Bonjour и список слушателей. Политика выбора, подтверждённое
-состояние и перевод логических выходов в физический план размещены в `services/coordinator`. Направление
-зависимостей — discovery → coordinator contract, media → общие group primitives; coordinator
-не зависит от discovery/media/sessions, поэтому циклической зависимости нет.
-`Runtime::apply_plan` принимает host-адаптер `PhysicalSessionBackend`: coordinator
-проверяет подготовленные endpoints, сериализует замену и фиксирует desired state,
-не импортируя `SessionPool`, `Session` или типы авторизации.
+NQPTP не является движком или зависимостью ядра. Его старые ABI/reader-описания в датированных записях — исторические, а не инструкция по текущей архитектуре. Собственный PTP в процессе развития; существование сервиса не доказывает поддержку всех доменов и сценариев релея.
 
-## Исходящий групповой путь
-
-Source adapter → один paced PCM producer/MediaClock → immutable AudioPacket → SessionPool + optional local renderer. Входящие и исходящие ключи, nonce, RTP counters и session IDs независимы; общего clock/media epoch недостаточно для объявления native group adoption.
-
-PtpGroup получает MasterTimeline существующей общей PTP-службы либо явно опубликованный qualified external timeline через new_external. with_clock_service проверяет идентичность watch-канала, принимает отдельный fresh owner token и явные timing ports. Выбор устройств задаёт полный список физически выбранных адресатов новым connection plans. Работающие сессии обновляют SETPEERS без перезапуска. Реальный running состав обновляет интерес группы в общей службе; освобождение одного интереса сохраняет адресаты других потребителей.
-
-Потеря корректных часов/эпохи или сбой local renderer останавливает передачу группы. Общая PTP-служба продолжает жить. При нормальном EOF применяется drain; при сбое — stop и bounded cleanup. Hard abort не заменяет signal stop + await. Адаптер восстанавливает прямой локальный маршрут существующими механизмами.
-
-## Профили и границы
-
-- AP1 classic, AP2 realtime/buffered, control-only MRP и mirroring не смешиваются неявно.
-- AP2 timing выбирается явно: ядро имеет NTP и PTP; групповой профиль использует PTP. Обязательность NTP для всех AP2-устройств по закрытой спецификации Apple не заявляется. In-session fallback отсутствует.
-- Общая служба может жить без групп. MasterTimeline TX ограничен qualified local master; cached external timeline отдельно допускает attested sender-master observations. Live owner/attestation/peer-control ещё не подключены; полноценный follower TX не объявлен готовым.
-- Audio-only профиль перенесён выборочно из старого черновика: cargo -p airplay --no-default-features исключает видео-зависимости, сохраняя NTP realtime audio. Default включает mirroring. См. BUILD_PROFILES.md.
-- Ни Session Running, ни SETUP/SETPEERS ACK, ни MRP-галочка не доказывают звук, синхронизацию или принятие топологии.
-
-## Перенос на Станцию
-
-Сначала закончить continuous/PIN/runtime tests и разделение профилей. Затем pin версии ядра и адаптер native/AirPlay/BT PCM, отдельное локальное приглушение/голос, сохранение guards/autostart и recovery. Не возвращать второе скачивание/декодирование Alice CDN и не переносить аппаратные пути в протокол.
-
-После автономных проверок — только отдельно разрешённая установка с откатом. Последние overlays/tap и smi10/smi11 compatibility проверяются по выбранному backend; собственная PTP-служба не требует NQPTP ABI. Звук/Home app/карточка/групповая подпись проверяются раздельно.
-
-Подробный остаток — [STATUS](STATUS.md); историческая последовательность — [журнал](STATION_MIGRATION_20261111.md). Старый архитектурный аудит сохранён в docs/history, его TODO не является текущим планом.
-
-
-## Граница v12: единое владение PTP и provenance
-
-На хосте один владелец UDP319/320 и один физический источник времени; RX/TX получают
-явные роли/mapping/peer interests через него. Второй NQPTP/PTP listener одновременно
-не запускается. До активации core-host требуется проверенный адаптер совместимого SHM
-либо согласованная передача владения с откатом. Это открытый интеграционный блокер,
-не реализованная автоматическая замена NQPTP. Нельзя relabel RAW timestamps как Instant.
-По пользовательской политике §0.5 v12 новые реализации пишутся с нуля: идеи/структура/
-wire-факты с provenance-тегом; внешний код и близкий перевод не копируются.
-Quad/hub из L-74 — кандидат для проверки, не установленный Apple-прецедент (§9 плана).
-
-
-## External clock transition contract
-
-`clock::external::Qualifier` pins a daemon instance, clock domain/epoch and external
-sender-master evidence. It uses supplied measured RAW/Instant rate and uncertainty,
-checks bounded freshness and continuity of successive correlations, and revokes on
-any failed observation. It cannot auto-rearm; the owner establishes a new selection.
-The offset-step limit is a conservative caller uncertainty policy, not a servo proof.
-Still required: ordered SHM reader, actual cross-timestamp sampler/role attestation,
-qualified external timeline/lease integration and owner-safe legacy peer control.
-`MasterTimeline` remains the explicit local-master API; no synthetic Service status
-or hidden second PTP owner was introduced.
-
-
-NQPTP acquisition now has explicit Linux `nqptp_reader::Reader` and
-`raw_correlation::capture/estimate` APIs. Reader identity checks do not establish
-a daemon instance, patch support or role. Same-inode restart still needs trusted
-external instance/selection evidence. Captures are scheduled by the owner, with
-explicit uncertainty/wander policy; no zero-rate correlation from one sample.
-
-`Selection::start_marker` distinguishes stable epoch markers from the Station
-patched-master refresh marker, which is rewritten on keepalive. The owner-attested
-epoch lower bound remains separate and stable. Do not infer epoch from marker
-refresh or infer patch support from ABI. Remaining integration: attestation and
-scheduling owner, external timeline/lease, peer-control ownership and frontend.
-
-
-## External timeline → producer/lease
-
-`external_media::Timeline` держит только cached observations и Qualifier; producer
-не читает SHM и не ждёт clock lock. Единственный Publisher обновляет наблюдения;
-его Drop/явный revoke или ошибка qualification навсегда отзывает эту selection.
-`PtpGroup::new_external` принимает только уже опубликованный timeline; lease следит
-за publisher loss, upstream stop и тихим истечением свежести. Отмена одной группы
-не отзывает общий publisher и не выключает NQPTP. External group нельзя присоединить
-к отдельной Service через with_clock_service. Владение legacy peers остаётся явной
-обязанностью owner/preparer; daemon commands не добавлены и готовый host не заявлен.
-
-Runtime-разбиение/названия и устранение существующих повторных MRP-реализаций —
-[COMPONENTS-AND-NAMING](COMPONENTS-AND-NAMING.md). Это заменяет старое представление
-«три каталога services = три службы»; protocol module не становится daemon автоматически.
+Реорганизация и имена отдельных пакетов: [COMPONENTS-AND-NAMING](COMPONENTS-AND-NAMING.md). Долгоживущие сценарии релея и аппаратные адаптеры: [CONTINUOUS_RELAY](CONTINUOUS_RELAY.md). Исторические результаты и ранние решения доступны в Git и датированных заметках.
