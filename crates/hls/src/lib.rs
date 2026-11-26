@@ -15,7 +15,7 @@ mod source;
 
 pub use fetch::{Fetcher, MAX_SEGMENT_BYTES};
 pub use source::{SegmentReader, VodSource};
-#[cfg(all(test, feature = "ffmpeg"))]
+#[cfg(test)]
 mod testserver;
 
 #[cfg(feature = "ffmpeg")]
@@ -159,6 +159,13 @@ pub struct Playlist {
     pub variants: Vec<Variant>,
     pub segments: Vec<Segment>,
     pub live: bool,
+    /// `EXT-X-MEDIA-SEQUENCE`: the sequence number of the first segment.
+    /// Kept as confirmed playlist data; a VOD timeline is still the sum of
+    /// `EXTINF` durations.
+    pub media_sequence: u64,
+    /// `EXT-X-DISCONTINUITY-SEQUENCE`: how many discontinuities preceded the
+    /// first segment. Used to mark a timeline restart, not to shift playback.
+    pub discontinuity_sequence: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -173,6 +180,9 @@ pub struct Segment {
     pub uri: Url,
     pub duration_ms: u64,
     pub initialization_segment: Option<Url>,
+    /// `EXT-X-DISCONTINUITY` preceded this segment: its media timestamps may
+    /// restart, so the demuxer must not treat the join as a continuous timeline.
+    pub discontinuity: bool,
 }
 
 pub fn parse_playlist(base: &Url, bytes: &[u8]) -> Result<Playlist, Error> {
@@ -194,9 +204,27 @@ pub fn parse_playlist(base: &Url, bytes: &[u8]) -> Result<Playlist, Error> {
     let mut pending_duration = None;
     let mut initialization_segment = None;
     let mut live = true;
+    let mut pending_discontinuity = false;
+    let mut media_sequence = 0u64;
+    let mut discontinuity_sequence = 0u64;
     for line in lines.into_iter().skip(1) {
         if line == "#EXT-X-ENDLIST" {
             live = false;
+        } else if line == "#EXT-X-DISCONTINUITY" {
+            if pending_discontinuity {
+                return Err(Error::Playlist("repeated EXT-X-DISCONTINUITY".into()));
+            }
+            pending_discontinuity = true;
+        } else if let Some(value) = line.strip_prefix("#EXT-X-MEDIA-SEQUENCE:") {
+            media_sequence = value
+                .trim()
+                .parse()
+                .map_err(|_| Error::Playlist("invalid EXT-X-MEDIA-SEQUENCE".into()))?;
+        } else if let Some(value) = line.strip_prefix("#EXT-X-DISCONTINUITY-SEQUENCE:") {
+            discontinuity_sequence = value
+                .trim()
+                .parse()
+                .map_err(|_| Error::Playlist("invalid EXT-X-DISCONTINUITY-SEQUENCE".into()))?;
         } else if let Some(attrs) = line.strip_prefix("#EXT-X-STREAM-INF:") {
             if variants.len() >= MAX_VARIANTS {
                 return Err(Error::Limit);
@@ -255,6 +283,7 @@ pub fn parse_playlist(base: &Url, bytes: &[u8]) -> Result<Playlist, Error> {
                     uri,
                     duration_ms,
                     initialization_segment: initialization_segment.clone(),
+                    discontinuity: std::mem::take(&mut pending_discontinuity),
                 });
             }
         }
@@ -262,10 +291,17 @@ pub fn parse_playlist(base: &Url, bytes: &[u8]) -> Result<Playlist, Error> {
     if pending_variant.is_some() || pending_duration.is_some() {
         return Err(Error::Playlist("playlist ended before a URI".into()));
     }
+    if pending_discontinuity {
+        return Err(Error::Playlist(
+            "EXT-X-DISCONTINUITY without a segment".into(),
+        ));
+    }
     Ok(Playlist {
         variants,
         segments,
         live,
+        media_sequence,
+        discontinuity_sequence,
     })
 }
 
@@ -321,6 +357,52 @@ fn attr_u64(attrs: &str, name: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Разрыв таймлайна и номера последовательностей — подтверждённые данные.
+    #[test]
+    fn parses_discontinuity_and_media_sequence() {
+        let base = Url::parse("https://cdn.example/v/index.m3u8").unwrap();
+        let playlist = parse_playlist(
+            &base,
+            b"#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:7\n#EXT-X-DISCONTINUITY-SEQUENCE:2\n#EXTINF:1,\na.ts\n#EXT-X-DISCONTINUITY\n#EXTINF:1,\nb.ts\n#EXT-X-ENDLIST\n",
+        )
+        .unwrap();
+        assert_eq!(playlist.media_sequence, 7);
+        assert_eq!(playlist.discontinuity_sequence, 2);
+        assert_eq!(playlist.segments.len(), 2);
+        assert!(!playlist.segments[0].discontinuity);
+        assert!(playlist.segments[1].discontinuity);
+        assert!(!playlist.live);
+    }
+
+    #[test]
+    fn discontinuity_and_sequence_tags_are_strict() {
+        let base = Url::parse("https://cdn.example/v/index.m3u8").unwrap();
+        assert!(matches!(
+            parse_playlist(
+                &base,
+                b"#EXTM3U\n#EXT-X-DISCONTINUITY\n#EXT-X-DISCONTINUITY\n#EXTINF:1,\na.ts\n"
+            ),
+            Err(Error::Playlist(_))
+        ));
+        assert!(matches!(
+            parse_playlist(
+                &base,
+                b"#EXTM3U\n#EXT-X-DISCONTINUITY\n#EXTINF:1,\na.ts\n#EXT-X-DISCONTINUITY\n"
+            ),
+            Err(Error::Playlist(_))
+        ));
+        assert!(matches!(
+            parse_playlist(
+                &base,
+                b"#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:x\n#EXTINF:1,\na.ts\n"
+            ),
+            Err(Error::Playlist(_))
+        ));
+        let live = parse_playlist(&base, b"#EXTM3U\n#EXTINF:1,\na.ts\n").unwrap();
+        assert!(live.live, "a playlist without ENDLIST is still live");
+        assert_eq!(live.media_sequence, 0);
+    }
 
     #[test]
     fn parses_master_and_media_playlists() {
