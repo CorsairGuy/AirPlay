@@ -101,8 +101,24 @@ impl TimeSync {
         Ok(this)
     }
 
+    /// Same pair with an explicit co-resident outbound master: follow an inbound
+    /// source and serve receivers from our own domain at the same time.
+    pub async fn start_host_dual(self_id: u64, ip: IpAddr) -> std::io::Result<Self> {
+        validate_host_ip(ip)?;
+        let host = host::Host::bind_dual(self_id, ip).await?;
+        let mut this = Self::idle(self_id);
+        this.host = Some(Arc::new(host));
+        this.listening = true;
+        Ok(this)
+    }
+
     pub fn selected_reading(&self) -> Option<clock::domain::Reading> {
         self.host.as_ref()?.reading()
+    }
+
+    /// Clock this host offers its receivers; available while following inbound.
+    pub fn outbound_reading(&self) -> Option<clock::domain::Reading> {
+        self.host.as_ref()?.outbound_reading()
     }
 
     pub fn set_session_peers(&self, owner: u128, peers: Vec<IpAddr>) {

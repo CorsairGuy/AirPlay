@@ -31,38 +31,48 @@ pub(crate) struct Host {
 }
 impl Host {
     pub async fn bind(id: u64, ip: IpAddr) -> io::Result<Self> {
+        Self::bind_mode(id, ip, false).await
+    }
+
+    /// Same socket pair with an explicit co-resident outbound master: this host
+    /// can follow an inbound source and serve its own receivers at once.
+    pub async fn bind_dual(id: u64, ip: IpAddr) -> io::Result<Self> {
+        Self::bind_mode(id, ip, true).await
+    }
+
+    async fn bind_mode(id: u64, ip: IpAddr, dual: bool) -> io::Result<Self> {
         let own = Domain::new(id, 1).map_err(io::Error::other)?;
         let local = LocalClock::new(u128::from(id)).map_err(io::Error::other)?;
-        let service = Arc::new(
-            service::Service::bind(
-                service::Config {
-                    network: sender::Config {
-                        domain: own,
-                        bind_ip: ip,
-                        ports: sender::Ports {
-                            event: 319,
-                            general: 320,
-                        },
-                        peers: vec![],
-                    },
-                    election: role::Config {
-                        policy: role::Policy::Elect,
-                        settle_ns: 200_000_000,
-                        announce_lease_ns: 3_000_000_000,
-                        min_announces: 2,
-                    },
-                    follow: follower::Config {
-                        pairing_lease_ns: 1_000_000_000,
-                        mapping_lease_ns: 2_000_000_000,
-                        warmup_samples: 3,
-                        step_threshold_ns: 50_000_000,
-                    },
-                    probe: None,
+        let clock = Arc::new(Physical { local, own });
+        let config = service::Config {
+            network: sender::Config {
+                domain: own,
+                bind_ip: ip,
+                ports: sender::Ports {
+                    event: 319,
+                    general: 320,
                 },
-                Arc::new(Physical { local, own }),
-            )
-            .await?,
-        );
+                peers: vec![],
+            },
+            election: role::Config {
+                policy: role::Policy::Elect,
+                settle_ns: 200_000_000,
+                announce_lease_ns: 3_000_000_000,
+                min_announces: 2,
+            },
+            follow: follower::Config {
+                pairing_lease_ns: 1_000_000_000,
+                mapping_lease_ns: 2_000_000_000,
+                warmup_samples: 3,
+                step_threshold_ns: 50_000_000,
+            },
+            probe: None,
+        };
+        let service = Arc::new(if dual {
+            service::Service::bind_dual(config, clock).await?
+        } else {
+            service::Service::bind(config, clock).await?
+        });
         let mut status = service.subscribe();
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
@@ -145,5 +155,12 @@ impl Host {
         let snapshot = *self.status.borrow();
         let now = self.local.at(clock::now_ns());
         snapshot.mapping?.to_network(now, now).ok()
+    }
+
+    /// Clock we offer receivers, valid while following an inbound source.
+    pub fn outbound_reading(&self) -> Option<Reading> {
+        let snapshot = *self.status.borrow();
+        let now = self.local.at(clock::now_ns());
+        snapshot.outbound?.to_network(now, now).ok()
     }
 }

@@ -19,6 +19,9 @@ pub struct Snapshot {
     pub mapping: Option<ClockMap>,
     pub quality: Option<Quality>,
     pub link: Option<measurement::Estimate>,
+    /// Mapping of the explicit co-resident outbound master in our own domain.
+    /// Present only in dual mode; it never substitutes for an inbound mapping.
+    pub outbound: Option<ClockMap>,
 }
 impl Snapshot {
     /// Explicit candidate only. Does not replace the live one-way map or claim
@@ -45,12 +48,15 @@ impl Snapshot {
             mapping: None,
             quality: None,
             link: None,
+            outbound: None,
         }
     }
 }
 #[derive(Clone, Copy, Debug)]
 enum Origin {
     Master,
+    /// Emissions of the explicit co-resident outbound master (dual mode).
+    Outbound,
     Link,
     Probe(probe::Token),
 }
@@ -71,6 +77,10 @@ pub struct Engine {
     controller: Controller,
     follow_config: follower::Config,
     master: Option<Master>,
+    /// Explicit outbound master that serves receivers while this host follows an
+    /// inbound source. Its domain is our own, never the selected foreign one.
+    outbound: Option<Master>,
+    outbound_domain: Option<Domain>,
     link: Master,
     follower: Option<Follower>,
     probe_config: Option<probe::Config>,
@@ -103,6 +113,9 @@ impl Engine {
         if let Some(master) = self.master.as_mut() {
             master.set_peers(peers).map_err(io::Error::other)?;
         }
+        if let Some(outbound) = self.outbound.as_mut() {
+            outbound.set_peers(peers).map_err(io::Error::other)?;
+        }
         self.transition(next)?;
         self.refresh(now, own)
     }
@@ -127,6 +140,8 @@ impl Engine {
             controller,
             follow_config: follow,
             master: None,
+            outbound: None,
+            outbound_domain: None,
             link,
             follower: None,
             probe_config: None,
@@ -137,9 +152,33 @@ impl Engine {
             physical_sample: None,
         })
     }
+
+    /// Dual mode: one socket pair, one physical source, two independent roles.
+    /// A separate outbound master serves receivers from our own domain whether
+    /// the selected role is following, listening or elected master; that role
+    /// never creates a second outbound master. The shared oscillator is not
+    /// evidence of a shared network grandmaster: inbound and outbound domains
+    /// stay distinct in every mapping.
+    pub fn new_dual(
+        own: Domain,
+        now: LocalInstant,
+        peers: &[IpAddr],
+        election: role::Config,
+        follow: follower::Config,
+    ) -> io::Result<Self> {
+        let mut engine = Self::new(own, now, peers, election, follow)?;
+        let mut outbound = Master::new(own).map_err(io::Error::other)?;
+        outbound.set_peers(peers).map_err(io::Error::other)?;
+        engine.outbound = Some(outbound);
+        engine.outbound_domain = Some(own);
+        Ok(engine)
+    }
+
     fn fault(&mut self) {
         self.faulted = true;
         self.master = None;
+        self.outbound = None;
+        self.outbound_domain = None;
         self.follower = None;
         self.probe = None;
         self.snapshot = Snapshot::inactive();
@@ -193,8 +232,12 @@ impl Engine {
             mapping: None,
             quality: None,
             link: None,
+            outbound: None,
         };
         match next.role {
+            // Dual mode already owns an outbound master for our clock; a second
+            // one would emit a duplicate stream under the same domain.
+            Role::Master if self.outbound.is_some() => {}
             Role::Master => {
                 let mut master = Master::new(next.domain.unwrap()).map_err(io::Error::other)?;
                 master.set_peers(&self.peers).map_err(io::Error::other)?;
@@ -243,6 +286,20 @@ impl Engine {
     }
     fn refresh(&mut self, now: LocalInstant, own: Reading) -> io::Result<()> {
         self.snapshot.link = self.probe.as_ref().and_then(|p| p.latest(now));
+        // Outbound is recomputed first so an early return below cannot publish a
+        // stale or absent mapping for the co-resident master.
+        self.snapshot.outbound = match self.outbound_domain {
+            Some(domain) => Some(
+                ClockMap::new(
+                    now,
+                    domain.reading(own.ns()),
+                    0,
+                    self.follow_config.mapping_lease_ns,
+                )
+                .map_err(io::Error::other)?,
+            ),
+            None => None,
+        };
         match self.snapshot.selection.role {
             Role::Master => {
                 // Same live physical clock, newly selected authority epoch. Do
@@ -263,7 +320,8 @@ impl Engine {
                 let map = self.follower.as_ref().and_then(|f| f.mapping(now));
                 if self.had_mapping && map.is_none() {
                     self.invalidate(now)?;
-                    return Ok(());
+                    // Republish the outbound mapping the invalidation cleared.
+                    return self.refresh(now, own);
                 }
                 self.had_mapping |= map.is_some();
                 self.snapshot.mapping = map;
@@ -280,35 +338,48 @@ impl Engine {
         self.validate(now, own)?;
         self.choose(now)?;
         self.refresh(now, own)?;
-        Ok(if let Some(master) = self.master.as_mut() {
-            master
-                .poll(now.ns())
-                .map_err(io::Error::other)?
-                .into_iter()
-                .map(|datagram| Emission {
-                    datagram,
-                    origin: Origin::Master,
-                })
-                .collect()
-        } else {
-            self.probe
-                .as_mut()
-                .map(|probe| probe.poll(now))
-                .transpose()
-                .map_err(io::Error::other)?
-                .flatten()
-                .into_iter()
-                .map(|request| Emission {
-                    datagram: Datagram {
-                        peer: request.peer,
-                        port: 319,
-                        bytes: request.bytes,
-                        completion: None,
-                    },
-                    origin: Origin::Probe(request.token),
-                })
-                .collect()
-        })
+        let mut out = Vec::new();
+        if let Some(master) = self.master.as_mut() {
+            out.extend(
+                master
+                    .poll(now.ns())
+                    .map_err(io::Error::other)?
+                    .into_iter()
+                    .map(|datagram| Emission {
+                        datagram,
+                        origin: Origin::Master,
+                    }),
+            );
+        } else if let Some(probe) = self.probe.as_mut() {
+            out.extend(
+                probe
+                    .poll(now)
+                    .map_err(io::Error::other)?
+                    .into_iter()
+                    .map(|request| Emission {
+                        datagram: Datagram {
+                            peer: request.peer,
+                            port: 319,
+                            bytes: request.bytes,
+                            completion: None,
+                        },
+                        origin: Origin::Probe(request.token),
+                    }),
+            );
+        }
+        if let Some(outbound) = self.outbound.as_mut() {
+            out.extend(
+                outbound
+                    .poll(now.ns())
+                    .map_err(io::Error::other)?
+                    .into_iter()
+                    .map(|datagram| Emission {
+                        datagram,
+                        origin: Origin::Outbound,
+                    }),
+            );
+        }
+        Ok(out)
     }
     pub fn receive(
         &mut self,
@@ -353,20 +424,36 @@ impl Engine {
                 })
                 .collect());
         }
+        let mut out = Vec::new();
         if matches!(kind, Some(1 | 0xc)) {
+            // A receiver's request against our outbound clock must be answered in
+            // OUR domain even while the selected role follows a foreign source.
+            if let Some(outbound) = self.outbound.as_mut() {
+                let reading = self.outbound_domain.unwrap().reading(own.ns());
+                out.extend(
+                    outbound
+                        .receive(peer, packet, reading)
+                        .into_iter()
+                        .map(|datagram| Emission {
+                            datagram,
+                            origin: Origin::Outbound,
+                        }),
+                );
+            }
             if let Some(master) = self.master.as_mut() {
                 let reading = self.snapshot.selection.domain.unwrap().reading(own.ns());
-                return Ok(master
-                    .receive(peer, packet, reading)
-                    .into_iter()
-                    .map(|datagram| Emission {
-                        datagram,
-                        origin: Origin::Master,
-                    })
-                    .collect());
+                out.extend(
+                    master
+                        .receive(peer, packet, reading)
+                        .into_iter()
+                        .map(|datagram| Emission {
+                            datagram,
+                            origin: Origin::Master,
+                        }),
+                );
             }
         }
-        Ok(Vec::new())
+        Ok(out)
     }
     pub fn complete(
         &mut self,
@@ -392,6 +479,9 @@ impl Engine {
                     token,
                     self.snapshot.selection.domain.unwrap().reading(own.ns()),
                 )
+            }),
+            Origin::Outbound => self.outbound.as_mut().and_then(|m| {
+                m.complete_send(token, self.outbound_domain.unwrap().reading(own.ns()))
             }),
             Origin::Link => self.link.complete_send(token, own),
             Origin::Probe(_) => unreachable!(),
@@ -451,6 +541,65 @@ mod tests {
         )
         .unwrap()
     }
+    #[test]
+    fn dual_engine_serves_receivers_while_following_an_inbound_source() {
+        let mut e = Engine::new_dual(
+            Domain::new(100, 1).unwrap(),
+            local().at(0),
+            &[peer()],
+            role::Config {
+                policy: role::Policy::Elect,
+                settle_ns: 10,
+                announce_lease_ns: 10_000_000_000,
+                min_announces: 2,
+            },
+            follower::Config {
+                pairing_lease_ns: 100_000_000,
+                mapping_lease_ns: 2_000_000_000,
+                warmup_samples: 2,
+                step_threshold_ns: 50_000_000,
+            },
+        )
+        .unwrap();
+        // Outbound exists before any role has been selected.
+        let first = e.tick(local().at(1), own(1)).unwrap();
+        assert!(!first.is_empty(), "outbound master emits immediately");
+        for packet in &first {
+            assert_eq!(packet.datagram.peer, peer());
+            assert_eq!(
+                &packet.datagram.bytes[20..28],
+                &100u64.to_be_bytes(),
+                "outbound packets carry our own clock identity"
+            );
+        }
+        // Inbound evidence from a foreign grandmaster.
+        let mut m = remote();
+        deliver(&mut e, &mut m, 0, 1_000_000_000);
+        deliver(&mut e, &mut m, 1, 2_000_000_000);
+        deliver(&mut e, &mut m, 2, 3_000_000_000);
+        let s = e.snapshot();
+        assert_eq!(s.selection.role, Role::Follower(peer()));
+        assert_eq!(s.quality, Some(Quality::OneWay));
+        assert_eq!(s.selection.domain.unwrap().id(), 50);
+        let outbound = s.outbound.expect("co-resident outbound mapping");
+        assert_eq!(outbound.domain().id(), 100);
+        assert_eq!(outbound.rate_ppb(), 0);
+        assert_ne!(outbound.domain(), s.selection.domain.unwrap());
+        // Receivers keep being served after the inbound lock exists.
+        let batch = e
+            .tick(local().at(3_000_000_100), own(3_000_000_100))
+            .unwrap();
+        assert!(!batch.is_empty());
+        assert!(
+            batch
+                .iter()
+                .all(|packet| matches!(packet.origin, Origin::Outbound))
+        );
+        // A single-role engine publishes no outbound mapping at all.
+        let single = engine();
+        assert!(single.snapshot().outbound.is_none());
+    }
+
     #[test]
     fn membership_updates_preserve_master_epoch_and_reject_invalid_input() {
         let mut e = engine();
