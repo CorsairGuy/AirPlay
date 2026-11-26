@@ -5,7 +5,9 @@
 //! - [`frame`] — кадры и шифрование канала;
 //! - [`auth`] — pair-verify поверх сохранённых HAP-ключей;
 //! - [`commands`] — команды `_hidC`, `_mcc`, `_sessionStart`, события;
-//! - [`link`] — сборка/разбор без привязки к транспорту.
+//! - [`link`] — сборка/разбор без привязки к транспорту;
+//! - [`session`] — сессия поверх TCP: pair-verify, корреляция, таймауты,
+//!   обрыв и очистка состояния.
 //!
 //! Проверено только на референсных wire-фактах и автономных тестах:
 //! обмен с настоящим Apple TV не выполнялся, TVRCSessionStart/SystemStatus
@@ -16,6 +18,7 @@ pub mod commands;
 pub mod frame;
 pub mod link;
 pub mod opack;
+pub mod session;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -31,4 +34,10 @@ pub enum Error {
     Crypto(#[from] crypto::Error),
     #[error(transparent)]
     Pair(#[from] pair::Error),
+    #[error("сессия Companion: {0}")]
+    Session(&'static str),
+    #[error("таймаут ожидания ответа Companion")]
+    Timeout,
+    #[error("соединение Companion закрыто")]
+    Closed,
 }
