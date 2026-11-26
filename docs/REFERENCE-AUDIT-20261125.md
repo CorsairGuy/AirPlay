@@ -152,6 +152,21 @@ GitHub не определил SPDX-лицензию atv-core и airfry авто
 доказывает ни наличие, ни отсутствие лицензии. `openairplay/airplay2-receiver-go`
 не удалось подтвердить по предполагаемому адресу; требуется найти первоисточник.
 
+### Новые пины 25 ноября 2026 (отдельный поиск GitHub API)
+
+Срезы сняты `git ls-remote` с default branch; лицензия — metadata GitHub. Заявления
+README не являются нашей проверкой; код не переносится. Статусы задач эти записи не меняют.
+
+| Источник | Срез | Лицензия | Значение и ограничения |
+|---|---|---|---|
+| [serezhka/java-airplay](https://github.com/serezhka/java-airplay) | `61f6be7` | MIT | AP2-RX для десктопа: mirroring, звук, HLS через GStreamer/FFmpeg/Chromium-MSE; соседний `java-airplay-lib` (MIT, последний push 2022) позиционируется как сервер «в роли Apple TV». Дополнительный AP2-RX для сравнения: сверка stream-SETUP и HLS-ветки там, где прежние эталоны только GPL (UxPlay, shairport-sync). Заявления README о поддержке устройств не проверены. |
+| [Mihonarium/StreamToSpeaker](https://github.com/Mihonarium/StreamToSpeaker) | `3edd815` | MPL-2.0 | Rust, Windows: виртуальное аудиоустройство → AirPlay/Sonos/UPnP. Единственный найденный открытый Windows-sender; полезен для темпа звука в TX ; к приёму зеркалирования напрямую не относится. Совместимость с нашим TX не проверена. |
+| [kushuh/airpipe](https://github.com/kushuh/airpipe) | `0a2f521` | Apache-2.0 | Rust, PipeWire → AP2, sender-only, терминальный. Малый разрешительный кросс-чек AP2-TX рядом с OwnTone (GPL-2.0, C): выбор профиля и старт сессии. Создан в октябре 2026, поведение на наших приёмниках не проверено. |
+| [nickustinov/itsytv-core](https://github.com/nickustinov/itsytv-core) | `0a09f06` | не определена GitHub | Swift: Companion + MRP + AirPlay. Третья независимая реализация MRP/Companion для §6 п.4 (подписи pair-setup/pair-verify) и п.13 (схема) после pyatv, `pyatv-rs` (D41) и `station-relay`. Создан 14 ноября 2026; лицензия неизвестна — только чтение wire-фактов. |
+
+Не покрыто этим проходом: DACP/DAAP-remote, fuzz-корпуса сетевых парсеров и Rust-реализации
+gPTP — GitHub Search API ответил `rate limit exceeded` после примерно 15 запросов с одного IP.
+
 ## Исправления и задачи
 
 1. [pyatv #2866](https://github.com/postlund/pyatv/issues/2866): на конкретном

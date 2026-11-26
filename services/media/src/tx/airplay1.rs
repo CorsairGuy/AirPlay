@@ -48,8 +48,10 @@ pub struct Receiver {
     pub address: SocketAddr,
     pub pcm: bool,
     pub alac: bool,
-    /// `et` includes AES encryption (bit 1/4); informational for the caller.
+    /// `et` includes an observed nonzero mode (1 or 4); informational only.
     pub encryption: bool,
+    /// Declared encryption modes; `None` means the advertisement omitted `et`.
+    pub encryption_types: Option<Vec<u8>>,
 }
 
 impl Receiver {
@@ -73,10 +75,19 @@ impl Receiver {
         if parsed.is_empty() || parsed.iter().any(|codec| *codec > 4) {
             bail!("invalid RAOP codec list");
         }
-        // `et=0,1` is cleartext plus AES; `et=4` is RSA key exchange.
+        // Preserve the advertised numeric modes; their exact meaning is not inferred here.
         let encryption = txt
             .get("et")
             .is_some_and(|et| et.split(',').any(|v| v.trim() == "1" || v.trim() == "4"));
+        let encryption_types = txt
+            .get("et")
+            .map(|et| {
+                et.split(',')
+                    .map(|value| value.trim().parse::<u8>())
+                    .collect::<std::result::Result<Vec<_>, _>>()
+            })
+            .transpose()
+            .context("invalid RAOP encryption list")?;
         let name = instance
             .split_once('@')
             .map(|(_, name)| name)
@@ -88,6 +99,7 @@ impl Receiver {
             pcm: parsed.contains(&0),
             alac: parsed.contains(&1),
             encryption,
+            encryption_types,
         })
     }
 
@@ -147,6 +159,15 @@ impl SessionConfig {
         }
         if self.codec == Codec::Pcm && !self.receiver.pcm {
             bail!("receiver does not advertise PCM");
+        }
+        if self.audio_key.is_none()
+            && self
+                .receiver
+                .encryption_types
+                .as_ref()
+                .is_some_and(|types| !types.contains(&0))
+        {
+            bail!("receiver does not advertise unencrypted RAOP audio");
         }
         if self.audio_key.is_some() != self.audio_iv.is_some()
             || (self.rsa_wrapped_key.is_some() && self.audio_key.is_none())
@@ -689,6 +710,26 @@ mod tests {
         assert!(config.validate().is_err(), "invalid RSA block length");
         config.rsa_wrapped_key = Some(vec![0; 256]);
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn declared_encryption_only_receiver_rejects_plain_audio() {
+        let encrypted_only = raop("0", "1");
+        assert!(
+            SessionConfig::new(encrypted_only, Codec::Pcm)
+                .validate()
+                .is_err()
+        );
+        let mixed = raop("0", "0,1");
+        assert!(SessionConfig::new(mixed, Codec::Pcm).validate().is_ok());
+        assert!(
+            Receiver::from_raop(
+                "device",
+                (Ipv4Addr::LOCALHOST, 5000).into(),
+                &BTreeMap::from([("et".into(), "0,invalid".into())]),
+            )
+            .is_err()
+        );
     }
 
     #[test]
