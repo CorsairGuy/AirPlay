@@ -122,6 +122,11 @@ impl TimeSync {
         self.host.as_ref().map(|host| host.service())
     }
 
+    /// Physical clock shared by the dual host and its media timeline.
+    pub fn dual_clock_source(&self) -> Option<Arc<media::InstantSource>> {
+        self.host.as_ref()?.dual_source()
+    }
+
     /// Clock this host offers its receivers; available while following inbound.
     pub fn outbound_reading(&self) -> Option<clock::domain::Reading> {
         self.host.as_ref()?.outbound_reading()

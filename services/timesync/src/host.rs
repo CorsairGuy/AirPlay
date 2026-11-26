@@ -27,6 +27,7 @@ pub(crate) struct Host {
     _service: Arc<service::Service>,
     status: watch::Receiver<Snapshot>,
     local: LocalClock,
+    dual_source: Option<Arc<crate::media::InstantSource>>,
     peers: watch::Sender<BTreeMap<u128, Vec<IpAddr>>>,
 }
 impl Host {
@@ -46,7 +47,15 @@ impl Host {
     async fn bind_mode(id: u64, ip: IpAddr, dual: bool) -> io::Result<Self> {
         let own = Domain::new(id, 1).map_err(io::Error::other)?;
         let local = LocalClock::new(u128::from(id)).map_err(io::Error::other)?;
-        let clock = Arc::new(Physical { local, own });
+        let dual_source = dual.then(|| {
+            Arc::new(crate::media::InstantSource::new(
+                std::time::Instant::now(), local, own, clock::now_ns(),
+            ))
+        });
+        let clock: Arc<dyn sender::ClockSource> = match &dual_source {
+            Some(source) => source.clone(),
+            None => Arc::new(Physical { local, own }),
+        };
         let config = service::Config {
             network: sender::Config {
                 domain: own,
@@ -142,6 +151,7 @@ impl Host {
             _service: service,
             status,
             local,
+            dual_source,
             peers,
         })
     }
@@ -156,14 +166,25 @@ impl Host {
     }
     pub fn reading(&self) -> Option<Reading> {
         let snapshot = *self.status.borrow();
-        let now = self.local.at(clock::now_ns());
+        let now = self.local_now()?;
         snapshot.mapping?.to_network(now, now).ok()
     }
 
     /// Clock we offer receivers, valid while following an inbound source.
     pub fn outbound_reading(&self) -> Option<Reading> {
         let snapshot = *self.status.borrow();
-        let now = self.local.at(clock::now_ns());
+        let now = self.local_now()?;
         snapshot.outbound?.to_network(now, now).ok()
+    }
+
+    fn local_now(&self) -> Option<LocalInstant> {
+        match &self.dual_source {
+            Some(source) => source.local_at(std::time::Instant::now()).ok(),
+            None => Some(self.local.at(clock::now_ns())),
+        }
+    }
+
+    pub fn dual_source(&self) -> Option<Arc<crate::media::InstantSource>> {
+        self.dual_source.clone()
     }
 }
