@@ -133,6 +133,9 @@ impl Fetcher {
         if playlist.live {
             return Err(Error::UnsupportedFeature("live playlist refresh"));
         }
+        if playlist.segments.iter().any(|segment| segment.discontinuity) {
+            return Err(Error::UnsupportedFeature("HLS discontinuity timeline"));
+        }
 
         let total_ms: u64 = playlist.segments.iter().map(|s| s.duration_ms).sum();
         let (first, start) = segment_at(&playlist, position)?;
@@ -214,6 +217,8 @@ mod tests {
     fn playlist(durations: &[u64]) -> Playlist {
         Playlist {
             variants: Vec::<Variant>::new(),
+            media_sequence: 0,
+            discontinuity_sequence: 0,
             segments: durations
                 .iter()
                 .enumerate()
@@ -221,6 +226,7 @@ mod tests {
                     uri: Url::parse(&format!("https://example.com/{i}.ts")).unwrap(),
                     duration_ms: *ms,
                     initialization_segment: None,
+                    discontinuity: false,
                 })
                 .collect(),
             live: false,
@@ -252,5 +258,146 @@ mod tests {
             segment_at(&playlist(&[]), Duration::ZERO),
             Err(Error::Playlist(_))
         ));
+    }
+
+    // Ниже — загрузка через собственный loopback-сервер; сеть не используется.
+    use crate::Fetcher;
+    use crate::testserver::Server;
+    use std::io::Read;
+    use std::time::Duration;
+
+    fn url(server: &Server, path: &str) -> Url {
+        Url::parse(&server.url(path)).expect("test URL")
+    }
+
+    fn fixture(name: &str) -> Vec<u8> {
+        std::fs::read(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests")
+                .join("fixtures")
+                .join("av")
+                .join(name),
+        )
+        .expect("fixture")
+    }
+
+    fn read_all(reader: SegmentReader) -> Vec<u8> {
+        let mut reader = reader;
+        let mut out = Vec::new();
+        reader.read_to_end(&mut out).expect("segment stream");
+        out
+    }
+
+    /// Плейлист без `ENDLIST` не является завершённым VOD и отвергается.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn live_playlist_is_refused() {
+        let server = Server::start();
+        let error = Fetcher::for_tests()
+            .open_vod_at(&url(&server, "/av/live.m3u8"), u64::MAX, Duration::ZERO)
+            .await
+            .err()
+            .expect("a live playlist must be refused");
+        assert!(matches!(error, Error::UnsupportedFeature(_)), "{error}");
+    }
+
+    /// Обрезанный ответ на плейлист — ошибка загрузки, а не пустой список.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn truncated_playlist_is_a_fetch_error() {
+        let server = Server::start();
+        server.fail_next("/av/playlist.m3u8");
+        let error = Fetcher::for_tests()
+            .open_vod(&url(&server, "/av/playlist.m3u8"), u64::MAX)
+            .await
+            .err()
+            .expect("a truncated playlist must fail");
+        assert!(matches!(error, Error::Fetch), "{error}");
+    }
+
+    /// 404 на сегменте доходит до вызывающего как ошибка загрузки, а не конец.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn missing_segment_surfaces_the_fetch_error() {
+        let server = Server::start();
+        let source = Fetcher::for_tests()
+            .open_vod(&url(&server, "/av/broken.m3u8"), u64::MAX)
+            .await
+            .expect("playlist opens");
+        assert!(source.finish().await.is_err(), "missing.ts must fail");
+        assert_eq!(server.requests("/av/missing.ts"), 1);
+    }
+
+    /// Переходы между сегментами: байты идут в порядке плейлиста и без швов.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reader_yields_segments_in_playlist_order() {
+        let server = Server::start();
+        let mut source = Fetcher::for_tests()
+            .open_vod(&url(&server, "/av/playlist.m3u8"), u64::MAX)
+            .await
+            .expect("playlist opens");
+        assert_eq!(source.duration(), Duration::from_secs(3));
+        let reader = source.take_reader().expect("reader");
+        let bytes = tokio::task::spawn_blocking(move || read_all(reader))
+            .await
+            .expect("reader task");
+        source.finish().await.expect("all segments arrive");
+        let expected: Vec<u8> = ["seg0.ts", "seg1.ts", "seg2.ts"]
+            .iter()
+            .flat_map(|name| fixture(name))
+            .collect();
+        assert_eq!(bytes, expected);
+    }
+
+    /// Разрыв таймлайна из плейлиста помечает сегмент, а содержимое не меняется.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn discontinuity_playlist_is_rejected_until_timeline_is_supported() {
+        let server = Server::start();
+        let error = Fetcher::for_tests()
+            .open_vod(&url(&server, "/av/discontinuity.m3u8"), u64::MAX)
+            .await
+            .err()
+            .expect("unsupported timeline must not start");
+        assert!(matches!(error, Error::UnsupportedFeature("HLS discontinuity timeline")));
+    }
+
+    /// Отмена во время медленной загрузки освобождает производителя: новый
+    /// запуск не ждёт зависший сегмент.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dropping_a_source_abandons_a_stalled_download() {
+        let server = Server::start();
+        server.stall_next("/av/seg1.ts", Duration::from_millis(1500));
+        let mut source = Fetcher::for_tests()
+            .open_vod(&url(&server, "/av/playlist.m3u8"), u64::MAX)
+            .await
+            .expect("playlist opens");
+        let reader = source.take_reader().expect("reader");
+        // Дождаться, пока запрос зависшего сегмента действительно стартует:
+        // иначе медленным окажется уже следующий запуск.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while server.requests("/av/seg1.ts") == 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "stalled segment was never requested"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        drop(reader);
+        drop(source);
+
+        let mut fresh = Fetcher::for_tests()
+            .open_vod(&url(&server, "/av/playlist.m3u8"), u64::MAX)
+            .await
+            .expect("fresh playlist opens");
+        let reader = fresh.take_reader().expect("fresh reader");
+        let bytes = tokio::time::timeout(
+            Duration::from_secs(5),
+            tokio::task::spawn_blocking(move || read_all(reader)),
+        )
+        .await
+        .expect("a stalled download was not abandoned")
+        .expect("reader task");
+        fresh.finish().await.expect("fresh playback completes");
+        assert_eq!(
+            bytes.len(),
+            fixture("seg0.ts").len() + fixture("seg1.ts").len() + fixture("seg2.ts").len()
+        );
     }
 }

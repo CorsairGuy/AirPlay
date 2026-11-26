@@ -178,7 +178,7 @@ impl Resolve for PublicResolver {
     }
 }
 
-#[cfg(all(test, feature = "ffmpeg"))]
+#[cfg(test)]
 impl Fetcher {
     /// Client without the non-public DNS resolver, for loopback tests.
     /// Test builds only: the production constructor rejects private addresses.
