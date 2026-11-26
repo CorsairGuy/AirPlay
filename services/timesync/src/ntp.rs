@@ -10,7 +10,7 @@
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub use clock::{NTP_TIMELINE, ntp_to_ns};
 use clock::{TimeSource, now_ns};
@@ -24,6 +24,7 @@ const REQUEST: u8 = 0x52;
 const REPLY: u8 = 0x53;
 /// Сколько последних замеров держим; берём замер с наименьшей задержкой.
 const SAMPLES: usize = 8;
+const MAX_SAMPLE_AGE: Duration = Duration::from_secs(10);
 
 /// Сдвиг монотонных часов в «время NTP», постоянный с момента запуска.
 fn base_ns() -> i64 {
@@ -75,7 +76,7 @@ pub fn request_with_sequence(sequence: u16) -> [u8; 32] {
 /// Ответ на запрос: его время отправки — в «origin», наше — в «receive» и
 /// «transmit».
 pub fn reply(req: &[u8]) -> Option<[u8; 32]> {
-    if req.len() < 32 || req[1] & 0x7F != REQUEST {
+    if req.len() < 32 || req[0] != 0x80 || req[1] & 0x7F != REQUEST {
         return None;
     }
     let mut resp = [0u8; 32];
@@ -92,6 +93,7 @@ pub fn reply(req: &[u8]) -> Option<[u8; 32]> {
 struct Samples {
     /// (задержка туда-обратно, смещение «его NTP − наше NTP»), нс.
     recent: Vec<(i64, i64)>,
+    last_received: Option<Instant>,
 }
 
 /// Смещение часов отправителя, по которому плеер ставит звук
@@ -105,26 +107,44 @@ impl NtpClock {
         if packet.len() < 32 {
             return;
         }
-        let t1 = read_ntp(&packet[8..16]) as i64;
-        let t2 = read_ntp(&packet[16..24]) as i64;
-        let t3 = read_ntp(&packet[24..32]) as i64;
-        let t4 = t4 as i64;
+        let t1 = i128::from(read_ntp(&packet[8..16]));
+        let t2 = i128::from(read_ntp(&packet[16..24]));
+        let t3 = i128::from(read_ntp(&packet[24..32]));
+        let t4 = i128::from(t4);
+        if t2 == 0 || t3 == 0 || t3 < t2 {
+            return;
+        }
         let rtt = (t4 - t1) - (t3 - t2);
         if rtt < 0 {
             return;
         }
         let offset = ((t2 - t1) + (t3 - t4)) / 2;
+        let (Ok(rtt), Ok(offset)) = (i64::try_from(rtt), i64::try_from(offset)) else {
+            return;
+        };
         let mut s = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if s.last_received
+            .is_some_and(|at| at.elapsed() > MAX_SAMPLE_AGE)
+        {
+            s.recent.clear();
+        }
         if s.recent.len() == SAMPLES {
             s.recent.remove(0);
         }
         s.recent.push((rtt, offset));
+        s.last_received = Some(Instant::now());
         debug!(rtt_us = rtt / 1000, offset_ms = offset / 1_000_000, "NTP");
     }
 
     /// «Его NTP − наше NTP», нс.
     pub fn ntp_offset(&self) -> Option<i64> {
         let s = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if !s
+            .last_received
+            .is_some_and(|at| at.elapsed() <= MAX_SAMPLE_AGE)
+        {
+            return None;
+        }
         s.recent.iter().min_by_key(|(rtt, _)| *rtt).map(|(_, o)| *o)
     }
 }
@@ -134,7 +154,7 @@ impl TimeSource for NtpClock {
     fn offset(&self, timeline: u64) -> Option<i64> {
         (timeline == NTP_TIMELINE)
             .then(|| self.ntp_offset())?
-            .map(|o| o + base_ns())
+            .and_then(|o| o.checked_add(base_ns()))
     }
 }
 
@@ -154,14 +174,20 @@ pub fn start(remote: SocketAddr) -> io::Result<(u16, NtpClock, JoinHandle<()>)> 
     let task = tokio::spawn(async move {
         let mut buf = [0u8; 128];
         let mut tick = tokio::time::interval(Duration::from_secs(3));
+        let mut outstanding: Option<([u8; 8], Instant)> = None;
         loop {
             tokio::select! {
                 r = socket.recv_from(&mut buf) => match r {
                     Ok((n, from)) => {
                         let packet = &buf[..n];
+                        if from.ip().to_canonical() != remote.ip().to_canonical() { continue; }
                         if let Some(resp) = reply(packet) {
                             let _ = socket.send_to(&resp, from).await;
-                        } else if n >= 32 && packet[1] & 0x7F == REPLY {
+                        } else if n >= 32 && packet[0] == 0x80 && packet[1] & 0x7F == REPLY
+                            && from.port() == remote.port()
+                            && outstanding.as_ref().is_some_and(|(origin, sent)|
+                                packet[8..16] == origin[..] && sent.elapsed() <= Duration::from_secs(10)) {
+                            outstanding = None;
                             task_clock.on_reply(packet, local_ns());
                         }
                     }
@@ -172,7 +198,11 @@ pub fn start(remote: SocketAddr) -> io::Result<(u16, NtpClock, JoinHandle<()>)> 
                 },
                 _ = tick.tick() => {
                     if remote.port() != 0 {
-                        let _ = socket.send_to(&request(), remote).await;
+                        let packet = request();
+                        let origin = packet[24..32].try_into().expect("NTP timestamp length");
+                        if socket.send_to(&packet, remote).await.is_ok() {
+                            outstanding = Some((origin, Instant::now()));
+                        }
                     }
                 }
             }
@@ -184,6 +214,36 @@ pub fn start(remote: SocketAddr) -> io::Result<(u16, NtpClock, JoinHandle<()>)> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn timing_accepts_only_reply_to_outstanding_request_from_configured_peer() {
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let stranger = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let (port, clock, task) = start(server.local_addr().unwrap()).unwrap();
+        let mut request = [0; 128];
+        let (n, client) =
+            tokio::time::timeout(Duration::from_secs(2), server.recv_from(&mut request))
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(client.port(), port);
+        let valid = reply(&request[..n]).unwrap();
+        stranger.send_to(&valid, client).await.unwrap();
+        let mut wrong = valid;
+        wrong[8] ^= 1;
+        server.send_to(&wrong, client).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert!(clock.ntp_offset().is_none());
+        server.send_to(&valid, client).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while clock.ntp_offset().is_none() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        task.abort();
+    }
 
     #[test]
     fn reply_echoes_origin() {
@@ -211,6 +271,16 @@ mod tests {
         let mono = clock.offset(NTP_TIMELINE).unwrap();
         assert_eq!(mono, offset + base_ns());
         assert!(clock.offset(1).is_none());
+    }
+
+    #[test]
+    fn stale_ntp_samples_stop_providing_a_mapping() {
+        let clock = NtpClock::default();
+        let mut state = clock.0.lock().unwrap();
+        state.recent.push((1, 2));
+        state.last_received = Some(Instant::now() - MAX_SAMPLE_AGE - Duration::from_secs(1));
+        drop(state);
+        assert!(clock.ntp_offset().is_none());
     }
 
     #[test]

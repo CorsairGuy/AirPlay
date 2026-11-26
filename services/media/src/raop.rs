@@ -67,15 +67,27 @@ impl Raop {
             return Err(Response::to(req, 400));
         };
         let transport = req.headers.get("Transport").unwrap_or("");
-        let sender_control = match parse_transport(transport) {
-            Ok(control) => control,
+        let (sender_control, sender_timing) = match parse_transport(transport) {
+            Ok(ports) => ports,
             Err(TransportError::Unsupported) => {
                 warn!(transport, "SETUP: профиль транспорта не поддерживается");
                 return Err(Response::to(req, 501));
             }
             Err(TransportError::Malformed) => return Err(Response::to(req, 400)),
         };
-        let stream = Stream::raop(cfg, StreamKey::Plain, format, sender_control, sender).map_err(|e| {
+        let stream = Stream::raop(
+            cfg,
+            StreamKey::Plain,
+            format,
+            sender_control,
+            sender,
+            || {
+                let endpoint = std::net::SocketAddr::new(sender, sender_timing.unwrap_or(0));
+                let (port, clock, task) = timesync::ntp::start(endpoint)?;
+                Ok((port, std::sync::Arc::new(clock), task))
+            },
+        )
+        .map_err(|e| {
             warn!("сокеты AirPlay 1: {e}");
             Response::to(req, 500)
         })?;
@@ -241,8 +253,8 @@ pub(crate) fn parse_sdp(body: &[u8]) -> Result<Format, SdpError> {
 
 /// `RTP/AVP/UDP;unicast;mode=record;control_port=…;timing_port=…`.
 /// Некоторые UDP-отправители также указывают `interleaved`; транспорт при этом остаётся UDP.
-/// Возвращает `control_port` отправителя — туда шлём запросы пересылки.
-fn parse_transport(value: &str) -> Result<Option<u16>, TransportError> {
+/// Возвращает управляющий и временной порты отправителя.
+fn parse_transport(value: &str) -> Result<(Option<u16>, Option<u16>), TransportError> {
     if value.trim().is_empty() {
         return Err(TransportError::Malformed);
     }
@@ -254,17 +266,21 @@ fn parse_transport(value: &str) -> Result<Option<u16>, TransportError> {
         return Err(TransportError::Unsupported);
     }
     let mut control = None;
+    let mut timing = None;
     for param in lower.split(';').skip(1) {
         if let Some((key, value)) = param.split_once('=') {
             if key.trim() == "mode" && value.trim().trim_matches('"') != "record" {
                 return Err(TransportError::Unsupported);
             }
             if key.trim() == "control_port" {
-                control = value.trim().parse().ok();
+                control = value.trim().parse::<u16>().ok().filter(|port| *port != 0);
+            }
+            if key.trim() == "timing_port" {
+                timing = value.trim().parse::<u16>().ok().filter(|port| *port != 0);
             }
         }
     }
-    Ok(control)
+    Ok((control, timing))
 }
 
 #[cfg(test)]
@@ -374,9 +390,12 @@ a=rtpmap:96 AppleLossless\r\na=fmtp:96 352 0 16 40 10 14 2 255 0 0 44100\r\n";
     fn transport_profiles() {
         assert_eq!(
             parse_transport("RTP/AVP/UDP;unicast;mode=record;control_port=6001;timing_port=6002"),
-            Ok(Some(6001))
+            Ok((Some(6001), Some(6002)))
         );
-        assert_eq!(parse_transport("RTP/AVP/UDP;unicast;mode=record"), Ok(None));
+        assert_eq!(
+            parse_transport("RTP/AVP/UDP;unicast;mode=record"),
+            Ok((None, None))
+        );
         assert_eq!(
             parse_transport("RTP/AVP;unicast;mode=record"),
             Err(TransportError::Unsupported)
@@ -388,7 +407,7 @@ a=rtpmap:96 AppleLossless\r\na=fmtp:96 352 0 16 40 10 14 2 255 0 0 44100\r\n";
         );
         assert_eq!(
             parse_transport("RTP/AVP/UDP;unicast;interleaved=0-1;mode=record"),
-            Ok(None)
+            Ok((None, None))
         );
         assert_eq!(
             parse_transport("RTP/AVP/TCP;unicast;description=udp"),
@@ -398,5 +417,41 @@ a=rtpmap:96 AppleLossless\r\na=fmtp:96 352 0 16 40 10 14 2 255 0 0 44100\r\n";
             parse_transport("RTP/AVP/UDP;unicast;mode=play"),
             Err(TransportError::Unsupported)
         );
+    }
+
+    #[tokio::test]
+    async fn setup_sends_timing_probe_to_advertised_sender_port() {
+        let sender = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut raop = Raop::default();
+        raop.format = Some(parse_sdp(ALAC.as_bytes()).unwrap());
+        let mut setup = Request::new("SETUP", "rtsp://test/1", "RTSP/1.0");
+        setup.headers.insert(
+            "Transport",
+            format!(
+                "RTP/AVP/UDP;unicast;mode=record;timing_port={}",
+                sender.local_addr().unwrap().port()
+            ),
+        );
+        let (response, stream) = raop
+            .setup(
+                &setup,
+                audio_stream::Config::default(),
+                "127.0.0.1".parse().unwrap(),
+            )
+            .unwrap();
+        assert_eq!(response.status, 200);
+        let mut packet = [0u8; 64];
+        let (n, from) = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            sender.recv_from(&mut packet),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(from.port(), stream.timing_port);
+        assert_eq!(&packet[..2], &[0x80, 0xd2]);
+        let reply = timesync::ntp::reply(&packet[..n]).unwrap();
+        sender.send_to(&reply, from).await.unwrap();
+        drop(stream);
     }
 }

@@ -68,7 +68,11 @@ impl Resend {
     }
 
     async fn ask(&self, first: u16, count: u16) {
-        if let Err(e) = self.socket.send_to(&Self::request(first, count), self.target).await {
+        if let Err(e) = self
+            .socket
+            .send_to(&Self::request(first, count), self.target)
+            .await
+        {
             debug!(addr = %self.target, first, count, "запрос пересылки: {e}");
         }
     }
@@ -85,14 +89,22 @@ impl Missing {
     /// Первый пропущенный номер и сколько запросить; `None` — потерь нет,
     /// разрыв слишком велик или запрос недавно уже уходил.
     fn observe(&mut self, packet: &[u8]) -> Option<(u16, u16)> {
-        if packet.len() <= HEADER_LEN || packet[0] >> 6 != 2 || rtp::Header::parse(packet).is_none_or(|header| header.payload_type != 0x60) {
+        if packet.len() <= HEADER_LEN
+            || packet[0] >> 6 != 2
+            || rtp::Header::parse(packet).is_none_or(|header| header.payload_type != 0x60)
+        {
             return None;
         }
         // Шапка RTP у AirPlay 1 открыта и при шифрованном теле.
         let seq = u16::from_be_bytes([packet[2], packet[3]]);
-        let Some(previous) = self.expected else { self.expected = Some(seq.wrapping_add(1)); return None; };
+        let Some(previous) = self.expected else {
+            self.expected = Some(seq.wrapping_add(1));
+            return None;
+        };
         let missing = seq.wrapping_sub(previous);
-        if missing >= 0x8000 { return None; }
+        if missing >= 0x8000 {
+            return None;
+        }
         self.expected = Some(seq.wrapping_add(1));
         if missing == 0 || missing > MAX_RESEND {
             return None;
@@ -213,7 +225,12 @@ impl Stream {
                 None,
                 None,
             )),
-            tokio::spawn(receive_control(Arc::new(control), cipher, playout.clone(), None)),
+            tokio::spawn(receive_control(
+                Arc::new(control),
+                cipher,
+                playout.clone(),
+                None,
+            )),
         ];
         Ok(Stream {
             started: Some(started),
@@ -228,27 +245,29 @@ impl Stream {
     }
 
     /// AirPlay 1 (RAOP): звук по UDP, управляющий канал и отдельный порт
-    /// запросов времени. Часов отправителя у нас нет: воспроизведение
-    /// начинается с первого пакета по своим часам. `sender_control` —
-    /// `control_port` из `Transport`: туда шлём запросы пересылки потерь.
-    pub fn raop(
+    /// запросов времени. `sender_control` — `control_port` из `Transport`;
+    /// timing-сервис передаётся хостом, чтобы не дублировать движок часов.
+    pub fn raop<F>(
         cfg: Config,
         key: StreamKey,
         format: Format,
         sender_control: Option<u16>,
         sender: IpAddr,
-    ) -> io::Result<Stream> {
+        start_timing: F,
+    ) -> io::Result<Stream>
+    where
+        F: FnOnce() -> io::Result<(u16, Arc<dyn TimeSource>, JoinHandle<()>)>,
+    {
         let data = bind_udp()?;
         let control = Arc::new(bind_udp()?);
-        let timing = bind_udp()?;
         let data_port = data.local_addr()?.port();
         let control_port = control.local_addr()?.port();
-        let timing_port = timing.local_addr()?.port();
+        let (timing_port, time, timing_task) = start_timing()?;
         let resend = sender_control.map(|port| Resend {
             socket: control.clone(),
             target: SocketAddr::new(sender, port),
         });
-        let playout = Arc::new(Playout::start(cfg, Arc::new(clock::NoTime), Some(format)));
+        let playout = Arc::new(Playout::start(cfg, time, Some(format)));
         let cipher = Arc::new(match key {
             StreamKey::ChaCha(shk) => Decrypt::ChaCha(AudioCipher::new(&shk)),
             StreamKey::AesCbc { key, iv } => Decrypt::Cbc(Box::new(AudioCbc::new(&key, &iv))),
@@ -264,8 +283,13 @@ impl Stream {
                 resend,
                 Some(sender),
             )),
-            tokio::spawn(receive_control(control, cipher, playout.clone(), Some(sender))),
-            tokio::spawn(receive_timing(timing)),
+            tokio::spawn(receive_control(
+                control,
+                cipher,
+                playout.clone(),
+                Some(sender),
+            )),
+            timing_task,
         ];
         Ok(Stream {
             started: Some(started),
@@ -505,7 +529,9 @@ async fn receive_realtime(
                 continue;
             }
         };
-        if allowed_peer.is_some_and(|peer| peer.to_canonical() != source.ip().to_canonical()) { continue; }
+        if allowed_peer.is_some_and(|peer| peer.to_canonical() != source.ip().to_canonical()) {
+            continue;
+        }
         if let Some(resend) = &resend {
             if let Some((first, count)) = missing.observe(&buf[..n]) {
                 resend.ask(first, count).await;
@@ -531,7 +557,12 @@ async fn receive_realtime(
 
 /// Управляющий канал realtime: синхропакеты с PTP-временем (0xD7) и
 /// повторно присланные пакеты (0xD6).
-async fn receive_control(socket: Arc<UdpSocket>, cipher: Arc<Decrypt>, playout: Arc<Playout>, allowed_peer: Option<IpAddr>) {
+async fn receive_control(
+    socket: Arc<UdpSocket>,
+    cipher: Arc<Decrypt>,
+    playout: Arc<Playout>,
+    allowed_peer: Option<IpAddr>,
+) {
     let mut buf = vec![0u8; MAX_DATAGRAM];
     let mut failures = 0u64;
     loop {
@@ -549,7 +580,9 @@ async fn receive_control(socket: Arc<UdpSocket>, cipher: Arc<Decrypt>, playout: 
                 continue;
             }
         };
-        if allowed_peer.is_some_and(|peer| peer.to_canonical() != from.ip().to_canonical()) { continue; }
+        if allowed_peer.is_some_and(|peer| peer.to_canonical() != from.ip().to_canonical()) {
+            continue;
+        }
         let packet = &mut buf[..n];
         if n < 4 {
             continue;
@@ -593,73 +626,9 @@ async fn drain(socket: UdpSocket) {
     while socket.recv(&mut buf).await.is_ok() {}
 }
 
-/// Отвечает на 32-байтные запросы времени `0xD2`. Полноценный RAOP RX
-/// также должен запрашивать часы отправителя и учитывать ответы; здесь
-/// это не реализовано, поэтому воспроизведение использует fallback-часы.
-async fn receive_timing(socket: UdpSocket) {
-    let mut buf = [0u8; 128];
-    loop {
-        let Ok((n, from)) = socket.recv_from(&mut buf).await else {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-            continue;
-        };
-        if let Some(reply) = timing_reply(&buf[..n])
-            && let Err(e) = socket.send_to(&reply, from).await
-        {
-            debug!("ответ времени: {e}");
-        }
-    }
-}
-
-fn timing_reply(request: &[u8]) -> Option<[u8; 32]> {
-    if request.len() < 32 || request[1] & 0x7F != 0x52 {
-        return None;
-    }
-    let mut reply = [0u8; 32];
-    reply.copy_from_slice(&request[..32]);
-    reply[0] = 0x80;
-    reply[1] = 0xD3;
-    // Origin — transmit-метка запроса, затем наши receive/transmit.
-    reply[8..16].copy_from_slice(&request[24..32]);
-    let now = ntp_now();
-    reply[16..24].copy_from_slice(&now.to_be_bytes());
-    reply[24..32].copy_from_slice(&now.to_be_bytes());
-    Some(reply)
-}
-
-/// NTP-время от 1900 года, 32.32: отправитель сверяет по нему часы.
-fn ntp_now() -> u64 {
-    let since_unix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = since_unix.as_secs() + 2_208_988_800;
-    let frac = ((since_unix.subsec_nanos() as u64) << 32) / 1_000_000_000;
-    (secs << 32) | frac
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn timing_reply_echoes_origin_and_stamps_now() {
-        let mut request = [0u8; 32];
-        request[0] = 0x80;
-        request[1] = 0xD2;
-        request[4..8].copy_from_slice(&[0, 0, 0, 7]);
-        request[8..16].copy_from_slice(&[1; 8]);
-        request[24..32].copy_from_slice(&[2; 8]);
-        let reply = timing_reply(&request).unwrap();
-        assert_eq!(reply[1], 0xD3);
-        assert_eq!(reply[4..8], request[4..8]);
-        assert_eq!(reply[8..16], request[24..32]);
-        assert_eq!(reply[16..24], reply[24..32]);
-        assert_ne!(reply[16..24], [0; 8]);
-        assert!(timing_reply(&request[..31]).is_none());
-        let mut sync = request;
-        sync[1] = 0xD4;
-        assert!(timing_reply(&sync).is_none());
-    }
 
     #[test]
     fn plain_audio_is_not_decrypted() {
@@ -695,7 +664,10 @@ mod resend_tests {
     fn request_matches_the_wire_format() {
         // shairport-sync `7ce90d8` `rtp.c::rtp_request_resend`: 0x80 0xd5,
         // номер запроса 1, первый пропущенный seq, счётчик.
-        assert_eq!(Resend::request(1000, 2), [0x80, 0xd5, 0, 1, 0x03, 0xe8, 0, 2]);
+        assert_eq!(
+            Resend::request(1000, 2),
+            [0x80, 0xd5, 0, 1, 0x03, 0xe8, 0, 2]
+        );
     }
 
     #[test]
