@@ -21,6 +21,7 @@ mod local_pipe;
 pub mod mirror;
 mod packet;
 pub mod pool;
+pub mod relay;
 mod session;
 pub mod source_process;
 pub mod source_runtime;
@@ -38,6 +39,7 @@ pub use mirror::{
 pub use packet::{
     AudioPacket, FRAME_BYTES, FRAMES_PER_PACKET, MediaClock, PACKET_BYTES, SAMPLE_RATE,
 };
+pub use relay::{RelayError, RelayedDeadline, Shift};
 pub use session::{
     Artwork, Identity, MAX_ARTWORK_BYTES, MediaProgress, MetadataHandle, PairingCredentials,
     PinPairing, PtpPeerControl, Session, SessionConfig, StreamStats, TrackMetadata, Volume,
