@@ -196,6 +196,41 @@ impl SessionConfig {
     }
 }
 
+/// Declared SDP for one RAOP stream. `encryption` carries the already wrapped
+/// AES key and IV; both go in base64 without padding, as in OwnTone
+/// `612d6b3c` `src/outputs/raop.c`.
+fn sdp(
+    local: std::net::IpAddr,
+    ssrc: u32,
+    codec: Codec,
+    encryption: Option<(&[u8], &[u8])>,
+) -> String {
+    let family = if local.is_ipv4() { "IP4" } else { "IP6" };
+    let fmtp = match codec {
+        Codec::Alac => {
+            "a=rtpmap:96 AppleLossless\r\na=fmtp:96 352 0 16 40 10 14 2 255 0 0 44100\r\n"
+        }
+        Codec::Pcm => "a=rtpmap:96 L16/44100/2\r\n",
+    };
+    let encryption = match encryption {
+        Some((key, iv)) => format!(
+            "a=rsaaeskey:{}\r\na=aesiv:{}\r\n",
+            STANDARD_NO_PAD.encode(key),
+            STANDARD_NO_PAD.encode(iv)
+        ),
+        None => String::new(),
+    };
+    format!(
+        "v=0\r\n\
+         o=iTunes {ssrc} 0 IN {family} {local}\r\n\
+         s=iTunes\r\n\
+         c=IN {family} {local}\r\n\
+         t=0 0\r\n\
+         m=audio 0 RTP/AVP 96\r\n\
+         {fmtp}{encryption}"
+    )
+}
+
 /// One connected AirPlay 1 audio session. The caller supplies packets already
 /// in the stream clock; this module owns RAOP framing and the RTSP lifecycle.
 pub struct Session {
@@ -347,31 +382,11 @@ impl Session {
     }
 
     fn sdp(&self, local: std::net::IpAddr) -> String {
-        let family = if local.is_ipv4() { "IP4" } else { "IP6" };
-        let id = self.ssrc;
-        let fmtp = match self.config.codec {
-            Codec::Alac => {
-                "a=rtpmap:96 AppleLossless\r\na=fmtp:96 352 0 16 40 10 14 2 255 0 0 44100\r\n"
-            }
-            Codec::Pcm => "a=rtpmap:96 L16/44100/2\r\n",
+        let encryption = match (&self.config.rsa_wrapped_key, &self.config.audio_iv) {
+            (Some(key), Some(iv)) => Some((key.as_slice(), iv.as_slice())),
+            _ => None,
         };
-        let encryption = match (&self.config.rsa_wrapped_key, self.config.audio_iv) {
-            (Some(key), Some(iv)) => format!(
-                "a=rsaaeskey:{}\r\na=aesiv:{}\r\n",
-                STANDARD_NO_PAD.encode(key),
-                STANDARD_NO_PAD.encode(iv)
-            ),
-            _ => String::new(),
-        };
-        format!(
-            "v=0\r\n\
-             o=iTunes {id} 0 IN {family} {local}\r\n\
-             s=iTunes\r\n\
-             c=IN {family} {local}\r\n\
-             t=0 0\r\n\
-             m=audio 0 RTP/AVP 96\r\n\
-             {fmtp}{encryption}"
-        )
+        sdp(local, self.ssrc, self.config.codec, encryption)
     }
 
     async fn request(
@@ -652,6 +667,54 @@ mod tests {
             ]),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn sdp_vectors_match_the_declared_profile() {
+        let pcm = sdp(Ipv4Addr::LOCALHOST.into(), 0x0102_0304, Codec::Pcm, None);
+        assert_eq!(
+            pcm,
+            "v=0\r\no=iTunes 16909060 0 IN IP4 127.0.0.1\r\ns=iTunes\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 0 RTP/AVP 96\r\na=rtpmap:96 L16/44100/2\r\n"
+        );
+        let alac = sdp(Ipv4Addr::LOCALHOST.into(), 7, Codec::Alac, None);
+        assert!(alac.ends_with(
+            "m=audio 0 RTP/AVP 96\r\na=rtpmap:96 AppleLossless\r\na=fmtp:96 352 0 16 40 10 14 2 255 0 0 44100\r\n"
+        ));
+        let key = [0u8; 16];
+        let iv: [u8; 16] = std::array::from_fn(|i| i as u8);
+        let encrypted = sdp(Ipv4Addr::LOCALHOST.into(), 7, Codec::Pcm, Some((&key, &iv)));
+        assert!(encrypted.ends_with(
+            "a=rtpmap:96 L16/44100/2\r\na=rsaaeskey:AAAAAAAAAAAAAAAAAAAAAA\r\na=aesiv:AAECAwQFBgcICQoLDA0ODw\r\n"
+        ));
+    }
+
+    #[test]
+    fn receiver_parser_accepts_the_sender_sdp_vectors() {
+        let pcm = sdp(Ipv4Addr::LOCALHOST.into(), 1, Codec::Pcm, None);
+        let format = crate::raop::parse_sdp(pcm.as_bytes()).unwrap();
+        assert_eq!(
+            format.codec,
+            codec::Codec::Pcm {
+                frames_per_packet: 352
+            }
+        );
+        assert_eq!((format.sample_rate, format.channels), (44_100, 2));
+        let alac = sdp(Ipv4Addr::LOCALHOST.into(), 1, Codec::Alac, None);
+        let format = crate::raop::parse_sdp(alac.as_bytes()).unwrap();
+        assert_eq!(
+            format.codec,
+            codec::Codec::Alac {
+                bit_depth: 16,
+                frames_per_packet: 352
+            }
+        );
+        let key = [0u8; 16];
+        let iv = [1u8; 16];
+        let encrypted = sdp(Ipv4Addr::LOCALHOST.into(), 1, Codec::Pcm, Some((&key, &iv)));
+        assert!(
+            crate::raop::parse_sdp(encrypted.as_bytes()).is_err(),
+            "a plain-only receiver refuses wrapped keys"
+        );
     }
 
     #[test]
