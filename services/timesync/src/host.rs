@@ -49,7 +49,10 @@ impl Host {
         let local = LocalClock::new(u128::from(id)).map_err(io::Error::other)?;
         let dual_source = dual.then(|| {
             Arc::new(crate::media::InstantSource::new(
-                std::time::Instant::now(), local, own, clock::now_ns(),
+                std::time::Instant::now(),
+                local,
+                own,
+                clock::now_ns(),
             ))
         });
         let clock: Arc<dyn sender::ClockSource> = match &dual_source {

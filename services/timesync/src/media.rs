@@ -70,6 +70,8 @@ pub struct MasterTimeline {
     /// `true`: the selected role must be our local master. `false`: the
     /// co-resident outbound master is used, even while following inbound.
     selected: bool,
+    /// Relay producers must stop when this particular inbound epoch is lost.
+    relay_source: Option<clock::role::Selection>,
 }
 
 /// One-way group cancellation lease. Pass `subscribe()` to the session pool,
@@ -212,6 +214,7 @@ impl MasterTimeline {
             domain,
             max_ahead,
             selected: true,
+            relay_source: None,
         };
         timeline.reading_at(Instant::now())?;
         Ok(timeline)
@@ -253,7 +256,28 @@ impl MasterTimeline {
             domain,
             max_ahead,
             selected: false,
+            relay_source: None,
         };
+        timeline.reading_at(Instant::now())?;
+        Ok(timeline)
+    }
+
+    /// Bind a relay to the currently qualified inbound follower epoch. The
+    /// outbound clock may survive source loss, but media from this epoch must not.
+    pub fn new_relay(
+        source: Arc<InstantSource>,
+        status: watch::Receiver<Snapshot>,
+        max_ahead: Duration,
+    ) -> io::Result<Self> {
+        let mut timeline = Self::new_dual(source, status, max_ahead)?;
+        let selection = timeline.status.borrow().selection;
+        if !matches!(selection.role, Role::Follower(_)) || selection.domain.is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "inbound clock is not qualified",
+            ));
+        }
+        timeline.relay_source = Some(selection);
         timeline.reading_at(Instant::now())?;
         Ok(timeline)
     }
@@ -277,6 +301,24 @@ impl MasterTimeline {
             ));
         }
         let snapshot = *self.status.borrow();
+        if let Some(selection) = self.relay_source {
+            if snapshot.selection != selection || snapshot.quality != Some(Quality::OneWay) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "inbound PTP epoch lost",
+                ));
+            }
+            let now = self.source.local_at(now)?;
+            let inbound = snapshot.mapping.ok_or_else(|| {
+                io::Error::new(io::ErrorKind::WouldBlock, "inbound PTP mapping absent")
+            })?;
+            if Some(inbound.domain()) != selection.domain || inbound.to_network(now, now).is_err() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "inbound PTP mapping expired or changed",
+                ));
+            }
+        }
         let mapping = if self.selected {
             if snapshot.selection.role != Role::Master
                 || snapshot.selection.domain != Some(self.domain)
@@ -569,6 +611,65 @@ mod tests {
         assert!(
             timeline.reading_at_now(origin, origin).is_err(),
             "no outbound map, no outgoing clock"
+        );
+    }
+    #[tokio::test]
+    async fn relay_lease_latches_when_inbound_epoch_disappears() {
+        let origin = Instant::now();
+        let local = LocalClock::new(9).unwrap();
+        let own = Domain::new(7, 1).unwrap();
+        let foreign = Domain::new(50, 2).unwrap();
+        let source = Arc::new(InstantSource::new(origin, local, own, 1_000_000_000));
+        let snapshot = Snapshot {
+            selection: Selection {
+                role: Role::Follower("192.0.2.1".parse().unwrap()),
+                domain: Some(foreign),
+            },
+            mapping: Some(
+                ClockMap::new(
+                    local.at(0),
+                    foreign.reading(2_000_000_000),
+                    0,
+                    2_000_000_000,
+                )
+                .unwrap(),
+            ),
+            quality: Some(Quality::OneWay),
+            link: None,
+            outbound: Some(
+                ClockMap::new(local.at(0), own.reading(1_000_000_000), 0, 2_000_000_000).unwrap(),
+            ),
+        };
+        let (updates, status) = watch::channel(snapshot);
+        let timeline = Arc::new(
+            MasterTimeline::new_relay(source, status, Duration::from_millis(100)).unwrap(),
+        );
+        let (_upstream, upstream) = watch::channel(false);
+        let lease = MasterLease::spawn(timeline.clone(), upstream);
+        let mut stopped = lease.subscribe();
+        assert!(!*stopped.borrow());
+        let mut changed = snapshot;
+        changed.selection.domain = Some(Domain::new(50, 3).unwrap());
+        updates.send_replace(changed);
+        assert!(
+            timeline.reading_at(Instant::now()).is_err(),
+            "another epoch must not reuse this relay"
+        );
+        updates.send_replace(snapshot);
+        let mut lost = snapshot;
+        lost.mapping = None;
+        lost.quality = None;
+        updates.send_replace(lost);
+        tokio::time::timeout(Duration::from_secs(1), stopped.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(*stopped.borrow());
+        assert!(timeline.reading_at(Instant::now()).is_err());
+        updates.send_replace(snapshot);
+        assert!(
+            *stopped.borrow(),
+            "a recovered clock must not restart an old relay"
         );
     }
     #[test]

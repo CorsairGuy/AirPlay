@@ -43,14 +43,25 @@ struct PeerRequest {
     reply: oneshot::Sender<io::Result<()>>,
 }
 
-fn dual_union(inbound: &OwnerInterests, outbound: &OwnerInterests) -> io::Result<BTreeMap<IpAddr, Ports>> {
+fn dual_union(
+    inbound: &OwnerInterests,
+    outbound: &OwnerInterests,
+) -> io::Result<BTreeMap<IpAddr, Ports>> {
     let mut all = inbound.union().clone();
     for (ip, ports) in outbound.union() {
         if all.insert(*ip, *ports).is_some() {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "peer cannot be both timing source and receiver"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "peer cannot be both timing source and receiver",
+            ));
         }
     }
-    if all.len() > 64 { return Err(io::Error::new(io::ErrorKind::InvalidInput, "too many timing peers")); }
+    if all.len() > 64 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "too many timing peers",
+        ));
+    }
     Ok(all)
 }
 
@@ -266,23 +277,35 @@ mod tests {
                 general: general.local_addr().unwrap().port(),
             },
         };
-        let service = Service::bind_dual(
-            config(peer, Policy::FollowOnly(peer.ip)),
-            Arc::new(TestClock),
-        )
-        .await
-        .unwrap();
+        let source = Arc::new(crate::media::InstantSource::new(
+            std::time::Instant::now(),
+            LocalClock::new(1).unwrap(),
+            Domain::new(100, 1).unwrap(),
+            clock::now_ns() + 10_000_000_000,
+        ));
+        let service = Service::bind_dual(config(peer, Policy::FollowOnly(peer.ip)), source.clone())
+            .await
+            .unwrap();
         let receiver_event = UdpSocket::bind("127.0.0.3:0").await.unwrap();
         let receiver_general = UdpSocket::bind("127.0.0.3:0").await.unwrap();
-        let receiver = Peer { ip: receiver_event.local_addr().unwrap().ip(), ports: Ports {
-            event: receiver_event.local_addr().unwrap().port(),
-            general: receiver_general.local_addr().unwrap().port(),
-        }};
+        let receiver = Peer {
+            ip: receiver_event.local_addr().unwrap().ip(),
+            ports: Ports {
+                event: receiver_event.local_addr().unwrap().port(),
+                general: receiver_general.local_addr().unwrap().port(),
+            },
+        };
         service.set_group_peers(1, vec![receiver]).await.unwrap();
         service.set_group_peers(2, vec![receiver]).await.unwrap();
         service.set_group_peers(1, vec![]).await.unwrap();
-        assert!(service.set_group_peers(2, vec![peer]).await.is_err(), "source cannot be a receiver");
-        assert!(service.set_session_peers(3, vec![receiver]).await.is_err(), "receiver cannot become source");
+        assert!(
+            service.set_group_peers(2, vec![peer]).await.is_err(),
+            "source cannot be a receiver"
+        );
+        assert!(
+            service.set_session_peers(3, vec![receiver]).await.is_err(),
+            "receiver cannot become source"
+        );
         let addresses = service.addresses();
         let mut status = service.subscribe();
         let mut remote = Master::new(Domain::new(50, 1).unwrap()).unwrap();
@@ -309,16 +332,43 @@ mod tests {
             .expect("outbound mapping survives following");
         assert_eq!(outbound.domain().id(), 100);
         assert_ne!(outbound.domain(), followed.selection.domain.unwrap());
+        let timeline = Arc::new(
+            crate::media::MasterTimeline::new_relay(
+                source,
+                service.subscribe(),
+                Duration::from_millis(100),
+            )
+            .unwrap(),
+        );
+        let (_upstream, upstream) = watch::channel(false);
+        let lease = crate::media::MasterLease::spawn(timeline, upstream);
+        let mut stopped = lease.subscribe();
+        assert!(!*stopped.borrow());
         // The same socket pair still serves receivers while we follow.
         while receiver_event.try_recv(&mut buffer).is_ok() {}
-        let (size, _) = timeout(Duration::from_secs(1), receiver_event.recv_from(&mut buffer))
-            .await
-            .expect("outbound Sync while following")
-            .unwrap();
+        let (size, _) = timeout(
+            Duration::from_secs(1),
+            receiver_event.recv_from(&mut buffer),
+        )
+        .await
+        .expect("outbound Sync while following")
+        .unwrap();
         assert!(size >= 44);
         assert_eq!(buffer[0] & 15, 0);
         assert_eq!(&buffer[20..28], &100u64.to_be_bytes());
-        assert!(event.try_recv(&mut buffer).is_err(), "no outbound Sync to source");
+        assert!(
+            event.try_recv(&mut buffer).is_err(),
+            "no outbound Sync to source"
+        );
+        service.set_peers(vec![]).await.unwrap();
+        timeout(Duration::from_secs(1), stopped.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            *stopped.borrow(),
+            "removing the inbound source stops relay media"
+        );
         service.shutdown().await.unwrap();
     }
 
@@ -533,25 +583,48 @@ mod peer_update_tests {
     async fn expired_owner_stops_receiving_without_stopping_other_owners() {
         let base_event = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let base_general = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let base = Peer { ip: base_event.local_addr().unwrap().ip(), ports: Ports {
-            event: base_event.local_addr().unwrap().port(), general: base_general.local_addr().unwrap().port()
-        }};
+        let base = Peer {
+            ip: base_event.local_addr().unwrap().ip(),
+            ports: Ports {
+                event: base_event.local_addr().unwrap().port(),
+                general: base_general.local_addr().unwrap().port(),
+            },
+        };
         let event = UdpSocket::bind("127.0.0.3:0").await.unwrap();
         let general = UdpSocket::bind("127.0.0.3:0").await.unwrap();
-        let leased = Peer { ip: event.local_addr().unwrap().ip(), ports: Ports {
-            event: event.local_addr().unwrap().port(), general: general.local_addr().unwrap().port()
-        }};
-        let service = Service::bind(config(base, Policy::Elect), Arc::new(TestClock)).await.unwrap();
+        let leased = Peer {
+            ip: event.local_addr().unwrap().ip(),
+            ports: Ports {
+                event: event.local_addr().unwrap().port(),
+                general: general.local_addr().unwrap().port(),
+            },
+        };
+        let service = Service::bind(config(base, Policy::Elect), Arc::new(TestClock))
+            .await
+            .unwrap();
         let mut status = service.subscribe();
         wait_for(&mut status, |s| s.selection.role == Role::Master).await;
-        service.set_group_peers_for(1, vec![leased], Some(Duration::from_millis(300))).await.unwrap();
+        service
+            .set_group_peers_for(1, vec![leased], Some(Duration::from_millis(300)))
+            .await
+            .unwrap();
         let mut buffer = [0; 1024];
-        timeout(Duration::from_secs(1), event.recv_from(&mut buffer)).await.unwrap().unwrap();
+        timeout(Duration::from_secs(1), event.recv_from(&mut buffer))
+            .await
+            .unwrap()
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(450)).await;
         while event.try_recv(&mut buffer).is_ok() {}
-        assert!(timeout(Duration::from_millis(300), event.recv_from(&mut buffer)).await.is_err());
+        assert!(
+            timeout(Duration::from_millis(300), event.recv_from(&mut buffer))
+                .await
+                .is_err()
+        );
         while base_event.try_recv(&mut buffer).is_ok() {}
-        timeout(Duration::from_secs(1), base_event.recv_from(&mut buffer)).await.unwrap().unwrap();
+        timeout(Duration::from_secs(1), base_event.recv_from(&mut buffer))
+            .await
+            .unwrap()
+            .unwrap();
         service.shutdown().await.unwrap();
     }
 }
@@ -742,7 +815,12 @@ impl Service {
     }
     /// Peers belonging to an incoming session, distinct from group receivers.
     pub async fn set_session_peers(&self, owner: u128, peers: Vec<Peer>) -> io::Result<()> {
-        if owner == 0 { return Err(io::Error::new(io::ErrorKind::InvalidInput, "reserved timing owner")); }
+        if owner == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "reserved timing owner",
+            ));
+        }
         self.update_peers(owner, peers, None, true).await
     }
     /// Lease the owner's peers for at most `lease`. A consumer that stops
