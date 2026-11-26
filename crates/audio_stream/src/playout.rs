@@ -669,6 +669,38 @@ mod tests {
         playout.stop();
     }
 
+    /// Ложной смены эпохи нет: джиттер часов и согласованный якорь вывод не
+    /// перезапускают, а пауза, скачок шкалы и перемотка — перезапускают.
+    #[test]
+    fn only_real_discontinuities_start_a_new_epoch() {
+        let p = playout(Format {
+            codec: Codec::Pcm {
+                frames_per_packet: 1024,
+            },
+            sample_rate: 44_100,
+            channels: 2,
+        });
+        let anchor = |rtp: u32, network_ns: u64, playing: bool| Anchor {
+            rtp,
+            network_ns,
+            timeline: 4,
+            playing,
+        };
+        p.set_anchor(anchor(0, 1_000_000_000, true));
+        let start = p.lock().epoch;
+        p.set_anchor(anchor(0, 1_020_000_000, true));
+        assert_eq!(p.lock().epoch, start, "джиттер сети сменил эпоху");
+        p.set_anchor(anchor(44_100, 2_000_000_000, true));
+        assert_eq!(p.lock().epoch, start, "согласованный якорь сменил эпоху");
+        p.set_anchor(anchor(44_100, 2_000_000_000, false));
+        assert_eq!(p.lock().epoch, start + 1, "пауза не сменила эпоху");
+        p.set_anchor(anchor(88_200, 5_000_000_000, false));
+        assert_eq!(p.lock().epoch, start + 2, "скачок шкалы не сменил эпоху");
+        p.flush(None, 88_200);
+        assert_eq!(p.lock().epoch, start + 3, "перемотка не сменила эпоху");
+        p.stop();
+    }
+
     /// Нулевой `frames_per_packet` не должен зацикливать очередь.
     #[test]
     fn zero_frames_per_packet_still_stops() {
