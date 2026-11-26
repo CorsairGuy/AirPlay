@@ -280,6 +280,19 @@ mod tests {
             Err(Error::WrongDomain)
         );
     }
+
+    #[test]
+    fn relay_translation_cannot_repeat_or_use_expired_mapping() {
+        let local = local();
+        let incoming = domain(7, 1);
+        let outgoing = domain(8, 1);
+        let from = ClockMap::new(local.at(100), incoming.reading(200), 100, 50).unwrap();
+        let to = ClockMap::new(local.at(100), outgoing.reading(300), -100, 50).unwrap();
+        let converted = translate(incoming.reading(220), &from, &to, local.at(120)).unwrap();
+        assert_eq!(converted.domain(), outgoing);
+        assert_eq!(translate(converted, &from, &to, local.at(120)), Err(Error::WrongDomain));
+        assert_eq!(translate(incoming.reading(220), &from, &to, local.at(151)), Err(Error::Stale));
+    }
     #[test]
     fn negative_offsets_and_u64_limits_never_wrap() {
         let l = local();
