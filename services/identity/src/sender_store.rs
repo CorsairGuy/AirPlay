@@ -211,6 +211,50 @@ impl SenderStore {
             peers: Mutex::new(peers),
         })
     }
+    /// Record a one-shot automatic pairing attempt for a receiver UID.
+    ///
+    /// Returns true when an attempt was already recorded, for an invalid UID,
+    /// or when the marker cannot be written. Fail-closed is deliberate: a
+    /// read-only or damaged store must never make automatic attempts repeat on
+    /// every restart.
+    pub fn mark_auto_pair_tried(&self, receiver: &str) -> bool {
+        let Ok(receiver) = uid(receiver) else {
+            return true;
+        };
+        let dir = self.dir.join("auto-pair-tried");
+        let path = dir.join(hex::encode(receiver.as_bytes()));
+        if path.exists() {
+            return true;
+        }
+        let result = (|| -> Result<()> {
+            let mut builder = fs::DirBuilder::new();
+            builder.recursive(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            builder.create(&dir)?;
+            private(&dir, true)?;
+            create_file(&path)?.sync_all()?;
+            Ok(())
+        })();
+        result.is_err()
+    }
+
+    /// Atomic publication needs Linux `RENAME_NOREPLACE`. Other platforms get
+    /// an explicit refusal instead of a silently missing method or a
+    /// non-atomic fallback that could overwrite existing pairing state.
+    #[cfg(not(target_os = "linux"))]
+    pub fn import_new(
+        _dir: &Path,
+        _controller_id: &str,
+        _seed: &[u8; 32],
+        _records: &[ImportReceiver],
+    ) -> Result<Self> {
+        bail!("atomic sender-store import requires Linux renameat2")
+    }
+
     pub fn open(dir: &Path) -> Result<Self> {
         let mut builder = fs::DirBuilder::new();
         builder.recursive(true);
@@ -486,6 +530,35 @@ mod tests {
         assert!(SenderStore::import_new(&alias.join("store"), "id", &[1; 32], &[]).is_err());
         assert!(!dir.exists());
     }
+    #[test]
+    fn auto_pair_attempt_is_recorded_once_and_fail_closed() {
+        let dir = Temp::new();
+        let store = SenderStore::open(&dir.0).unwrap();
+        assert!(!store.mark_auto_pair_tried("receiver-A"));
+        assert!(store.mark_auto_pair_tried("receiver-A"));
+        assert!(!store.mark_auto_pair_tried("receiver-B"));
+        assert!(!store.mark_auto_pair_tried("receiver"));
+        drop(store);
+        assert!(
+            SenderStore::open(&dir.0)
+                .unwrap()
+                .mark_auto_pair_tried("receiver-A")
+        );
+        // An unusable UID is never offered another automatic attempt.
+        assert!(SenderStore::open(&dir.0).unwrap().mark_auto_pair_tried(""));
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn import_is_refused_explicitly_off_linux() {
+        let dir = Temp::new();
+        let error = SenderStore::import_new(&dir.0.join("store"), "id", &[1; 32], &[])
+            .err()
+            .expect("import must be refused off Linux");
+        assert!(error.to_string().contains("Linux"));
+        assert!(!dir.0.join("store").exists());
+    }
+
     #[test]
     fn restart_preserves_keys_and_rejects_another_controller() {
         let dir = Temp::new();
