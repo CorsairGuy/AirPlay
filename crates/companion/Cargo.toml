@@ -14,6 +14,7 @@ pair.workspace = true
 x25519-dalek.workspace = true
 rand.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 
 [dev-dependencies]
 hex.workspace = true

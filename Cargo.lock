@@ -357,6 +357,7 @@ dependencies = [
  "pair",
  "rand 0.8.8",
  "thiserror 2.0.21",
+ "tokio",
  "x25519-dalek",
 ]
 
