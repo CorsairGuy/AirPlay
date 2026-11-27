@@ -15,6 +15,7 @@ pub mod ptp_group;
 pub mod send_control;
 pub mod serve;
 pub mod session;
+pub mod track_queue;
 pub mod transport;
 
 /// Application supplies authentication/configuration. Dropping this future
