@@ -139,9 +139,9 @@ impl NtpClock {
     /// «Его NTP − наше NTP», нс.
     pub fn ntp_offset(&self) -> Option<i64> {
         let s = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        if !s
+        if s
             .last_received
-            .is_some_and(|at| at.elapsed() <= MAX_SAMPLE_AGE)
+            .is_none_or(|at| at.elapsed() > MAX_SAMPLE_AGE)
         {
             return None;
         }
@@ -391,7 +391,7 @@ mod tests {
     fn maximum_ntp_timestamp_does_not_overflow() {
         let ns = ntp_to_ns(u64::MAX);
         let secs = u64::MAX >> 32;
-        let frac = (u64::MAX & 0xFFFF_FFFF) as u128;
+        let frac = 0xFFFF_FFFFu128;
         let expected = secs * 1_000_000_000 + ((frac * 1_000_000_000) >> 32) as u64;
         assert_eq!(ns, expected);
         assert!(ns < u64::MAX);
