@@ -565,6 +565,47 @@ mod tests {
         drop(client);
         task.await.unwrap().unwrap();
     }
+    #[tokio::test]
+    async fn queue_mutation_commands_are_refused_without_state_change() {
+        let identity = Identity {
+            device: "local".into(),
+            group: "group".into(),
+        };
+        let (feed, _updates) = watch::channel(Feed::default());
+        let watcher = feed.clone();
+        let before = watcher.borrow().clone();
+        let control = Control::new(feed, media::control::Remote::new());
+        let mut subscribed = false;
+        // PlayItemInPlaybackQueue=57, InsertIntoPlaybackQueue=52,
+        // ReorderPlaybackQueue=55, RemoveFromPlaybackQueue=56: перечислены в
+        // pinned protobuf, но семантика полей не подтверждена захватом.
+        for command in [57u64, 52, 55, 56] {
+            let mut body = Node::default();
+            body.int(f("SendCommandMessage", "command"), command)
+                .node(f("SendCommandMessage", "options"), &Node::default());
+            let message = model::envelope("SEND_COMMAND_MESSAGE", body, Some("queue-cmd"));
+            let out = handle(message, &identity, &before, &control, &mut subscribed)
+                .await
+                .unwrap();
+            let result = out[0]
+                .nested(schema::extension(kind("SEND_COMMAND_RESULT_MESSAGE")))
+                .expect("ответ на команду");
+            assert_eq!(
+                result.number(f("SendCommandResultMessage", "sendError")),
+                Some(schema::enum_value("SendError", "NotSupported")),
+                "команда {command} должна отклоняться как неподдержанная"
+            );
+            assert_eq!(
+                out[0].string(f("ProtocolMessage", "identifier")),
+                Some("queue-cmd")
+            );
+        }
+        let after = watcher.borrow().clone();
+        assert_eq!(after.content_id, before.content_id);
+        assert_eq!(after.title, before.title);
+        assert_eq!(after.playing, before.playing);
+    }
+
     #[test]
     fn headers_are_fixed_size() {
         assert_eq!(framed(b"rply", 17, &[]).len(), 32);

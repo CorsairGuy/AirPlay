@@ -393,6 +393,7 @@
 
 ### C65 — Очередь MRP: команды выбора и перестановки (P1)
 
+Статус: **на проверке**. Добавлен docs/MRP-QUEUE-COMMANDS.md: таблица команд 48/52/55/56/57 с указанием, что в pinned protobuf подтверждены только имена и номера, а семантика параметров (contentItemIdentifier, systemAppPlaybackQueueData) без захвата неизвестна; поэтому команды не реализуются и отклоняются. Тест services/remote/src/mrp_service/server.rs::queue_mutation_commands_are_refused_without_state_change отправляет 52/55/56/57 и проверяет SendCommandResultMessage.sendError = NotSupported (10), возврат identifier и неизменность content_id/title/playing. supportsSharedQueue остаётся false. Команда: cargo test --offline -p remote --lib queue_mutation — 1 passed. Ограничения: UI iOS и реальный контроллер не проверялись; поведение при захваченных кадрах этих команд не реализовано, пока нет wire-доказательств.
 Зависит от C26/C31/C62. Найти доказательства семантики `PlayItemInPlaybackQueue`, `InsertIntoPlaybackQueue` и `ReorderPlaybackQueue` в pinned референсах и примерах wire, не выводить протокол только из названий enum. Референсы: v12 D40/D41/D55 и `crates/mrp/proto`. Готово: таблица подтверждённых/неизвестных полей, безопасный отказ неизвестных команд и тесты; UI iOS проверяется отдельно.
 
 ### C66 — Metadata: смена текущего трека и устаревшие события (P1)
