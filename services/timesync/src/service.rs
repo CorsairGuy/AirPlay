@@ -886,11 +886,21 @@ impl Service {
                         continue;
                     },
                     received=event.recv_from(&mut event_buffer)=>{
-                        let (size,addr)=received?;let (local,own)=source.sample()?;
+                        let (size,addr)=match received {
+                            Ok(packet) => packet,
+                            // Windows can report an ICMP port-unreachable on a later
+                            // recv from an otherwise usable, unconnected UDP socket.
+                            Err(error) if cfg!(windows) && error.kind() == io::ErrorKind::ConnectionReset => continue,
+                            Err(error) => return Err(error),
+                        };let (local,own)=source.sample()?;
                         engine.receive(addr.ip(),&event_buffer[..size],local,own)?
                     },
                     received=general.recv_from(&mut general_buffer)=>{
-                        let (size,addr)=received?;let (local,own)=source.sample()?;
+                        let (size,addr)=match received {
+                            Ok(packet) => packet,
+                            Err(error) if cfg!(windows) && error.kind() == io::ErrorKind::ConnectionReset => continue,
+                            Err(error) => return Err(error),
+                        };let (local,own)=source.sample()?;
                         engine.receive(addr.ip(),&general_buffer[..size],local,own)?
                     },
                 };
