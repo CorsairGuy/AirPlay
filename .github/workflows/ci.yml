@@ -39,6 +39,18 @@ jobs:
       - run: cargo test --workspace
       - run: cargo test -p runtime --features mirroring
 
+  # The embeddable runtime must not regain the removed airplay executable.
+  library-boundary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check that runtime stays a library
+        shell: bash
+        run: |
+          cargo metadata --no-deps --format-version 1 > metadata.json
+          python3 -c 'import json; m=json.load(open("metadata.json")); r=next(p for p in m["packages"] if p["name"] == "runtime"); assert all("bin" not in t["kind"] for t in r["targets"]), "runtime must remain a library"; assert not any(t["name"] == "airplay" and "bin" in t["kind"] for p in m["packages"] for t in p["targets"]), "airplay executable must not return"'
+
   # Минимальный аудиопрофиль без зависимостей видео.
   audio-only:
     runs-on: ubuntu-latest
