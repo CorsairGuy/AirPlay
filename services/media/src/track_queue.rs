@@ -5,7 +5,12 @@
 //! access, credentials and DRM stay outside the core. A queue operation is
 //! atomic: a failed resolve leaves the previous queue untouched, and a stale
 //! selection cannot overwrite a newer one.
+//!
+//! A track identity is the provider's id; a queue-item identity is assigned by
+//! the queue, so one track may appear several times and each occurrence can be
+//! selected, removed or moved without touching its twins (C62).
 
+#[cfg(test)]
 use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
@@ -37,6 +42,23 @@ impl fmt::Display for TrackId {
     }
 }
 
+/// Queue-local identity of one occurrence. Two entries may share a `TrackId`
+/// but never a `QueueItemId` inside one queue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct QueueItemId(u64);
+
+impl QueueItemId {
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl fmt::Display for QueueItemId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "item-{}", self.0)
+    }
+}
+
 /// What the application's source returns for one identifier. The core stores
 /// no URLs, tokens or provider state.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -62,10 +84,14 @@ pub trait Source {
 pub enum QueueError {
     Empty,
     Unknown,
+    /// Kept for callers that reject repeated ids themselves; `load` accepts
+    /// duplicates and gives each occurrence its own item id.
     Duplicate,
     InvalidId,
     TooManyTracks,
     InvalidMetadata,
+    InvalidPosition,
+    ItemIdsExhausted,
     Cancelled,
     Source(SourceError),
 }
@@ -82,7 +108,19 @@ impl From<SourceError> for QueueError {
 #[derive(Debug)]
 pub struct PendingSelect {
     revision: Arc<()>,
+    item: QueueItemId,
     id: TrackId,
+}
+
+impl PendingSelect {
+    /// Queue item this selection targets.
+    pub fn item(&self) -> QueueItemId {
+        self.item
+    }
+
+    pub fn track(&self) -> &TrackId {
+        &self.id
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,12 +129,23 @@ pub enum Direction {
     Previous,
 }
 
+/// Право применить загруженную очередь. Выдаётся [`TrackQueue::begin_load`];
+/// если за время разрешения источника началась новая загрузка или выбор,
+/// [`TrackQueue::apply_load`] вернёт `Cancelled` и очередь не изменится.
+#[derive(Debug)]
+pub struct LoadGuard {
+    revision: Arc<()>,
+}
+
 /// Queue with a current item. Indices are internal; identities are not.
 #[derive(Debug, Default)]
 pub struct TrackQueue {
     tracks: Vec<Track>,
+    items: Vec<QueueItemId>,
     current: Option<usize>,
+    position_ms: u64,
     revision: Arc<()>,
+    next_item: u64,
 }
 
 impl TrackQueue {
@@ -108,6 +157,19 @@ impl TrackQueue {
 
     pub fn tracks(&self) -> &[Track] {
         &self.tracks
+    }
+
+    /// Queue-item identities in playlist order, one per entry.
+    pub fn item_ids(&self) -> &[QueueItemId] {
+        &self.items
+    }
+
+    pub fn item_at(&self, index: usize) -> Option<QueueItemId> {
+        self.items.get(index).copied()
+    }
+
+    pub fn index_of(&self, item: QueueItemId) -> Option<usize> {
+        self.items.iter().position(|id| *id == item)
     }
 
     pub fn len(&self) -> usize {
@@ -122,8 +184,41 @@ impl TrackQueue {
         self.current.map(|index| &self.tracks[index])
     }
 
+    pub fn current_item(&self) -> Option<QueueItemId> {
+        self.current
+            .and_then(|index| self.items.get(index).copied())
+    }
+
+    /// Позиция внутри текущего элемента, мс. Ноль без текущего элемента.
+    pub fn position_ms(&self) -> u64 {
+        self.position_ms
+    }
+
+    /// Перемотка внутри текущего элемента. Ограничивается известной
+    /// длительностью; неизвестная длительность принимает любое значение.
+    pub fn seek(&mut self, position_ms: u64) -> Result<u64, QueueError> {
+        let track = self.current().ok_or(QueueError::Empty)?;
+        let limit = track.duration_ms.unwrap_or(u64::MAX);
+        self.position_ms = position_ms.min(limit);
+        Ok(self.position_ms)
+    }
+
+    fn assign(&mut self, count: usize) -> Result<Vec<QueueItemId>, QueueError> {
+        let next = self
+            .next_item
+            .checked_add(count as u64)
+            .ok_or(QueueError::ItemIdsExhausted)?;
+        let ids = (0..count)
+            .map(|offset| QueueItemId(self.next_item + offset as u64))
+            .collect();
+        self.next_item = next;
+        Ok(ids)
+    }
+
     /// Resolve every identifier before touching state. An unknown or
     /// unavailable id leaves the old queue and current item intact.
+    ///
+    /// Repeated ids are allowed: every position gets its own queue-item id.
     pub fn load(
         &mut self,
         source: &mut impl Source,
@@ -134,10 +229,6 @@ impl TrackQueue {
         }
         if ids.len() > Self::MAX_TRACKS {
             return Err(QueueError::TooManyTracks);
-        }
-        let mut seen = HashSet::with_capacity(ids.len());
-        if ids.iter().any(|id| !seen.insert(id)) {
-            return Err(QueueError::Duplicate);
         }
         let mut resolved = Vec::with_capacity(ids.len());
         for id in ids {
@@ -152,25 +243,77 @@ impl TrackQueue {
             }
             resolved.push(track);
         }
+        let items = self.assign(resolved.len())?;
         self.tracks = resolved;
+        self.items = items;
         self.current = Some(0);
+        self.position_ms = 0;
         self.revision = Arc::new(());
         Ok(&self.tracks)
     }
 
-    /// Start changing the current item. Validates membership now, so an
-    /// unknown id fails without touching the current item.
+    /// Начать загрузку, которую источник может готовить асинхронно.
+    pub fn begin_load(&mut self) -> LoadGuard {
+        self.revision = Arc::new(());
+        LoadGuard {
+            revision: self.revision.clone(),
+        }
+    }
+
+    /// Применить уже разрешённые треки, если загрузка не устарела.
+    pub fn apply_load(
+        &mut self,
+        guard: LoadGuard,
+        tracks: Vec<Track>,
+    ) -> Result<&[Track], QueueError> {
+        if !Arc::ptr_eq(&guard.revision, &self.revision) {
+            return Err(QueueError::Cancelled);
+        }
+        if tracks.is_empty() {
+            return Err(QueueError::Empty);
+        }
+        if tracks.len() > Self::MAX_TRACKS {
+            return Err(QueueError::TooManyTracks);
+        }
+        if tracks
+            .iter()
+            .any(|track| track.title.len() > Self::MAX_TITLE_BYTES)
+        {
+            return Err(QueueError::InvalidMetadata);
+        }
+        let items = self.assign(tracks.len())?;
+        self.tracks = tracks;
+        self.items = items;
+        self.current = Some(0);
+        self.position_ms = 0;
+        self.revision = Arc::new(());
+        Ok(&self.tracks)
+    }
+
+    /// Start changing the current item by track id (first occurrence).
     pub fn begin_select(&mut self, id: &TrackId) -> Result<PendingSelect, QueueError> {
+        let index = self.tracks.iter().position(|track| &track.id == id).ok_or(
+            if self.tracks.is_empty() {
+                QueueError::Empty
+            } else {
+                QueueError::Unknown
+            },
+        )?;
+        self.begin_select_item(self.items[index])
+    }
+
+    /// Start changing the current item by its queue-item identity, which is
+    /// unambiguous when the same track appears several times.
+    pub fn begin_select_item(&mut self, item: QueueItemId) -> Result<PendingSelect, QueueError> {
         if self.tracks.is_empty() {
             return Err(QueueError::Empty);
         }
-        if !self.tracks.iter().any(|track| &track.id == id) {
-            return Err(QueueError::Unknown);
-        }
+        let index = self.index_of(item).ok_or(QueueError::Unknown)?;
         self.revision = Arc::new(());
         Ok(PendingSelect {
             revision: self.revision.clone(),
-            id: id.clone(),
+            item,
+            id: self.tracks[index].id.clone(),
         })
     }
 
@@ -179,11 +322,10 @@ impl TrackQueue {
         if !Arc::ptr_eq(&pending.revision, &self.revision) {
             return Err(QueueError::Cancelled);
         }
-        let index = self
-            .tracks
-            .iter()
-            .position(|track| track.id == pending.id)
-            .ok_or(QueueError::Unknown)?;
+        let index = self.index_of(pending.item).ok_or(QueueError::Unknown)?;
+        if self.current != Some(index) {
+            self.position_ms = 0;
+        }
         self.current = Some(index);
         Ok(&self.tracks[index])
     }
@@ -204,24 +346,70 @@ impl TrackQueue {
             Direction::Previous => current.checked_sub(1)?,
         };
         self.current = Some(next);
+        self.position_ms = 0;
         self.revision = Arc::new(());
         self.current()
     }
 
-    /// Remove an item by identity. Removing the current item leaves no
-    /// current item instead of guessing the next one.
+    /// Remove the first occurrence of a track by identity. Removing the current
+    /// item leaves no current item instead of guessing the next one.
     pub fn remove(&mut self, id: &TrackId) -> bool {
         let Some(index) = self.tracks.iter().position(|track| &track.id == id) else {
             return false;
         };
+        self.remove_index(index);
+        true
+    }
+
+    /// Remove exactly one occurrence; its twins stay in place.
+    pub fn remove_item(&mut self, item: QueueItemId) -> bool {
+        let Some(index) = self.index_of(item) else {
+            return false;
+        };
+        self.remove_index(index);
+        true
+    }
+
+    fn remove_index(&mut self, index: usize) {
         self.tracks.remove(index);
+        self.items.remove(index);
+        if self.current == Some(index) {
+            self.position_ms = 0;
+        }
         self.revision = Arc::new(());
         self.current = match self.current {
             Some(current) if current == index => None,
             Some(current) if current > index => Some(current - 1),
             other => other,
         };
-        true
+    }
+
+    /// Move one occurrence to `position` (clamped to the queue length). The
+    /// current item follows the moved entry; other entries keep their order.
+    pub fn move_item(
+        &mut self,
+        item: QueueItemId,
+        position: usize,
+    ) -> Result<QueueItemId, QueueError> {
+        let from = self.index_of(item).ok_or(QueueError::Unknown)?;
+        if self.tracks.is_empty() {
+            return Err(QueueError::Empty);
+        }
+        let to = position.min(self.tracks.len() - 1);
+        if from != to {
+            let track = self.tracks.remove(from);
+            let id = self.items.remove(from);
+            self.tracks.insert(to, track);
+            self.items.insert(to, id);
+            self.current = match self.current {
+                Some(current) if current == from => Some(to),
+                Some(current) if from < current && to >= current => Some(current - 1),
+                Some(current) if from > current && to <= current => Some(current + 1),
+                other => other,
+            };
+            self.revision = Arc::new(());
+        }
+        Ok(item)
     }
 }
 
@@ -277,6 +465,8 @@ mod tests {
             ["b", "a"]
         );
         assert_eq!(queue.current().unwrap().id.as_str(), "b");
+        assert_eq!(queue.item_ids().len(), 2);
+        assert_ne!(queue.item_ids()[0], queue.item_ids()[1]);
     }
 
     #[test]
@@ -291,14 +481,93 @@ mod tests {
         assert_eq!(queue.len(), 1);
         assert_eq!(queue.current().unwrap().id.as_str(), "a");
         assert!(matches!(
-            queue.load(&mut source, &ids(&["a", "a"])),
-            Err(QueueError::Duplicate)
-        ));
-        assert!(matches!(
             queue.load(&mut source, &[]),
             Err(QueueError::Empty)
         ));
         assert_eq!(queue.len(), 1, "отказы не меняют очередь");
+    }
+
+    #[test]
+    fn repeated_tracks_get_distinct_item_identities() {
+        let mut source = FakeSource::with(&[("a", "A"), ("b", "B")]);
+        let mut queue = TrackQueue::new();
+        queue
+            .load(&mut source, &ids(&["a", "a", "b", "a"]))
+            .unwrap();
+        assert_eq!(queue.len(), 4);
+        let items: HashSet<_> = queue.item_ids().iter().copied().collect();
+        assert_eq!(items.len(), 4, "каждое вхождение имеет свой item id");
+        assert_eq!(queue.current_item(), Some(queue.item_ids()[0]));
+    }
+
+    #[test]
+    fn exhausted_item_ids_leave_existing_queue_untouched() {
+        let mut source = FakeSource::with(&[("a", "A")]);
+        let mut queue = TrackQueue::new();
+        queue.load(&mut source, &ids(&["a"])).unwrap();
+        let old_item = queue.current_item();
+        queue.next_item = u64::MAX;
+        assert_eq!(
+            queue.load(&mut source, &ids(&["a"])),
+            Err(QueueError::ItemIdsExhausted)
+        );
+        assert_eq!(queue.current_item(), old_item);
+        assert_eq!(queue.len(), 1);
+    }
+
+    #[test]
+    fn selecting_the_second_occurrence_leaves_the_first_alone() {
+        let mut source = FakeSource::with(&[("a", "A")]);
+        let mut queue = TrackQueue::new();
+        queue.load(&mut source, &ids(&["a", "a"])).unwrap();
+        let second = queue.item_ids()[1];
+        let pending = queue.begin_select_item(second).unwrap();
+        assert_eq!(pending.item(), second);
+        queue.commit_select(pending).unwrap();
+        assert_eq!(queue.current_item(), Some(second));
+        assert_eq!(
+            queue.index_of(second),
+            Some(1),
+            "позиция первого вхождения не изменилась"
+        );
+    }
+
+    #[test]
+    fn removing_or_moving_one_occurrence_keeps_its_twins() {
+        let mut source = FakeSource::with(&[("a", "A"), ("b", "B")]);
+        let mut queue = TrackQueue::new();
+        queue
+            .load(&mut source, &ids(&["a", "b", "a", "a"]))
+            .unwrap();
+        let first = queue.item_ids()[0];
+        let third = queue.item_ids()[2];
+        assert!(queue.remove_item(third));
+        assert_eq!(queue.len(), 3);
+        assert_eq!(queue.index_of(third), None);
+        assert_eq!(queue.index_of(first), Some(0));
+
+        // Перестановка конкретного вхождения.
+        let last = queue.item_ids()[2];
+        queue.move_item(last, 0).unwrap();
+        assert_eq!(queue.item_ids()[0], last);
+        assert_eq!(queue.len(), 3);
+        assert!(!queue.remove_item(third), "повторное удаление — false");
+    }
+
+    #[test]
+    fn moving_the_current_item_keeps_it_current() {
+        let mut source = FakeSource::with(&[("a", "A"), ("b", "B"), ("c", "C")]);
+        let mut queue = TrackQueue::new();
+        queue.load(&mut source, &ids(&["a", "b", "c"])).unwrap();
+        let b = queue.item_ids()[1];
+        let pending = queue.begin_select_item(b).unwrap();
+        queue.commit_select(pending).unwrap();
+        queue.move_item(b, 2).unwrap();
+        assert_eq!(queue.current_item(), Some(b));
+        assert_eq!(queue.current().unwrap().id.as_str(), "b");
+        // Перестановка вне диапазона прижимается к концу, а не паникует.
+        queue.move_item(b, 99).unwrap();
+        assert_eq!(queue.index_of(b), Some(2));
     }
 
     #[test]
@@ -370,6 +639,10 @@ mod tests {
             queue.begin_select(&ids(&["missing"])[0]),
             Err(QueueError::Unknown)
         ));
+        assert!(matches!(
+            queue.begin_select_item(QueueItemId(9999)),
+            Err(QueueError::Unknown)
+        ));
         assert_eq!(queue.current().unwrap().id.as_str(), "a");
     }
 
@@ -403,6 +676,76 @@ mod tests {
         assert!(queue.current().is_none());
         assert!(!queue.remove(&ids(&["b"])[0]));
         assert_eq!(queue.len(), 1);
+    }
+
+    #[test]
+    fn seek_is_clamped_and_resets_on_change_of_item() {
+        let mut source = FakeSource::with(&[("a", "A"), ("b", "B")]);
+        let mut queue = TrackQueue::new();
+        queue.load(&mut source, &ids(&["a", "b"])).unwrap();
+        assert_eq!(queue.seek(90_000).unwrap(), 90_000);
+        assert_eq!(
+            queue.seek(999_999).unwrap(),
+            180_000,
+            "ограничено длительностью"
+        );
+        assert_eq!(
+            queue.seek(u64::MAX).unwrap(),
+            180_000,
+            "переполнение не допускается"
+        );
+        queue.step(Direction::Next);
+        assert_eq!(queue.position_ms(), 0, "новый элемент начинается с нуля");
+        assert_eq!(queue.seek(1_000).unwrap(), 1_000);
+        let first = queue.item_ids()[0];
+        let pending = queue.begin_select_item(first).unwrap();
+        queue.commit_select(pending).unwrap();
+        assert_eq!(queue.position_ms(), 0);
+    }
+
+    #[test]
+    fn seek_without_current_item_is_empty() {
+        let mut queue = TrackQueue::new();
+        assert_eq!(queue.seek(10), Err(QueueError::Empty));
+        assert_eq!(queue.position_ms(), 0);
+    }
+
+    #[test]
+    fn a_slow_load_loses_to_a_newer_load_or_selection() {
+        let mut source = FakeSource::with(&[("a", "A"), ("b", "B")]);
+        let mut queue = TrackQueue::new();
+        queue.load(&mut source, &ids(&["a"])).unwrap();
+        let stale = queue.begin_load();
+        let _newer = queue.begin_load();
+        let tracks = vec![source.resolve(&ids(&["b"])[0]).unwrap()];
+        assert_eq!(queue.apply_load(stale, tracks), Err(QueueError::Cancelled));
+        assert_eq!(queue.len(), 1, "устаревшая загрузка не меняет очередь");
+
+        let stale = queue.begin_load();
+        let pending = queue.begin_select(&ids(&["a"])[0]).unwrap();
+        queue.commit_select(pending).unwrap();
+        assert_eq!(
+            queue.apply_load(stale, vec![source.resolve(&ids(&["b"])[0]).unwrap()]),
+            Err(QueueError::Cancelled)
+        );
+    }
+
+    #[test]
+    fn a_fresh_load_guard_applies_and_resets_position() {
+        let mut source = FakeSource::with(&[("a", "A"), ("b", "B")]);
+        let mut queue = TrackQueue::new();
+        queue.load(&mut source, &ids(&["a"])).unwrap();
+        queue.seek(60_000).unwrap();
+        let guard = queue.begin_load();
+        let tracks = vec![source.resolve(&ids(&["b"])[0]).unwrap()];
+        queue.apply_load(guard, tracks).unwrap();
+        assert_eq!(queue.current().unwrap().id.as_str(), "b");
+        assert_eq!(queue.position_ms(), 0);
+        let guard = queue.begin_load();
+        assert!(matches!(
+            queue.apply_load(guard, vec![]),
+            Err(QueueError::Empty)
+        ));
     }
 
     #[test]
