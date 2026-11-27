@@ -297,7 +297,8 @@ impl Session {
                 None,
             ),
             ("POST", "/pair-pin-start") => {
-                info!(peer = %self.peer, pin = %self.ctx.pin, "запрошен PIN для сопряжения");
+                // PIN не попадает в журнал: он одноразовый секрет сопряжения.
+                info!(peer = %self.peer, "запрошен PIN для сопряжения");
                 (Response::to(req, 200), None)
             }
             ("POST", "/pair-setup") if req.body.len() == 32 => (self.legacy_setup(req), None),
