@@ -339,9 +339,15 @@ pub fn state(
 
     let mut queue = Node::default();
     queue.int(f::PlaybackQueue::location, 0);
+    // Запрос частичного диапазона: у нас в очереди ровно один элемент, поэтому
+    // содержимое отдаётся только для диапазона, начинающегося с нуля и с
+    // положительной длиной. Отрицательные и отсутствующие поля считаются
+    // значениями по умолчанию (0 и «весь диапазон»), а не ошибкой протокола.
     let wanted = request.is_none_or(|r| {
         use f::PlaybackQueueRequestMessage as q;
-        r.number(q::location).unwrap_or(0) == 0 && r.number(q::length) != Some(0)
+        let location = r.number(q::location).unwrap_or(0);
+        let length = r.number(q::length).unwrap_or(1);
+        location == 0 && length > 0
     });
     if !now.title.is_empty() && wanted {
         queue.node(f::PlaybackQueue::contentItems, &content_item(now, request));
@@ -415,7 +421,7 @@ fn content_item(now: &NowPlaying, request: Option<&Node>) -> Node {
                 || r.real(q::artworkHeight).is_some()
                 || r.number(q::returnContentItemAssetsInUserCompletion) == Some(1)
         });
-        if asked {
+        if asked && art.data.len() <= MAX_ARTWORK_BYTES {
             item.bytes(f::ContentItem::artworkData, art.data.as_slice())
                 .int(f::ContentItem::artworkDataWidth, width.into())
                 .int(f::ContentItem::artworkDataHeight, height.into());
@@ -425,6 +431,10 @@ fn content_item(now: &NowPlaying, request: Option<&Node>) -> Node {
     item.node(f::ContentItem::metadata, &md);
     item
 }
+
+/// Верхняя граница обложки в ответе на запрос очереди. Больше не отдаём:
+/// ответ ограничен по памяти, метаданные при этом сохраняются.
+pub const MAX_ARTWORK_BYTES: usize = 4 * 1024 * 1024;
 
 /// `nowPlayingInfoData`: NSKeyedArchiver со словарём размеров обложки и
 /// места в очереди (без него iOS не показывает обложку).
@@ -673,6 +683,63 @@ mod tests {
             item.raw(f::ContentItem::artworkData),
             Some(&[0xff, 0xd8, 0xff][..])
         );
+    }
+
+    #[test]
+    fn partial_queue_range_and_bounded_artwork() {
+        use f::PlaybackQueueRequestMessage as q;
+        let d = device();
+        let now = playing();
+        let queue_of = |request: &Node| {
+            let answer = state(&d, &now, Some(request), None);
+            let body = answer.nested(f::ProtocolMessage::setStateMessage).unwrap();
+            body.nested(f::SetStateMessage::playbackQueue)
+                .unwrap()
+                .nested(f::PlaybackQueue::contentItems)
+                .is_ok()
+        };
+
+        let mut full = Node::default();
+        full.int(q::location, 0).int(q::length, 1);
+        assert!(queue_of(&full), "диапазон с нуля и длиной 1 отдаётся");
+
+        let mut empty = Node::default();
+        empty.int(q::location, 0).int(q::length, 0);
+        assert!(!queue_of(&empty), "пустой диапазон не отдаёт содержимое");
+
+        let mut shifted = Node::default();
+        shifted.int(q::location, 3).int(q::length, 1);
+        assert!(!queue_of(&shifted), "смещение за пределы очереди пусто");
+
+        let mut far = Node::default();
+        far.int(q::location, u64::MAX).int(q::length, 10);
+        assert!(!queue_of(&far), "смещение за пределы очереди пусто");
+
+        let mut huge = Node::default();
+        huge.int(q::location, 0).int(q::length, u64::MAX);
+        assert!(queue_of(&huge), "чрезмерная длина не ломает ответ");
+
+        // Обложка сверх границы не отправляется, метаданные остаются.
+        let mut big = playing();
+        big.artwork = Some(Artwork {
+            data: Arc::new(vec![0u8; MAX_ARTWORK_BYTES + 1]),
+            id: "big".into(),
+            mime: "image/jpeg".into(),
+            width: 600,
+            height: 600,
+        });
+        let mut request = Node::default();
+        request
+            .double(q::artworkWidth, 600.0)
+            .text(q::requestID, "r2");
+        let answer = state(&d, &big, Some(&request), Some("y"));
+        let body = answer.nested(f::ProtocolMessage::setStateMessage).unwrap();
+        let queue = body.nested(f::SetStateMessage::playbackQueue).unwrap();
+        assert_eq!(queue.string(f::PlaybackQueue::requestId), Some("r2"));
+        let item = queue.nested(f::PlaybackQueue::contentItems).unwrap();
+        assert!(item.raw(f::ContentItem::artworkData).is_none());
+        let md = item.nested(f::ContentItem::metadata).unwrap();
+        assert_eq!(md.string(f::ContentItemMetadata::artworkIdentifier), Some("big"));
     }
 
     #[test]
