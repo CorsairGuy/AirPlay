@@ -516,8 +516,20 @@ mod peer_update_tests {
         let bind = "192.0.2.1".parse().unwrap();
         let mut inbound = OwnerInterests::new(bind);
         let mut outbound = OwnerInterests::new(bind);
-        let source = Peer { ip: "192.0.2.2".parse().unwrap(), ports: Ports { event: 319, general: 320 } };
-        let receiver = Peer { ip: "192.0.2.3".parse().unwrap(), ports: Ports { event: 319, general: 320 } };
+        let source = Peer {
+            ip: "192.0.2.2".parse().unwrap(),
+            ports: Ports {
+                event: 319,
+                general: 320,
+            },
+        };
+        let receiver = Peer {
+            ip: "192.0.2.3".parse().unwrap(),
+            ports: Ports {
+                event: 319,
+                general: 320,
+            },
+        };
         inbound.set(1, vec![source], None).unwrap();
         outbound.set(2, vec![receiver], None).unwrap();
         let previous = dual_union(&inbound, &outbound).unwrap();
@@ -532,8 +544,20 @@ mod peer_update_tests {
         let bind = "192.0.2.1".parse().unwrap();
         let mut inbound = OwnerInterests::new(bind);
         let mut outbound = OwnerInterests::new(bind);
-        let source = Peer { ip: "192.0.2.2".parse().unwrap(), ports: Ports { event: 319, general: 320 } };
-        let receiver = Peer { ip: "192.0.2.3".parse().unwrap(), ports: Ports { event: 319, general: 320 } };
+        let source = Peer {
+            ip: "192.0.2.2".parse().unwrap(),
+            ports: Ports {
+                event: 319,
+                general: 320,
+            },
+        };
+        let receiver = Peer {
+            ip: "192.0.2.3".parse().unwrap(),
+            ports: Ports {
+                event: 319,
+                general: 320,
+            },
+        };
         let now = std::time::Instant::now();
         inbound.set(1, vec![source], Some(now)).unwrap();
         inbound.set(2, vec![source], None).unwrap();
@@ -549,11 +573,40 @@ mod peer_update_tests {
 
     #[tokio::test]
     async fn cancelled_peer_update_must_be_reconciled_by_its_owner() {
-        let source = Peer { ip: "127.0.0.2".parse().unwrap(), ports: Ports { event: 319, general: 320 } };
-        let receiver = Peer { ip: "127.0.0.3".parse().unwrap(), ports: Ports { event: 319, general: 320 } };
-        let service = Service::bind_dual(config(source, Policy::FollowOnly(source.ip)), Arc::new(TestClock)).await.unwrap();
+        let source = Peer {
+            ip: "127.0.0.2".parse().unwrap(),
+            ports: Ports {
+                event: 319,
+                general: 320,
+            },
+        };
+        let receiver = Peer {
+            ip: "127.0.0.3".parse().unwrap(),
+            ports: Ports {
+                event: 319,
+                general: 320,
+            },
+        };
+        let service = Service::bind_dual(
+            config(source, Policy::FollowOnly(source.ip)),
+            Arc::new(TestClock),
+        )
+        .await
+        .unwrap();
         let (reply, wait) = oneshot::channel();
-        assert!(service.peers.send(PeerRequest { owner: 3, peers: vec![receiver], inbound: false, deadline: None, reply }).await.is_ok());
+        assert!(
+            service
+                .peers
+                .send(PeerRequest {
+                    owner: 3,
+                    peers: vec![receiver],
+                    inbound: false,
+                    deadline: None,
+                    reply
+                })
+                .await
+                .is_ok()
+        );
         drop(wait);
         // Queue order guarantees the update has been applied before this
         // conflict is evaluated, even though its caller stopped waiting.

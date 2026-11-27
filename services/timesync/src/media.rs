@@ -613,6 +613,59 @@ mod tests {
             "no outbound map, no outgoing clock"
         );
     }
+    #[test]
+    fn relay_timeline_refuses_a_changed_inbound_epoch() {
+        let origin = Instant::now();
+        let local = LocalClock::new(1).unwrap();
+        let own = Domain::new(100, 1).unwrap();
+        let inbound_domain = Domain::new(50, 2).unwrap();
+        let source = Arc::new(InstantSource::new(origin, local, own, 1_000_000_000));
+        let inbound = ClockMap::new(
+            local.at(0),
+            inbound_domain.reading(9_000_000_000),
+            0,
+            2_000_000_000,
+        )
+        .unwrap();
+        let outbound =
+            ClockMap::new(local.at(0), own.reading(1_000_000_000), 0, 2_000_000_000).unwrap();
+        let snapshot = Snapshot {
+            selection: Selection {
+                role: Role::Follower("192.0.2.1".parse().unwrap()),
+                domain: Some(inbound_domain),
+            },
+            mapping: Some(inbound),
+            quality: Some(Quality::OneWay),
+            link: None,
+            outbound: Some(outbound),
+        };
+        let (updates, status) = watch::channel(snapshot);
+        let timeline =
+            MasterTimeline::new_relay(source, status, Duration::from_millis(100)).unwrap();
+        let produced = origin + Duration::from_millis(25);
+        let bridged = clock::domain::translate(
+            inbound_domain.reading(9_025_000_000),
+            &inbound,
+            &outbound,
+            local.at(25_000_000),
+        )
+        .unwrap();
+        assert_eq!(
+            timeline.reading_at_now(produced, produced).unwrap(),
+            bridged
+        );
+        let mut changed = snapshot;
+        let next = Domain::new(50, 3).unwrap();
+        changed.mapping = Some(
+            ClockMap::new(local.at(0), next.reading(5_000_000_000), 0, 2_000_000_000).unwrap(),
+        );
+        updates.send_replace(changed);
+        assert!(timeline.reading_at_now(produced, produced).is_err());
+        changed.selection.domain = Some(next);
+        updates.send_replace(changed);
+        assert!(timeline.reading_at_now(produced, produced).is_err());
+    }
+
     #[tokio::test]
     async fn relay_lease_latches_when_inbound_epoch_disappears() {
         let origin = Instant::now();
