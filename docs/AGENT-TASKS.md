@@ -337,7 +337,7 @@
 
 ### C52 — MRP: correlation id и параллельные запросы (P1)
 
-Область: `services/remote/src/mrp_service` и тесты; wire parser C08 не менять. Референсы: v12 §6 D40/D55, [pyatv MRP](https://github.com/postlund/pyatv/tree/b277a4c8222ecdcbaab8a24e3e713ca44765adb4/pyatv/protocols/mrp). Проверить идентификаторы запросов, несвязанные unsolicited updates, таймауты, обрыв и несколько клиентов. Готово: duplex/mock-сценарий с неправильным и отсутствующим id, без преждевременного ACK.
+Статус: **частично проверена**. Duplex-тесты проверяют идентификаторы двух клиентов, ошибочный запрос и unsolicited updates; таймауты и настоящие клиенты остаются открыты. Референсы: v12 §6 D40/D55 и [pyatv MRP](https://github.com/postlund/pyatv/tree/b277a4c8222ecdcbaab8a24e3e713ca44765adb4/pyatv/protocols/mrp).
 
 ### C53 — Профиль и ключи: изоляция двух экземпляров runtime (P1)
 
@@ -457,7 +457,7 @@
 
 ### C81 — Мирроринг TX: повторный запуск после отмены pairing (P1)
 
-После C05/C44, test-only в `services/media/tests/mirror_tx.rs`. Референсы: v12 фаза 5 D10/D18 и [doubletake `5e2f1cbe`](https://github.com/omarroth/doubletake/blob/5e2f1cbe/internal/airplay/mirror.go). Готово: отмена на каждом этапе не оставляет event/timing socket, новая попытка использует новые сессионные параметры; отрицание воспроизведения на Apple TV указать отдельно.
+Статус: **частично проверена**. Loopback mock проверяет обрыв после pair-verify и audio SETUP и повтор с новыми параметрами; отмена на остальных этапах и Apple TV остаются открыты. Референсы: v12 фаза 5 D10/D18 и [doubletake `5e2f1cbe`](https://github.com/omarroth/doubletake/blob/5e2f1cbe/internal/airplay/mirror.go).
 
 ### C82 — Discovery: два одинаковых имени, разные идентичности (P1)
 

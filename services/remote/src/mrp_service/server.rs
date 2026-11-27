@@ -579,6 +579,198 @@ mod tests {
         drop(client);
         task.await.unwrap().unwrap();
     }
+    async fn send_messages<S>(client: &mut S, seq: u64, messages: &[Node])
+    where
+        S: AsyncWrite + Unpin,
+    {
+        let data = wire::encode_packet(messages);
+        let payload = model::binary(&model::dict(vec![(
+            "params",
+            model::dict(vec![("data", Value::Data(data))]),
+        )]));
+        client
+            .write_all(&framed(b"sync", seq, &payload))
+            .await
+            .unwrap();
+    }
+
+    /// Один кадр данных; служебные sync-подтверждения пропускаются.
+    async fn next_messages<S>(client: &mut S) -> Vec<Node>
+    where
+        S: AsyncRead + Unpin,
+    {
+        loop {
+            let mut header = [0u8; 32];
+            tokio::time::timeout(
+                tokio::time::Duration::from_secs(2),
+                client.read_exact(&mut header),
+            )
+            .await
+            .expect("ответ MRP")
+            .unwrap();
+            let len = u32::from_be_bytes(header[..4].try_into().unwrap()) as usize;
+            let mut body = vec![0; len - 32];
+            if len > 32 {
+                client.read_exact(&mut body).await.unwrap();
+            }
+            if &header[4..8] == b"rply" {
+                continue;
+            }
+            let value = plist::Value::from_reader(std::io::Cursor::new(body)).unwrap();
+            let data = value.as_dictionary().unwrap()["params"]
+                .as_dictionary()
+                .unwrap()["data"]
+                .as_data()
+                .unwrap();
+            return wire::decode_packet(data).unwrap();
+        }
+    }
+
+    /// Читает кадры, пока в них не встретится сообщение с нужным идентификатором.
+    async fn read_reply<S>(client: &mut S, identifier: &str) -> Vec<Node>
+    where
+        S: AsyncRead + Unpin,
+    {
+        for _ in 0..8 {
+            let messages = next_messages(client).await;
+            if messages
+                .iter()
+                .any(|m| m.string(f("ProtocolMessage", "identifier")) == Some(identifier))
+            {
+                return messages;
+            }
+        }
+        panic!("ответ с идентификатором {identifier} не пришёл");
+    }
+
+    #[tokio::test]
+    async fn two_clients_keep_their_own_request_identifiers() {
+        let identity = Identity {
+            device: "local".into(),
+            group: "group".into(),
+        };
+        let (feed, updates) = watch::channel(Feed::default());
+        let control = Control::new(feed, media::control::Remote::new());
+        let (server_a, mut a) = tokio::io::duplex(65536);
+        let (server_b, mut b) = tokio::io::duplex(65536);
+        let task_a = tokio::spawn(connection(
+            server_a,
+            identity.clone(),
+            updates.clone(),
+            control.clone(),
+        ));
+        let task_b = tokio::spawn(connection(server_b, identity, updates, control));
+
+        // Каждый клиент сначала получает объявление устройства без запроса.
+        let _hello = next_messages(&mut a).await;
+        let _hello = next_messages(&mut b).await;
+
+        send_messages(
+            &mut a,
+            1,
+            &[model::envelope(
+                "GET_VOLUME_MESSAGE",
+                Node::default(),
+                Some("A-1"),
+            )],
+        )
+        .await;
+        send_messages(
+            &mut b,
+            1,
+            &[model::envelope(
+                "GET_VOLUME_MESSAGE",
+                Node::default(),
+                Some("B-1"),
+            )],
+        )
+        .await;
+
+        let reply_a = read_reply(&mut a, "A-1").await;
+        let reply_b = read_reply(&mut b, "B-1").await;
+        assert!(
+            reply_a
+                .iter()
+                .all(|m| m.string(f("ProtocolMessage", "identifier")) != Some("B-1"))
+        );
+        assert!(
+            reply_b
+                .iter()
+                .all(|m| m.string(f("ProtocolMessage", "identifier")) != Some("A-1"))
+        );
+
+        drop(a);
+        drop(b);
+        task_a.await.unwrap().unwrap();
+        task_b.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_bad_request_is_reported_with_its_own_identifier() {
+        let identity = Identity {
+            device: "local".into(),
+            group: "group".into(),
+        };
+        let (feed, updates) = watch::channel(Feed::default());
+        let control = Control::new(feed, media::control::Remote::new());
+        let (server, mut client) = tokio::io::duplex(65536);
+        let task = tokio::spawn(connection(server, identity, updates, control));
+        let _hello = next_messages(&mut client).await;
+
+        let unknown = Node::default()
+            .int(f("ProtocolMessage", "type"), 9999)
+            .text(f("ProtocolMessage", "identifier"), "err-1")
+            .clone();
+        send_messages(&mut client, 2, &[unknown]).await;
+        let messages = read_reply(&mut client, "err-1").await;
+        let reply = messages
+            .iter()
+            .find(|m| m.string(f("ProtocolMessage", "identifier")) == Some("err-1"))
+            .unwrap();
+        assert_eq!(reply.number(f("ProtocolMessage", "errorCode")), Some(6));
+
+        drop(client);
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn unsolicited_updates_carry_no_request_identifier() {
+        let identity = Identity {
+            device: "local".into(),
+            group: "group".into(),
+        };
+        let (feed, updates) = watch::channel(Feed::default());
+        let control = Control::new(feed.clone(), media::control::Remote::new());
+        let (server, mut client) = tokio::io::duplex(65536);
+        let task = tokio::spawn(connection(server, identity, updates, control));
+        let _hello = next_messages(&mut client).await;
+
+        send_messages(
+            &mut client,
+            2,
+            &[model::envelope(
+                "CLIENT_UPDATES_CONFIG_MESSAGE",
+                Node::default(),
+                Some("sub-1"),
+            )],
+        )
+        .await;
+        let _subscribed = read_reply(&mut client, "sub-1").await;
+
+        feed.send_modify(|feed| feed.volume = 0.25);
+        let update = next_messages(&mut client).await;
+        assert!(!update.is_empty(), "подписчик получает изменение");
+        assert!(
+            update
+                .iter()
+                .all(|m| m.string(f("ProtocolMessage", "identifier")).is_none()),
+            "незапрошенное обновление не несёт идентификатор запроса"
+        );
+
+        drop(client);
+        task.await.unwrap().unwrap();
+    }
+
     #[test]
     fn headers_are_fixed_size() {
         assert_eq!(framed(b"rply", 17, &[]).len(), 32);
