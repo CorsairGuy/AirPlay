@@ -152,4 +152,81 @@ mod tests {
         assert_eq!(tlv.get(ENCRYPTED_DATA).unwrap().len(), 255);
         assert_eq!(tlv.state().unwrap(), 2);
     }
+
+    /// 255-байтовый кусок — продолжение значения, а не отдельное поле;
+    /// 254 байта — уже отдельная запись, даже если тип совпадает.
+    #[test]
+    fn fragment_boundaries_are_joined_and_not_conflated_with_repeats() {
+        for len in [254usize, 255, 256, 509, 510, 511] {
+            let value = vec![0x5A; len];
+            let tlv = Tlv8::new().with(PUBLIC_KEY, value.clone());
+            let wire = tlv.encode();
+            let chunks = len.div_ceil(255);
+            assert_eq!(wire.len(), len + 2 * chunks, "len={len}");
+            let back = Tlv8::decode(&wire).unwrap();
+            assert_eq!(back.get(PUBLIC_KEY).unwrap(), value.as_slice());
+            assert_eq!(back, tlv);
+        }
+
+        // 255 + 45 склеиваются в одно значение из 300 байт.
+        let mut wire = vec![PUBLIC_KEY, 255];
+        wire.extend_from_slice(&[0x11; 255]);
+        wire.extend_from_slice(&[PUBLIC_KEY, 45]);
+        wire.extend_from_slice(&[0x22; 45]);
+        let tlv = Tlv8::decode(&wire).unwrap();
+        assert_eq!(tlv.get(PUBLIC_KEY).unwrap().len(), 300);
+        assert_eq!(tlv.encode(), wire);
+
+        // 254 байта — не полный кусок: следующее поле того же типа остаётся отдельным.
+        let mut wire = vec![PUBLIC_KEY, 254];
+        wire.extend_from_slice(&[0x11; 254]);
+        wire.extend_from_slice(&[PUBLIC_KEY, 2, 0x22, 0x22]);
+        let tlv = Tlv8::decode(&wire).unwrap();
+        assert_eq!(tlv.get(PUBLIC_KEY).unwrap().len(), 254);
+        assert_eq!(tlv.encode(), wire);
+    }
+
+    /// Повторное поле с тем же типом — не фрагмент: `get` возвращает первое,
+    /// и перекодирование сохраняет исходный порядок записей.
+    #[test]
+    fn repeated_fields_keep_the_first_value_and_wire_order() {
+        let wire = Tlv8::new()
+            .with(STATE, [1])
+            .with(FLAGS, [0])
+            .with(STATE, [2])
+            .encode();
+        let tlv = Tlv8::decode(&wire).unwrap();
+        assert_eq!(tlv.state().unwrap(), 1, "первое поле побеждает");
+        assert_eq!(tlv.get_uint(STATE), Some(1));
+        assert_eq!(tlv.encode(), wire);
+
+        // Пустая запись не поглощает следующую запись того же типа.
+        let raw = [STATE, 0, STATE, 1, 3];
+        let tlv = Tlv8::decode(&raw).unwrap();
+        assert_eq!(tlv.get(STATE).unwrap(), &[] as &[u8]);
+        assert_eq!(tlv.encode(), raw);
+    }
+
+    /// Детерминированный набор повреждённых входов: разбор и перекодирование
+    /// не паникуют и не выходят за границы.
+    #[test]
+    fn arbitrary_bytes_are_handled_without_panics() {
+        let mut state = 0x1234_5678u32;
+        for _ in 0..500 {
+            state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            let len = (state as usize) % 512;
+            let mut buffer = vec![0u8; len];
+            for byte in &mut buffer {
+                state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                *byte = (state >> 16) as u8;
+            }
+            if let Ok(tlv) = Tlv8::decode(&buffer) {
+                let _ = tlv.encode();
+                let _ = tlv.state();
+                let _ = tlv.get_uint(FLAGS);
+                let _ = tlv.require(ERROR, "error");
+            }
+        }
+    }
+
 }

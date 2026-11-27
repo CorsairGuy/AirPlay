@@ -289,4 +289,78 @@ mod tests {
         assert_eq!(frames.load(Ordering::Relaxed), 2);
         server.await.unwrap();
     }
+
+    /// Сервер отвечает заранее заданными HTTP-ответами на последовательные
+    /// подключения; последний ответ закрывает соединение.
+    async fn serve(
+        responses: Vec<String>,
+    ) -> (u16, tokio::task::JoinHandle<usize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = tokio::spawn(async move {
+            let mut served = 0;
+            for response in responses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                let _ = stream.read(&mut request).await;
+                let _ = stream.write_all(response.as_bytes()).await;
+                served += 1;
+            }
+            served
+        });
+        (port, handle)
+    }
+
+    /// Content-Length сверх предела отклоняется по заголовку, без чтения тела.
+    #[tokio::test]
+    async fn declared_length_above_limit_is_rejected() {
+        let (port, server) = serve(vec![
+            "HTTP/1.1 200 OK\r\nContent-Length: 17\r\nConnection: close\r\n\r\n".to_owned(),
+        ])
+        .await;
+        let url = Url::parse(&format!("http://localhost:{port}/a.m3u8")).unwrap();
+        let result = Fetcher::for_tests().fetch_limited(&url, 16).await;
+        assert_eq!(result.unwrap_err(), Error::Limit);
+        assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(2), server).await.unwrap().unwrap(), 1);
+    }
+
+    /// Тело без Content-Length тоже ограничено: лишний байт в потоке — отказ.
+    #[tokio::test]
+    async fn streamed_body_above_limit_is_rejected() {
+        let (port, server) = serve(vec![format!(
+            "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{}",
+            "x".repeat(17)
+        )])
+        .await;
+        let url = Url::parse(&format!("http://localhost:{port}/a.m3u8")).unwrap();
+        let result = Fetcher::for_tests().fetch_limited(&url, 16).await;
+        assert_eq!(result.unwrap_err(), Error::Limit);
+        tokio::time::timeout(std::time::Duration::from_secs(2), server).await.unwrap().unwrap();
+    }
+
+    /// Не-2xx не превращается в пустой плейлист.
+    #[tokio::test]
+    async fn http_error_status_is_reported() {
+        let (port, server) = serve(vec![
+            "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_owned(),
+        ])
+        .await;
+        let url = Url::parse(&format!("http://localhost:{port}/missing.m3u8")).unwrap();
+        let result = Fetcher::for_tests().fetch_playlist(&url).await;
+        assert_eq!(result.unwrap_err(), Error::HttpStatus(404));
+        tokio::time::timeout(std::time::Duration::from_secs(2), server).await.unwrap().unwrap();
+    }
+
+    /// Цепочка редиректов ограничена MAX_REDIRECTS запросами, а не циклом.
+    #[tokio::test]
+    async fn redirect_chain_is_bounded() {
+        let redirect = "HTTP/1.1 302 Found\r\nLocation: /again.m3u8\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        let responses = (0..=MAX_REDIRECTS).map(|_| redirect.to_owned()).collect();
+        let (port, server) = serve(responses).await;
+        let url = Url::parse(&format!("http://localhost:{port}/loop.m3u8")).unwrap();
+        let result = Fetcher::for_tests().fetch_playlist(&url).await;
+        assert_eq!(result.unwrap_err(), Error::UnsafeRedirect);
+        assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(2), server).await.unwrap().unwrap(), MAX_REDIRECTS + 1);
+    }
+
 }
