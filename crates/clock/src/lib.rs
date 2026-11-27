@@ -9,6 +9,7 @@ pub mod external;
 mod filter;
 pub mod follower;
 pub mod measurement;
+pub mod nqptp;
 pub mod probe;
 pub mod ptp;
 pub mod ptp_sender;
