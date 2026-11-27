@@ -571,6 +571,88 @@ mod tests {
             "no outbound map, no outgoing clock"
         );
     }
+    /// Маршрут приём → relay → отправка без сокетов. Метка отправителя в чужом
+    /// домене пересчитывается одним `clock::domain::translate` в наш домен, и
+    /// исходящий штамп совпадает с результатом этого пересчёта: второй сдвиг
+    /// невозможен, а смена входящей эпохи не переносит чужую шкалу в нашу.
+    #[test]
+    fn relay_round_trip_converts_the_inbound_stamp_exactly_once() {
+        let origin = Instant::now();
+        let local = LocalClock::new(1).unwrap();
+        let own = Domain::new(100, 1).unwrap();
+        let source = Arc::new(InstantSource::new(origin, local, own, 1_000_000_000));
+        let inbound_domain = Domain::new(50, 2).unwrap();
+        let inbound = ClockMap::new(
+            local.at(0),
+            inbound_domain.reading(9_000_000_000),
+            0,
+            2_000_000_000,
+        )
+        .unwrap();
+        let outbound =
+            ClockMap::new(local.at(0), own.reading(1_000_000_000), 0, 2_000_000_000).unwrap();
+        let snapshot = Snapshot {
+            selection: Selection {
+                role: Role::Follower("192.0.2.1".parse().unwrap()),
+                domain: Some(inbound_domain),
+            },
+            mapping: Some(inbound),
+            quality: Some(Quality::OneWay),
+            link: None,
+            outbound: Some(outbound),
+        };
+        let (updates, status) = watch::channel(snapshot);
+        let timeline =
+            MasterTimeline::new_dual(source, status, Duration::from_millis(100)).unwrap();
+
+        // Отправитель объявил 9.025 с своего домена; локально это 25 мс.
+        let produced = origin + Duration::from_millis(25);
+        let received = inbound_domain.reading(9_025_000_000);
+        let bridged =
+            clock::domain::translate(received, &inbound, &outbound, local.at(25_000_000)).unwrap();
+        assert_eq!(bridged.domain(), own, "bridged stamp is ours");
+        assert_eq!(bridged.ns(), 1_025_000_000, "the offset is applied once");
+        assert_eq!(
+            timeline.reading_at_now(produced, produced).unwrap(),
+            bridged,
+            "outgoing stamp is the same single translation, not a second shift"
+        );
+
+        // Смена входящей эпохи не переносит чужую шкалу в нашу.
+        let mut changed = snapshot;
+        let next_inbound = Domain::new(50, 3).unwrap();
+        let next_map = ClockMap::new(
+            local.at(0),
+            next_inbound.reading(5_000_000_000),
+            0,
+            2_000_000_000,
+        )
+        .unwrap();
+        changed.mapping = Some(next_map);
+        updates.send_replace(changed);
+        assert_eq!(
+            timeline.reading_at_now(produced, produced).unwrap().ns(),
+            1_025_000_000,
+            "our outbound scale does not follow the inbound epoch"
+        );
+        let resent = clock::domain::translate(
+            next_inbound.reading(5_025_000_000),
+            &next_map,
+            &outbound,
+            local.at(25_000_000),
+        )
+        .unwrap();
+        assert_eq!(resent.domain(), own);
+        assert_eq!(resent.ns(), 1_025_000_000, "same instant, still one shift");
+
+        // Потеря исходящей шкалы отзывает маршрут целиком.
+        changed.outbound = None;
+        updates.send_replace(changed);
+        assert!(
+            timeline.reading_at_now(produced, produced).is_err(),
+            "a lost outbound clock ends the relay route"
+        );
+    }
     #[test]
     fn service_and_producer_use_same_physical_source_and_selected_epoch() {
         let (origin, _updates, timeline) = fixture();
