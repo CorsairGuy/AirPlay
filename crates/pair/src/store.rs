@@ -11,6 +11,14 @@ pub trait PairingStore: Send + Sync {
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
+    /// Отозвать доверие одного контроллера. `true` — запись была удалена.
+    ///
+    /// По умолчанию хранилище отзыв не поддерживает и возвращает `false`:
+    /// вызывающий обязан считать `false` отказом, а не успешным отзывом.
+    /// Повторный отзыв неизвестного идентификатора тоже даёт `false`.
+    fn remove(&self, _id: &[u8]) -> bool {
+        false
+    }
 }
 
 #[derive(Default)]
@@ -34,5 +42,9 @@ impl PairingStore for MemoryStore {
 
     fn len(&self) -> usize {
         self.0.lock().unwrap().len()
+    }
+
+    fn remove(&self, id: &[u8]) -> bool {
+        self.0.lock().unwrap().remove(id).is_some()
     }
 }
