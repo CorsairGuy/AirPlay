@@ -433,6 +433,7 @@
 
 ### C75 — IPv6: scope и канонизация адреса при подключении (P1)
 
+Статус: **частично проверена**. В тестах services/discovery/src/capabilities.rs добавлено: link-local IPv6 без scope не получает выдуманный scope_id (0 остаётся 0); IPv4-mapped ::ffff:192.0.2.5 остаётся сокетом IPv6 в mapped-форме и не подменяется на IPv4; несколько адресов одной записи дают отдельные endpoints; порт берётся из объявления. Сохранение scope_id уже проверено существующим тестом catalog::ipv6_scope_and_port_are_preserved_per_receiver на SocketAddrV6 со scope 3. Команда: cargo test --offline -p discovery --lib capabilities — 19 passed. Ограничения: mdns-sd 0.21.6 не даёт конструктора ScopedIpV6 (приватные поля, scoped-строка в ServiceInfo отклоняется), поэтому сквозной путь discovery → ScopedIp::V6(scope_id) синтетически не собран; реальный link-local multicast и выбор интерфейса не проверялись, аппаратный multicast не заявляется.
 После C12/C34, отдельные интеграционные тесты без изменения общего PTP. Проверить передачу `scope_id` link-local IPv6 от discovery до попытки подключения, IPv4-mapped адреса и сравнение источника. Референсы: v12 D35 и [RFC 4007](https://www.rfc-editor.org/rfc/rfc4007). Готово: тестируемая отказная семантика при отсутствии scope и отсутствие отправки на другой интерфейс; аппаратный multicast не заявлять.
 
 ### C76 — HTTP: отмена и расход памяти при большом теле (P1)
