@@ -257,7 +257,7 @@
 
 ### C33 — Приём аудио: безопасный FLUSH и восстановление без эвристик (P1)
 
-Статус: исследование, `playout.rs` занят координатором. Изучить `feat/epoch-recovery` и `feat/long-session-recovery`: три запоздавших пакета не доказывают новую эпоху. Сверить pinned shairport-sync и [OwnTone `612d6b3c`](https://github.com/owntone/owntone-server/blob/612d6b3cf34ae38bb71b6edfcd69fd7afe6ab25c/src/outputs/raop.c), отдельно значение seq/rtptime и границы отбрасывания старых RTP. Готово: таблица подтверждённых фактов, сценарии reorder/wrap/FLUSH и рекомендации; не реализовывать сброс по одиночному скачку или неподтверждённой серии.
+Статус: **частично исправлена**. Classic FLUSH с `rtptime` обрабатывается как граница отбрасывания, а не доказательство новой эпохи; поздние пакеты до границы отклоняются, rollover проверен тестом. [shairport-sync player.c](https://github.com/mikebrady/shairport-sync/blob/master/player.c) использует метку как границу flush. Три запоздавших пакета всё ещё не доказывают новую эпоху: эксперимент `review/epoch-recovery-20261127` остаётся вне main, для него найдены и исправлены ложные подтверждения дублями. Аппаратный FLUSH и сравнение с [OwnTone `612d6b3c`](https://github.com/owntone/owntone-server/blob/612d6b3cf34ae38bb71b6edfcd69fd7afe6ab25c/src/outputs/raop.c) остаются открыты.
 
 ### C34 — Роуты: пропажа и повторное появление нескольких интерфейсов (P1)
 
