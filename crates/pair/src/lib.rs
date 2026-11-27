@@ -12,7 +12,7 @@ pub mod store;
 pub mod tlv8;
 
 pub use identity::Identity;
-pub use store::{MemoryStore, PairingStore};
+pub use store::{MemoryStore, PairingStore, Revoke};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

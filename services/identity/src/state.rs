@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use anyhow::{Context, Result, bail};
-use pair::{Identity, MemoryStore, PairingStore};
+use pair::{Identity, MemoryStore, PairingStore, Revoke};
 use rand::RngCore;
 use rand::rngs::OsRng;
 use sha2::{Digest, Sha512};
@@ -113,6 +113,35 @@ impl FileStore {
     }
 }
 
+/// Сериализация пар в тот же формат, что читает [`FileStore::open`].
+fn encode_entries(entries: &[(Vec<u8>, [u8; 32])]) -> String {
+    entries
+        .iter()
+        .map(|(id, pk)| format!("{} {}\n", hex::encode(id), hex::encode(pk)))
+        .collect()
+}
+
+/// Атомарная запись: временный файл рядом, затем замена. На Windows
+/// `rename` поверх существующего файла не работает, поэтому замена делается
+/// через удаление цели; при любой ошибке исходный файл остаётся прежним.
+fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, text)?;
+    match fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(_) if path.exists() => {
+            fs::remove_file(path)?;
+            fs::rename(&tmp, path).inspect_err(|_| {
+                let _ = fs::remove_file(&tmp);
+            })
+        }
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
 impl PairingStore for FileStore {
     fn get(&self, id: &[u8]) -> Option<[u8; 32]> {
         self.mem.get(id)
@@ -124,18 +153,40 @@ impl PairingStore for FileStore {
 
     fn add(&self, id: &[u8], public_key: [u8; 32]) {
         let _guard = self.write.lock().unwrap();
+        let previous = self.mem.get(id);
         self.mem.add(id, public_key);
-        let text: String = self
-            .mem
-            .entries()
-            .iter()
-            .map(|(id, pk)| format!("{} {}\n", hex::encode(id), hex::encode(pk)))
-            .collect();
-        if let Err(e) = fs::write(&self.path, text) {
+        let text = encode_entries(&self.mem.entries());
+        if let Err(e) = write_atomic(&self.path, &text) {
+            // Память не должна обещать больше, чем лежит на диске.
+            match previous {
+                Some(old) => self.mem.add(id, old),
+                None => {
+                    self.mem.remove(id);
+                }
+            }
             tracing::error!(
                 "не удалось сохранить сопряжения в {}: {e}",
                 self.path.display()
             );
         }
+    }
+
+    fn remove(&self, id: &[u8]) -> Revoke {
+        let _guard = self.write.lock().unwrap();
+        let Some(old) = self.mem.get(id) else {
+            return Revoke::NotFound;
+        };
+        self.mem.remove(id);
+        let text = encode_entries(&self.mem.entries());
+        if let Err(e) = write_atomic(&self.path, &text) {
+            // Отзыв не сохранён — восстанавливаем доверие в памяти.
+            self.mem.add(id, old);
+            tracing::error!(
+                "не удалось сохранить отзыв в {}: {e}",
+                self.path.display()
+            );
+            return Revoke::Failed;
+        }
+        Revoke::Revoked
     }
 }

@@ -1,7 +1,24 @@
 //! Хранилище сопряжённых контроллеров: идентификатор → ключ Ed25519.
+//!
+//! Отзыв доверия явно различает три случая: записи не было, хранилище не
+//! поддерживает отзыв и ошибку записи. Молчаливый `false` для всех трёх
+//! недопустим: вызывающий не должен считать отказ успехом.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+
+/// Результат отзыва доверия.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Revoke {
+    /// Запись была и удалена.
+    Revoked,
+    /// Контроллера с таким идентификатором не было.
+    NotFound,
+    /// Хранилище не поддерживает отзыв (значение по умолчанию).
+    Unsupported,
+    /// Запись не удалось сохранить; в памяти она восстановлена.
+    Failed,
+}
 
 pub trait PairingStore: Send + Sync {
     fn get(&self, id: &[u8]) -> Option<[u8; 32]>;
@@ -10,6 +27,10 @@ pub trait PairingStore: Send + Sync {
     fn len(&self) -> usize;
     fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+    /// Отозвать доверие одному контроллеру. По умолчанию — `Unsupported`.
+    fn remove(&self, _id: &[u8]) -> Revoke {
+        Revoke::Unsupported
     }
 }
 
@@ -34,5 +55,13 @@ impl PairingStore for MemoryStore {
 
     fn len(&self) -> usize {
         self.0.lock().unwrap().len()
+    }
+
+    fn remove(&self, id: &[u8]) -> Revoke {
+        if self.0.lock().unwrap().remove(id).is_some() {
+            Revoke::Revoked
+        } else {
+            Revoke::NotFound
+        }
     }
 }
