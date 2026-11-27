@@ -338,6 +338,7 @@
 ### C52 — MRP: correlation id и параллельные запросы (P1)
 
 Область: `services/remote/src/mrp_service` и тесты; wire parser C08 не менять. Референсы: v12 §6 D40/D55, [pyatv MRP](https://github.com/postlund/pyatv/tree/b277a4c8222ecdcbaab8a24e3e713ca44765adb4/pyatv/protocols/mrp). Проверить идентификаторы запросов, несвязанные unsolicited updates, таймауты, обрыв и несколько клиентов. Готово: duplex/mock-сценарий с неправильным и отсутствующим id, без преждевременного ACK.
+Статус: **на проверке**. В tests-модуль services/remote/src/mrp_service/server.rs добавлены duplex-тесты через настоящий connection(): два клиента одновременно получают ответы только со своими identifier (A-1 не появляется у B и наоборот); запрос с неизвестным типом и identifier получает errorCode 6 именно с этим identifier; подписанный клиент после CLIENT_UPDATES_CONFIG_MESSAGE получает незапрошенное обновление без identifier вовсе, то есть ответ и событие не смешиваются. Раннее подтверждение не отправляется: проверка опирается на существующий тест queued_output_reply_preserves_request_id_and_disconnect_cancels_wait, где ACK ждёт результата backend. Команда: cargo test --offline -p remote --lib mrp_service::server — 12 passed. Ограничения: таймаут ответа моделируется ожиданием в тесте, отдельного таймера у сервера нет; обрыв соединения проверен существующим тестом отмены ожидания; реальный iPhone не участвовал.
 
 ### C53 — Профиль и ключи: изоляция двух экземпляров runtime (P1)
 
