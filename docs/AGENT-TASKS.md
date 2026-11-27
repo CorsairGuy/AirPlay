@@ -253,7 +253,7 @@
 
 ### C32 — PTP: независимое наблюдение сетевых доменов без общей ветки (P1)
 
-Статус: открыта. Только новые тестовые векторы/документация `crates/clock/tests`; не изменять `runtime`, `services/timesync` или ветку координатора. Сверить v12 D57/L-62 и [Station timing `a1aefc79`](https://github.com/CorsairGuy/yandex_station_airplay/blob/a1aefc790522f271114c80c081a8e07cd6fe1e86/docs/RELAY_TIMING_CANDIDATE.md): разные clock ID, источник/получатель, срок mapping, rate и неверные домены. Готово: воспроизводимые независимые векторы; не называть общий oscillator общим сетевым временем и не добавлять NQPTP.
+Статус: **на проверке**. Добавлен crates/clock/tests/domain_matrix.rs (9 тестов только на публичных типах clock::domain): разные clock id и разные эпохи одного id не взаимозаменяемы, mapping истекает по valid_for_ns и не продлевается, обратное время даёт TimeReversed, чужая локальная эпоха — WrongDomain, rate ±1e6 ppb применяется в обе стороны с обратимостью, translate переносит один физический момент между доменами, устаревший/чужой источник моста отклоняется, недопустимый rate и нулевой срок отклоняются, Reading несёт идентичность домена. Команда: cargo test --offline -p clock (67 lib + 9 integration) — все прошли. Ограничения: общий oscillator не трактуется как общее сетевое время, services/timesync и runtime не менялись, NQPTP не добавлялся.
 
 ### C33 — Приём аудио: безопасный FLUSH и восстановление без эвристик (P1)
 
