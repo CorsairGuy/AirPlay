@@ -555,6 +555,14 @@ mod tests {
                 .validate("ProtocolMessage")
                 .unwrap();
         }
+        // Опустение output не оставляет строк и повторное пустое обновление
+        // ничего не рассылает: карточка не «возвращает» удалённый output.
+        let empty = card.feed.borrow().clone();
+        assert!(empty.outputs.is_empty());
+        assert!(
+            crate::mrp_service::model::topology_updates(&card.identity, &empty, &empty).is_empty(),
+            "повторное пустое обновление не должно слать пакеты"
+        );
     }
 
     #[test]
