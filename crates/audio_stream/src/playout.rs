@@ -1012,6 +1012,105 @@ mod epoch_tests {
         assert_eq!(p.resync_count(), 0);
     }
 
+    // Перенесено из `feat/epoch-recovery@bfeb487`. `Playout::rebase` в этой
+    // ветке удалён: объявленная отправителем граница (`FLUSH` + `RTP-Info`)
+    // приходит в `flush_classic`, и она сбрасывает очередь сразу, без серии
+    // пакетов. Граница — это позиция в потоке, а не новая шкала меток,
+    // поэтому счётчик перезапусков не растёт, а якорь не переставляется.
+    // Сборка этих тестов не проверялась: `cargo`/`rustc` в окружении автора нет.
+
+    /// Объявленная граница выбрасывает очередь немедленно: серия из трёх
+    /// пакетов для этого не нужна, и первый же пакет за границей звучит.
+    #[test]
+    fn declared_boundary_flushes_without_waiting_for_a_series() {
+        let p = Playout::inert();
+        p.play_from(1_000_000_000);
+        p.push(1_000_000_000, AAC_44100, vec![1]);
+        p.push(1_000_000_352, AAC_44100, vec![2]);
+        p.flush_classic(1_000_000_352);
+        assert_eq!(keys(&p), vec![1_000_000_352], "всё до границы брошено");
+        assert_eq!(p.resync_count(), 0, "граница не меняет шкалу");
+        assert_eq!(
+            p.lock().played_through,
+            Some(1_000_000_351),
+            "граница становится водяным знаком"
+        );
+        {
+            let s = p.lock();
+            let anchor = s.anchor.as_ref().expect("якорь есть");
+            assert!(anchor.playing, "вывод продолжается");
+            assert_eq!(anchor.rtp, 1_000_000_000, "якорь не переставляется");
+        }
+        // Первый пакет новой части потока попадает в очередь без кандидата.
+        p.push(1_000_000_704, AAC_44100, vec![3]);
+        assert_eq!(keys(&p), vec![1_000_000_352, 1_000_000_704]);
+        assert!(p.lock().pending.is_none(), "серия не набиралась");
+    }
+
+    /// Запоздавший пакет из выброшенной части потока не возвращается: граница
+    /// работает и после сброса, а не только в момент объявления.
+    #[test]
+    fn packets_from_before_the_declared_boundary_do_not_return() {
+        let p = Playout::inert();
+        p.push(1_000_000_000, AAC_44100, vec![1]);
+        p.push(1_000_000_352, AAC_44100, vec![2]);
+        p.flush_classic(1_000_000_352);
+        p.push(1_000_000_000, AAC_44100, vec![3]);
+        assert_eq!(keys(&p), vec![1_000_000_352], "пакет до границы отброшен");
+        assert_eq!(p.resync_count(), 0);
+        assert!(
+            p.lock().pending.is_none(),
+            "кандидат на новую шкалу не набран"
+        );
+        p.push(1_000_000_704, AAC_44100, vec![4]);
+        assert_eq!(keys(&p), vec![1_000_000_352, 1_000_000_704]);
+    }
+
+    /// Две шкалы вперемешку не дают серии: каждая пара «пакет чужой шкалы +
+    /// пакет действующей» начинается заново, поэтому перезапуск не
+    /// подтверждается, а действующая шкала не сдвигается.
+    #[test]
+    fn alternating_scales_never_confirm_a_new_epoch() {
+        let p = Playout::inert();
+        p.push(500_000_000, AAC_44100, vec![0]);
+        for round in 0..8u32 {
+            p.push(round, AAC_44100, vec![1]);
+            p.push(500_000_000 + round * 352, AAC_44100, vec![2]);
+        }
+        assert_eq!(p.resync_count(), 0);
+        let scale: Vec<i64> = (0..=7).map(|r| 500_000_000 + r * 352).collect();
+        assert_eq!(keys(&p), scale, "прежняя шкала не тронута");
+    }
+
+    /// Долгая сессия с потерями и повторами остаётся на одной шкале: счётчик
+    /// перезапусков не растёт, `played_through` сам не выставляется, очередь
+    /// держится в пределе.
+    #[test]
+    fn long_session_keeps_one_scale_through_losses_and_reordering() {
+        let p = Playout::inert();
+        // Около трёх минут 44,1 кГц: потери и перестановки внутри окна.
+        let mut last = 0u32;
+        for i in 0..20_000u32 {
+            let ts = i.wrapping_mul(352);
+            if i % 97 == 0 {
+                continue; // потеря
+            }
+            if i % 53 == 0 && i > 0 {
+                p.push(last, AAC_44100, vec![1]); // повтор
+            }
+            p.push(ts, AAC_44100, vec![2]);
+            last = ts;
+        }
+        assert_eq!(p.resync_count(), 0, "без объявления шкала не менялась");
+        let s = p.lock();
+        assert_eq!(s.packets.len(), MAX_BUFFERED_PACKETS);
+        assert_eq!(s.high_water, Some(19_999 * 352));
+        assert!(
+            s.played_through.is_none(),
+            "без вывода отметка не выставляется сама"
+        );
+    }
+
     #[test]
     fn flush_drops_a_pending_candidate() {
         let p = Playout::inert();
