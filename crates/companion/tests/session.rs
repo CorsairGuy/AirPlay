@@ -408,3 +408,70 @@ async fn pair_verify_rejection_leaves_nothing_behind() {
     );
     server.await.expect("server");
 }
+
+#[tokio::test]
+async fn unexpected_auth_frame_type_is_refused() {
+    let (listener, addr) = pair().await;
+    let server = tokio::spawn(async move {
+        let mut peer = Peer::accept(&listener).await;
+        let _hello = peer.recv_auth(FrameType::PairVerifyStart).await;
+        // Обычный кадр вместо PairVerifyNext: тип обязан проверяться до OPACK.
+        let wire = peer
+            .link
+            .send(FrameType::Encrypted, &Value::empty_object())
+            .expect("frame");
+        peer.stream.write_all(&wire).await.expect("write");
+    });
+
+    let accessory = Accessory::new(23);
+    let error = match Session::connect(
+        TcpStream::connect(addr).await.expect("connect"),
+        &credentials(&accessory),
+        DEADLINE,
+    )
+    .await
+    {
+        Ok(_) => panic!("wrong auth frame type must fail"),
+        Err(error) => error,
+    };
+    assert!(matches!(error, Error::Session(_)), "{error}");
+    server.await.expect("server");
+}
+
+#[tokio::test]
+async fn non_response_and_rejected_commands_fail_without_closing() {
+    for rejected in [false, true] {
+        let (listener, addr) = pair().await;
+        let server = tokio::spawn(async move {
+            let mut peer = Peer::accept(&listener).await;
+            let request = peer.recv().await;
+            let xid = xid_of(&request);
+            let reply = if rejected {
+                Value::object(vec![
+                    ("_i", Value::Str("_hidC".into())),
+                    ("_t", Value::Int(commands::RESPONSE)),
+                    ("_x", Value::Int(xid as i64)),
+                    ("_em", Value::Str("denied".into())),
+                ])
+            } else {
+                // Тот же `_x` и `_i`, но это событие, а не ответ.
+                Value::object(vec![
+                    ("_i", Value::Str("_hidC".into())),
+                    ("_t", Value::Int(commands::EVENT)),
+                    ("_x", Value::Int(xid as i64)),
+                ])
+            };
+            peer.send(&reply).await;
+        });
+
+        let stream = TcpStream::connect(addr).await.expect("connect");
+        let mut session = Session::plain(stream);
+        let error = session
+            .request("_hidC", Value::empty_object(), DEADLINE)
+            .await
+            .expect_err("protocol refusal must fail the request");
+        assert!(matches!(error, Error::Session(_)), "{error}");
+        assert!(session.is_open(), "protocol refusal is not a disconnect");
+        server.await.expect("server");
+    }
+}

@@ -165,7 +165,7 @@
 
 ### C11 — Companion: прерывание auth и управление сессией (P1)
 
-Статус: открыта. Область: `crates/companion/src/session.rs`, `tests/session.rs`; OPACK-кодек C10 не менять. Референсы: v12 L-61/L-80, [pyatv `b277a4c8`](https://github.com/postlund/pyatv/tree/b277a4c8222ecdcbaab8a24e3e713ca44765adb4). Проверить отдельные auth frames, таймауты и отмену записи, повторное использование соединения, неожиданные ответы, закрытие и повторную авторизацию. Готово: mock-пир и отказные тесты, без заявлений о совместимости с tvOS.
+Статус: **на проверке** (Buffy, `feat/c11-session-refusals`). Добавлены тесты: кадр не того типа вместо PairVerifyNext отклоняет `Session::connect` до разбора OPACK; событие с нашим `_x` вместо `_t=RESPONSE` и ответ с `_em` дают `Error::Session`, не закрывая соединение. Существующие тесты таймаута, отмены записи, корреляции, обрыва и повторной авторизации не менялись. `cargo test --offline -p companion --test session` — 9 passed. Реальный tvOS не проверялся. Область: `crates/companion/src/session.rs`, `tests/session.rs`; OPACK-кодек C10 не менять. Референсы: v12 L-61/L-80, [pyatv `b277a4c8`](https://github.com/postlund/pyatv/tree/b277a4c8222ecdcbaab8a24e3e713ca44765adb4). Проверить отдельные auth frames, таймауты и отмену записи, повторное использование соединения, неожиданные ответы, закрытие и повторную авторизацию. Готово: mock-пир и отказные тесты, без заявлений о совместимости с tvOS.
 
 ### C12 — Discovery: адреса и порты разных DNS-SD сервисов (P1)
 
