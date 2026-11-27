@@ -6,6 +6,13 @@ use std::sync::Mutex;
 pub trait PairingStore: Send + Sync {
     fn get(&self, id: &[u8]) -> Option<[u8; 32]>;
     fn add(&self, id: &[u8], public_key: [u8; 32]);
+    /// Revoke a stored controller. Unsupported stores must report an error.
+    fn remove(&self, _id: &[u8]) -> std::io::Result<bool> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "pairing revocation is unsupported",
+        ))
+    }
     /// Сколько контроллеров сопряжено.
     fn len(&self) -> usize;
     fn is_empty(&self) -> bool {
@@ -24,6 +31,9 @@ impl MemoryStore {
 }
 
 impl PairingStore for MemoryStore {
+    fn remove(&self, id: &[u8]) -> std::io::Result<bool> {
+        Ok(self.0.lock().unwrap().remove(id).is_some())
+    }
     fn get(&self, id: &[u8]) -> Option<[u8; 32]> {
         self.0.lock().unwrap().get(id).copied()
     }

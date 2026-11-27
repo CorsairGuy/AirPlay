@@ -65,7 +65,7 @@ impl Connection {
     pub(crate) async fn send(&mut self, bytes: &[u8]) -> Result<()> {
         if let Some(channel) = self.channel.as_mut() {
             let mut sealed = Vec::new();
-            channel.seal(bytes, &mut sealed);
+            channel.seal(bytes, &mut sealed)?;
             self.stream.write_all(&sealed).await?;
         } else {
             self.stream.write_all(bytes).await?;

@@ -1,6 +1,7 @@
 //! Постоянное состояние приёмника: ключ устройства и сопряжённые контроллеры.
 
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -46,26 +47,32 @@ fn new_uuid() -> String {
 /// Загружает ключ устройства или создаёт новый при первом запуске.
 pub fn load_identity(dir: &Path) -> Result<Identity> {
     let path = dir.join("identity");
-    if let Ok(text) = fs::read_to_string(&path) {
-        let mut lines = text.lines();
-        let (Some(seed), Some(id)) = (lines.next(), lines.next()) else {
-            bail!("повреждён файл {}", path.display());
-        };
-        let seed: [u8; 32] = hex::decode(seed.trim())
-            .ok()
-            .and_then(|s| s.try_into().ok())
-            .with_context(|| format!("повреждён ключ в {}", path.display()))?;
-        return Ok(Identity::from_seed(id.trim(), &seed));
+    match fs::read_to_string(&path) {
+        Ok(text) => {
+            let mut lines = text.lines();
+            let (Some(seed), Some(id)) = (lines.next(), lines.next()) else {
+                bail!("повреждён файл {}", path.display());
+            };
+            let seed: [u8; 32] = hex::decode(seed.trim())
+                .ok()
+                .and_then(|s| s.try_into().ok())
+                .with_context(|| format!("повреждён ключ в {}", path.display()))?;
+            return Ok(Identity::from_seed(id.trim(), &seed));
+        }
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => return Err(e).with_context(|| format!("не прочитать {}", path.display())),
     }
     let mut seed = [0u8; 32];
     OsRng.fill_bytes(&mut seed);
     let identity = Identity::from_seed(new_uuid(), &seed);
     fs::create_dir_all(dir).with_context(|| format!("не создать каталог {}", dir.display()))?;
-    fs::write(
-        &path,
-        format!("{}\n{}\n", hex::encode(seed), identity.pairing_id),
-    )
-    .with_context(|| format!("не записать {}", path.display()))?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .with_context(|| format!("не создать {}", path.display()))?;
+    write!(file, "{}\n{}\n", hex::encode(seed), identity.pairing_id)
+        .with_context(|| format!("не записать {}", path.display()))?;
     Ok(identity)
 }
 
@@ -92,18 +99,22 @@ impl FileStore {
     pub fn open(dir: &Path) -> Result<Self> {
         let path = dir.join("pairings");
         let mem = MemoryStore::default();
-        if let Ok(text) = fs::read_to_string(&path) {
-            for line in text.lines() {
-                let Some((id, pk)) = line.split_once(' ') else {
-                    continue;
-                };
-                if let (Ok(id), Ok(Ok(pk))) = (
-                    hex::decode(id),
-                    hex::decode(pk.trim()).map(<[u8; 32]>::try_from),
-                ) {
-                    mem.add(&id, pk);
-                }
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(e).with_context(|| format!("не прочитать {}", path.display())),
+        };
+        for line in text.lines() {
+            let (id, pk) = line.split_once(' ').context("invalid pairing record")?;
+            let id = hex::decode(id).context("invalid pairing identifier")?;
+            let key: [u8; 32] = hex::decode(pk.trim())
+                .context("invalid pairing key")?
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("invalid pairing key length"))?;
+            if id.is_empty() || mem.get(&id).is_some() {
+                bail!("empty or duplicate pairing identifier");
             }
+            mem.add(&id, key);
         }
         Ok(Self {
             path,
@@ -113,13 +124,152 @@ impl FileStore {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_dir() -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("airplay-identity-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn identity_is_stable_across_reopen() {
+        let dir = test_dir();
+        let first = load_identity(&dir).unwrap();
+        let second = load_identity(&dir).unwrap();
+        assert_eq!(first.pairing_id, second.pairing_id);
+        assert_eq!(first.seed(), second.seed());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn unreadable_identity_does_not_get_replaced() {
+        let dir = test_dir();
+        fs::create_dir(dir.join("identity")).unwrap();
+        assert!(load_identity(&dir).is_err());
+        assert!(dir.join("identity").is_dir());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn unreadable_pairings_are_not_treated_as_empty() {
+        let dir = test_dir();
+        fs::create_dir(dir.join("pairings")).unwrap();
+        assert!(FileStore::open(&dir).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn malformed_pairings_are_not_silently_discarded() {
+        let dir = test_dir();
+        fs::write(dir.join("pairings"), "damaged record\n").unwrap();
+        assert!(FileStore::open(&dir).is_err());
+        assert_eq!(
+            fs::read_to_string(dir.join("pairings")).unwrap(),
+            "damaged record\n"
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn revoked_pairing_stays_removed_after_restart() {
+        let dir = test_dir();
+        let store = FileStore::open(&dir).unwrap();
+        store.add(b"one", [1; 32]);
+        store.add(b"two", [2; 32]);
+        assert!(store.remove(b"one").unwrap());
+        assert!(!store.remove(b"one").unwrap());
+        let reopened = FileStore::open(&dir).unwrap();
+        assert_eq!(reopened.get(b"one"), None);
+        assert_eq!(reopened.get(b"two"), Some([2; 32]));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn failed_revoke_preserves_in_memory_pairing() {
+        let dir = test_dir();
+        let store = FileStore::open(&dir).unwrap();
+        store.mem.add(b"one", [1; 32]);
+        fs::create_dir(dir.join("pairings")).unwrap();
+        assert!(store.remove(b"one").is_err());
+        assert_eq!(store.get(b"one"), Some([1; 32]));
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn concurrent_revokes_on_shared_store_persist_every_removal() {
+        let dir = test_dir();
+        let store = std::sync::Arc::new(FileStore::open(&dir).unwrap());
+        for i in 0..16u8 {
+            store.add(format!("ctl-{i}").as_bytes(), [i; 32]);
+        }
+        let threads: Vec<_> = (0..16u8)
+            .map(|i| {
+                let store = store.clone();
+                std::thread::spawn(move || {
+                    assert!(store.remove(format!("ctl-{i}").as_bytes()).unwrap())
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert!(store.is_empty());
+        assert!(FileStore::open(&dir).unwrap().is_empty());
+        fs::remove_dir_all(dir).unwrap();
+    }
+}
+
 impl PairingStore for FileStore {
     fn get(&self, id: &[u8]) -> Option<[u8; 32]> {
+        let _guard = self.write.lock().unwrap();
         self.mem.get(id)
     }
 
     fn len(&self) -> usize {
+        let _guard = self.write.lock().unwrap();
         self.mem.len()
+    }
+
+    fn remove(&self, id: &[u8]) -> std::io::Result<bool> {
+        let _guard = self.write.lock().unwrap();
+        let entries = self.mem.entries();
+        if !entries.iter().any(|(key, _)| key.as_slice() == id) {
+            return Ok(false);
+        }
+        let text: String = entries
+            .iter()
+            .filter(|(key, _)| key.as_slice() != id)
+            .map(|(key, pk)| format!("{} {}\n", hex::encode(key), hex::encode(pk)))
+            .collect();
+        let temporary = self
+            .path
+            .with_file_name(format!(".pairings-{}.tmp", uuid::Uuid::new_v4()));
+        let result: std::io::Result<()> = (|| {
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options.open(&temporary)?;
+            file.write_all(text.as_bytes())?;
+            file.sync_all()?;
+            drop(file);
+            fs::rename(&temporary, &self.path)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result?;
+        self.mem.remove(id)?;
+        Ok(true)
     }
 
     fn add(&self, id: &[u8], public_key: [u8; 32]) {

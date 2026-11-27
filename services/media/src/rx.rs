@@ -1000,7 +1000,9 @@ impl Media {
                         cseq += 1;
                         let req = control::command_request(control::command_body(command), cseq);
                         let mut wire = Vec::new();
-                        channel.seal(&req, &mut wire);
+                        if channel.seal(&req, &mut wire).is_err() {
+                            break;
+                        }
                         if conn.write_all(&wire).await.is_err() {
                             break;
                         }

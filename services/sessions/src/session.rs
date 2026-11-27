@@ -269,7 +269,7 @@ impl Session {
             let mut bytes = Vec::new();
             resp.encode(&mut bytes);
             match &mut self.channel {
-                Some(ch) => ch.seal(&bytes, out),
+                Some(ch) => ch.seal(&bytes, out)?,
                 None => out.extend_from_slice(&bytes),
             }
             if let Some(keys) = keys {
@@ -297,7 +297,7 @@ impl Session {
                 None,
             ),
             ("POST", "/pair-pin-start") => {
-                info!(peer = %self.peer, pin = %self.ctx.pin, "запрошен PIN для сопряжения");
+                info!(peer = %self.peer, "запрошен PIN для сопряжения");
                 (Response::to(req, 200), None)
             }
             ("POST", "/pair-setup") if req.body.len() == 32 => (self.legacy_setup(req), None),
@@ -649,7 +649,7 @@ mod tests {
             req.encode(&mut bytes);
             let mut wire = Vec::new();
             match &mut self.channel {
-                Some(ch) => ch.seal(&bytes, &mut wire),
+                Some(ch) => ch.seal(&bytes, &mut wire).unwrap(),
                 None => wire = bytes,
             }
             let mut out = Vec::new();
@@ -1099,7 +1099,7 @@ mod tests {
             .unwrap();
         let mut ch = Channel::new(ControlKeys::controller_data(&shared, seed));
         let mut out = Vec::new();
-        ch.seal(b"ping", &mut out);
+        ch.seal(b"ping", &mut out).unwrap();
         client.write_all(&out).await.unwrap();
         let (mut service, _) = backend.accept().await.unwrap();
         let mut got = [0u8; 4];
@@ -1177,7 +1177,7 @@ mod tests {
         let mut ch = Channel::new(ControlKeys::controller_data(&shared, seed));
         let send = |ch: &mut Channel, messages: &[mrp::wire::Node]| {
             let mut out = Vec::new();
-            ch.seal(&frame::sync(1, messages), &mut out);
+            ch.seal(&frame::sync(1, messages), &mut out).unwrap();
             out
         };
         let info = mrp::messages::envelope(
