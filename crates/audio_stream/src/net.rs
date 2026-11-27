@@ -646,8 +646,81 @@ mod tests {
         assert_eq!(h, header);
         assert_eq!(body, b"alac");
     }
-}
 
+    async fn accepted_from(allowed: IpAddr) -> bool {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let address = socket.local_addr().unwrap();
+        let format = codec::Format {
+            codec: codec::Codec::Pcm {
+                frames_per_packet: 1024,
+            },
+            sample_rate: 44_100,
+            channels: 2,
+        };
+        let factory = audio::SinkFactory::new(|_, _| {
+            Ok(Box::new(audio::Null::new(44_100)) as Box<dyn audio::Sink>)
+        });
+        let playout = Arc::new(Playout::start(
+            Config {
+                device: "null".into(),
+                sink: Some(factory),
+                ..Default::default()
+            },
+            Arc::new(clock::NoTime),
+            Some(format),
+        ));
+        let (started_tx, mut started_rx) = watch::channel(false);
+        let task = tokio::spawn(receive_realtime(
+            socket,
+            Arc::new(Decrypt::Plain),
+            playout.clone(),
+            started_tx,
+            None,
+            Some(allowed),
+        ));
+        let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut packet = Header {
+            marker: true,
+            payload_type: 96,
+            seq: 1,
+            timestamp: 0,
+            ssrc: 1,
+        }
+        .encode()
+        .to_vec();
+        packet.extend_from_slice(&[0; 4]);
+        sender.send_to(&packet, address).await.unwrap();
+        let accepted = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if *started_rx.borrow_and_update() {
+                    return true;
+                }
+                if started_rx.changed().await.is_err() {
+                    return false;
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+        task.abort();
+        accepted
+    }
+
+    /// Пакет с чужого адреса не запускает воспроизведение, даже если порт
+    /// совпал; подтверждённый адрес принимается.
+    #[tokio::test]
+    async fn realtime_audio_is_accepted_only_from_the_expected_source() {
+        assert!(
+            !accepted_from(IpAddr::from([127, 0, 0, 2])).await,
+            "чужой источник принят"
+        );
+        assert!(
+            accepted_from(IpAddr::from([127, 0, 0, 1])).await,
+            "подтверждённый источник отвергнут"
+        );
+    }
+
+}
 #[cfg(test)]
 mod resend_tests {
     use super::{Missing, Resend};

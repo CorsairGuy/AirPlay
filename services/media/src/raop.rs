@@ -454,4 +454,94 @@ a=rtpmap:96 AppleLossless\r\na=fmtp:96 352 0 16 40 10 14 2 255 0 0 44100\r\n";
         sender.send_to(&reply, from).await.unwrap();
         drop(stream);
     }
+
+    /// Независимый SDP: только LF, порядок строк не как у Apple, лишние
+    /// атрибуты — параметры всё равно собираются по ключам.
+    #[test]
+    fn independent_lf_sdp_with_reordered_fields() {
+        let sdp = "v=0\n\
+o=Independent 1 0 IN IP4 192.0.2.1\n\
+s=AirTunes\n\
+c=IN IP4 192.0.2.2\n\
+t=0 0\n\
+a=fmtp:96 352 0 16 40 10 14 2 255 0 0 44100\n\
+a=control:trackID=1\n\
+a=ptime:8\n\
+m=audio 0 RTP/AVP 96\n\
+a=rtpmap:96 AppleLossless\n";
+        assert_eq!(
+            parse_sdp(sdp.as_bytes()).unwrap(),
+            Format {
+                codec: Codec::Alac {
+                    bit_depth: 16,
+                    frames_per_packet: 352
+                },
+                sample_rate: 44100,
+                channels: 2,
+            }
+        );
+    }
+
+    fn alac_sdp_text(frames: u32, depth: u32, channels: u32, rate: u32) -> String {
+        format!(
+            "v=0\nm=audio 0 RTP/AVP 96\na=rtpmap:96 AppleLossless\na=fmtp:96 {frames} 0 {depth} 40 10 14 {channels} 255 0 0 {rate}\n"
+        )
+    }
+
+    /// Матрица поддержки: границы включительные, за ними — `Codec`.
+    #[test]
+    fn format_support_boundaries_are_exact() {
+        for (sdp, ok) in [
+            (alac_sdp_text(352, 16, 2, 44_100), true),
+            (alac_sdp_text(1, 16, 1, 8_000), true),
+            (alac_sdp_text(4096, 24, 2, 192_000), true),
+            (alac_sdp_text(0, 16, 2, 44_100), false),
+            (alac_sdp_text(4097, 16, 2, 44_100), false),
+            (alac_sdp_text(352, 32, 2, 44_100), false),
+            (alac_sdp_text(352, 16, 3, 44_100), false),
+            (alac_sdp_text(352, 16, 2, 7_999), false),
+            (alac_sdp_text(352, 16, 2, 192_001), false),
+        ] {
+            assert_eq!(parse_sdp(sdp.as_bytes()).is_ok(), ok, "{sdp}");
+        }
+
+        for (frames, channels, rate, ok) in [
+            (352u32, 2u32, 44_100u32, true),
+            (0, 2, 44_100, false),
+            (4097, 2, 44_100, false),
+            (352, 3, 44_100, false),
+            (352, 2, 192_001, false),
+        ] {
+            let sdp = format!(
+                "v=0\nm=audio 0 RTP/AVP 96\na=rtpmap:96 L16/{rate}/{channels}\na=fmtp:96 {frames}\n"
+            );
+            assert_eq!(parse_sdp(sdp.as_bytes()).is_ok(), ok, "{sdp}");
+        }
+
+        let aac = "v=0\nm=audio 0 RTP/AVP 96\na=rtpmap:96 mpeg4-generic/48000/2\n";
+        assert!(parse_sdp(aac.as_bytes()).is_ok());
+        let six_channels = "v=0\nm=audio 0 RTP/AVP 96\na=rtpmap:96 mpeg4-generic/48000/6\n";
+        assert!(parse_sdp(six_channels.as_bytes()).is_err());
+    }
+
+    /// Отсутствие `m=audio`/`rtpmap`/`fmtp` и не-UTF-8 — ошибка разбора,
+    /// а не формат «по умолчанию».
+    #[test]
+    fn missing_required_sdp_fields_are_malformed() {
+        assert!(matches!(
+            parse_sdp(&[0xff, 0xfe, 0xfd]),
+            Err(SdpError::Malformed)
+        ));
+        for sdp in [
+            "v=0\na=rtpmap:96 AppleLossless\n",
+            "m=audio 0 RTP/AVP 96\n",
+            "m=audio 0 RTP/AVP 96\na=rtpmap:96 AppleLossless\n",
+        ] {
+            assert!(parse_sdp(sdp.as_bytes()).is_err(), "{sdp:?}");
+        }
+        // L16 без `fmtp` использует 352 кадра — это допустимый формат.
+        let l16 = "m=audio 0 RTP/AVP 96\na=rtpmap:96 L16/44100/2\n";
+        assert_eq!(parse_sdp(l16.as_bytes()).unwrap().frames_per_packet(), 352);
+    }
+
 }

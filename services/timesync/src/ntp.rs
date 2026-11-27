@@ -303,4 +303,113 @@ mod tests {
         assert!(received.wrapping_sub(before) <= span);
         assert!(transmitted.wrapping_sub(before) <= span);
     }
+
+    /// Дубли и переупорядоченные ответы не портят смещение: берётся замер с
+    /// наименьшим RTT, а не последний пришедший.
+    #[test]
+    fn duplicate_and_reordered_replies_keep_the_best_sample() {
+        let clock = NtpClock::default();
+        let t1 = local_ns();
+        let ahead = 5_000_000_000;
+        let mut good = [0u8; 32];
+        good[8..16].copy_from_slice(&ns_to_ntp(t1));
+        good[16..24].copy_from_slice(&ns_to_ntp(t1 + 1_000_000 + ahead));
+        good[24..32].copy_from_slice(&ns_to_ntp(t1 + 1_000_000 + ahead));
+        clock.on_reply(&good, t1 + 2_000_000);
+        clock.on_reply(&good, t1 + 2_000_000); // дубль
+
+        // Более поздний, но медленный замер: 500 мс RTT и смещение 30 с.
+        let mut slow = [0u8; 32];
+        slow[8..16].copy_from_slice(&ns_to_ntp(t1));
+        slow[16..24].copy_from_slice(&ns_to_ntp(t1 + 250_000_000 + 30_000_000_000));
+        slow[24..32].copy_from_slice(&ns_to_ntp(t1 + 250_000_000 + 30_000_000_000));
+        clock.on_reply(&slow, t1 + 500_000_000);
+
+        let offset = clock.ntp_offset().unwrap();
+        assert!((offset - ahead as i64).abs() < 1000, "выбран медленный замер: {offset}");
+    }
+
+    /// Нулевые, обратные и обрезанные метки не создают отображение.
+    #[test]
+    fn malformed_replies_do_not_create_a_mapping() {
+        let clock = NtpClock::default();
+        let t1 = local_ns();
+        let mut resp = [0u8; 32];
+        resp[8..16].copy_from_slice(&ns_to_ntp(t1));
+        resp[16..24].copy_from_slice(&ns_to_ntp(t1 + 1_000_000));
+        resp[24..32].copy_from_slice(&ns_to_ntp(t1 + 1_000_000));
+
+        clock.on_reply(&resp[..31], t1 + 2_000_000);
+        assert!(clock.ntp_offset().is_none(), "обрезанный ответ");
+
+        let mut zero = resp;
+        zero[16..24].fill(0);
+        clock.on_reply(&zero, t1 + 2_000_000);
+        assert!(clock.ntp_offset().is_none(), "нулевое receive");
+
+        let mut backward = resp;
+        backward[24..32].copy_from_slice(&ns_to_ntp(t1 - 1_000_000));
+        clock.on_reply(&backward, t1 + 2_000_000);
+        assert!(clock.ntp_offset().is_none(), "transmit раньше receive");
+
+        let mut reversed = resp;
+        reversed[16..24].copy_from_slice(&ns_to_ntp(t1 + 3_000_000));
+        reversed[24..32].copy_from_slice(&ns_to_ntp(t1 + 1_000_000));
+        clock.on_reply(&reversed, t1 + 4_000_000);
+        assert!(clock.ntp_offset().is_none(), "t3 < t2");
+
+        clock.on_reply(&resp, t1.saturating_sub(1_000)); // ответ раньше запроса: RTT < 0
+        assert!(clock.ntp_offset().is_none());
+    }
+
+    /// После истечения срока старые замеры отбрасываются, а новый ответ
+    /// снова даёт отображение.
+    #[test]
+    fn an_expired_source_can_return_with_a_fresh_sample() {
+        let clock = NtpClock::default();
+        {
+            let mut state = clock.0.lock().unwrap();
+            state.recent.push((1, 42));
+            state.last_received =
+                Some(Instant::now() - MAX_SAMPLE_AGE - Duration::from_secs(1));
+        }
+        assert!(clock.ntp_offset().is_none());
+
+        let t1 = local_ns();
+        let mut resp = [0u8; 32];
+        resp[8..16].copy_from_slice(&ns_to_ntp(t1));
+        resp[16..24].copy_from_slice(&ns_to_ntp(t1 + 2_000_000));
+        resp[24..32].copy_from_slice(&ns_to_ntp(t1 + 2_000_000));
+        clock.on_reply(&resp, t1 + 4_000_000);
+        assert!(clock.ntp_offset().is_some());
+    }
+
+    /// Максимальная 64-битная метка NTP переводится без переполнения.
+    #[test]
+    fn maximum_ntp_timestamp_does_not_overflow() {
+        let ns = ntp_to_ns(u64::MAX);
+        let secs = u64::MAX >> 32;
+        let frac = (u64::MAX & 0xFFFF_FFFF) as u128;
+        let expected = secs * 1_000_000_000 + ((frac * 1_000_000_000) >> 32) as u64;
+        assert_eq!(ns, expected);
+        assert!(ns < u64::MAX);
+    }
+
+    /// Ответ на запрос сохраняет его origin и не принимает чужой тип пакета.
+    #[test]
+    fn reply_requires_an_exact_timing_request() {
+        let req = request();
+        let resp = reply(&req).unwrap();
+        assert_eq!(resp[8..16], req[24..32]);
+        for len in 0..32 {
+            assert!(reply(&req[..len]).is_none(), "len={len}");
+        }
+        let mut wrong = req;
+        wrong[0] = 0x81;
+        assert!(reply(&wrong).is_none());
+        wrong[0] = 0x80;
+        wrong[1] = 0x80 | REPLY;
+        assert!(reply(&wrong).is_none());
+    }
+
 }

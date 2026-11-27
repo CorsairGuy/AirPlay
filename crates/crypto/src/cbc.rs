@@ -68,4 +68,44 @@ mod tests {
         AudioCbc::new(&key.try_into().unwrap(), &iv.try_into().unwrap()).decrypt(&mut ct);
         assert_eq!(hex::encode(ct), "6bc1bee22e409f96e93d7e117393172a");
     }
+
+    /// Независимый вектор, сгенерированный OpenSSL 3.5.9:
+    /// `openssl enc -aes-128-cbc -K 000102030405060708090a0b0c0d0e0f
+    /// -iv 0f0e0d0c0b0a09080706050403020100 -nopad` на 48 байтах `00..2f`.
+    /// Проверяет whole-block CBC, открытый хвост, неверный ключ и пустой ввод.
+    #[test]
+    fn openssl_vector_encrypts_whole_blocks_and_leaves_tail() {
+        let key: [u8; 16] = std::array::from_fn(|i| i as u8);
+        let iv: [u8; 16] = std::array::from_fn(|i| (15 - i) as u8);
+        let expected = hex::decode(
+            "03a9c8fe778fb8a8668359542ad4d584bce873fe4bc2ba36d6d8742b27cdd457\
+             0f12246df175346786982b0e092470f3",
+        )
+        .unwrap();
+        let cipher = AudioCbc::new(&key, &iv);
+        let plain: Vec<u8> = (0..48).collect();
+
+        let mut data = plain.clone();
+        cipher.encrypt(&mut data);
+        assert_eq!(data, expected, "CBC должен совпасть с OpenSSL");
+        cipher.decrypt(&mut data);
+        assert_eq!(data, plain);
+
+        let mut tail = vec![0xAAu8; 15];
+        cipher.encrypt(&mut tail);
+        assert_eq!(tail, vec![0xAAu8; 15], "хвост короче блока открыт");
+        let mut tail = vec![0xAAu8; 47];
+        cipher.encrypt(&mut tail);
+        assert_eq!(tail[32..], [0xAAu8; 15], "неполный блок открыт");
+
+        let mut empty: Vec<u8> = Vec::new();
+        cipher.encrypt(&mut empty);
+        cipher.decrypt(&mut empty);
+        assert!(empty.is_empty());
+
+        let mut wrong = expected.clone();
+        AudioCbc::new(&[0xFF; 16], &iv).decrypt(&mut wrong);
+        assert_ne!(wrong, plain, "чужой ключ не даёт открытый текст");
+    }
+
 }
