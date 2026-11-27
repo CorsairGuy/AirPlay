@@ -273,7 +273,7 @@
 
 ### C37 — Станция: план совместимой миграции после удаления старых API (P1)
 
-Статус: открыта. Только анализ и тестовый адаптер в собственной ветке ядра; не менять рабочий репозиторий Станции и не разрабатывать её device-specific UI. Сверить [Station adapter `a1aefc79`](https://github.com/CorsairGuy/yandex_station_airplay/blob/a1aefc790522f271114c80c081a8e07cd6fe1e86/docs/CORE_SENDER_ADAPTER.md), `STATION-CORE-INVENTORY-20261126.md`, удалённые `ap_sender`/`ap_mrp` и новый `runtime`. Готово: таблица старый API→новый API, отличия ownership/clock, недостающие контракты и сборка синтетического адаптера без пользовательских ключей; реальная Станция и NQPTP не включаются в ядро.
+Статус: **частично проверена**. Снимок `a1aefc79/docs/CORE_SENDER_ADAPTER.md` найден локально; добавлены синтетические тесты и [сверка границ PCM](STATION-PIPELINE-CONTRACTS-20261127.md). Полная карта старых API, реальная Станция и проверка двойного PTP остаются открыты; device-код и NQPTP в ядро не добавлены.
 
 ## Дополнительные задачи C38–C57
 
@@ -477,7 +477,7 @@
 
 ### C86 — Station: граница PCM и источников без device-кода (P1)
 
-После C37: сравнить `runtime/src/pipeline`, `services/media/src/tx/continuous_source.rs` и pinned [Station adapter `a1aefc79`](https://github.com/CorsairGuy/yandex_station_airplay/blob/a1aefc790522f271114c80c081a8e07cd6fe1e86/docs/CORE_SENDER_ADAPTER.md). Готово: synthetic adapter с pause/seek/EOF и таблица недостающих общих контрактов; Quasar/Glagol/ALSA, конфиги и процесс Станции не переносить.
+Статус: **частично проверена**. Четыре синтетических теста покрывают pause/seek/EOF; [сверка](STATION-PIPELINE-CONTRACTS-20261127.md) отмечает не подключённые к runtime контракты источника. Это не реальный адаптер и не проверка Станции.
 
 ### C87 — CI: проверка библиотечного API без CLI (P1)
 
