@@ -82,5 +82,28 @@ jobs:
           targets: ${{ matrix.target }}
       - run: cargo check --workspace --target ${{ matrix.target }}
 
-  # The former pyatv interop job launched the deleted CLI. Keep its client under
-  # tests/interop; restore this job when a library-based test harness exists.
+  # C27: the receiver is started through the public runtime API by an example
+  # harness (runtime/examples/interop_receiver.rs), not by a deleted CLI.
+  interop-pyatv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install "pyatv==0.14.5" "srptools==1.0.1"
+      - run: cargo build -p runtime --example interop_receiver
+      - name: Run the harness and the independent client
+        run: |
+          set -euo pipefail
+          state="$(mktemp -d)"
+          ./target/debug/examples/interop_receiver --name "CI Interop" --port 7123 --pin 1234 --state-dir "$state" > receiver.log 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; cat receiver.log; rm -rf "$state"' EXIT
+          for _ in $(seq 1 100); do
+            grep -q "READY 7123" receiver.log && break
+            sleep 0.1
+          done
+          grep -q "READY 7123" receiver.log
+          python tests/interop/pyatv_client.py 127.0.0.1 7123 1234
