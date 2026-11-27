@@ -70,7 +70,10 @@ fn timestamp(b: &[u8]) -> Option<u64> {
     let b: &[u8; 10] = b.get(..10)?.try_into().ok()?;
     let secs = u64::from_be_bytes([0, 0, b[0], b[1], b[2], b[3], b[4], b[5]]);
     let nanos = u32::from_be_bytes([b[6], b[7], b[8], b[9]]) as u64;
-    Some(secs * 1_000_000_000 + nanos)
+    if nanos >= 1_000_000_000 {
+        return None;
+    }
+    secs.checked_mul(1_000_000_000)?.checked_add(nanos)
 }
 
 /// Состояние PTP-слушателя: по одному источнику на адрес отправителя.
@@ -128,7 +131,7 @@ impl Ptp {
         src.priority1 = data[47];
         src.priority2 = data[52];
         src.grandmaster = u64::from_be_bytes(data[53..61].try_into().unwrap_or_default());
-        src.silent_announces += 1;
+        src.silent_announces = src.silent_announces.saturating_add(1);
         if src.silent_announces != SILENT_ANNOUNCES || src.clock_id != src.grandmaster {
             return Vec::new();
         }
@@ -159,9 +162,12 @@ impl Ptp {
         if src.clock_id != h.clock_id {
             return;
         }
+        let offset = i128::from(origin) + i128::from(h.correction_ns) - i128::from(local_ns);
+        let Ok(offset) = i64::try_from(offset) else {
+            return;
+        };
         src.silent_announces = 0;
-        let master = origin as i64 + h.correction_ns;
-        src.filter.update(master - local_ns as i64);
+        src.filter.update(offset);
         src.updated_ns = local_ns;
     }
 

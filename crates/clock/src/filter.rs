@@ -34,8 +34,8 @@ impl OffsetFilter {
             self.samples = 1;
             return sample;
         }
-        let diff = sample - self.estimate;
-        if diff.abs() > STEP_NS {
+        let diff = i128::from(sample) - i128::from(self.estimate);
+        if diff.abs() > i128::from(STEP_NS) {
             self.outliers += 1;
             if self.outliers >= STEP_CONFIRM {
                 self.reset();
@@ -45,6 +45,8 @@ impl OffsetFilter {
         }
         self.outliers = 0;
         self.samples = self.samples.saturating_add(1);
+        // Only a difference within STEP_NS reaches this conversion.
+        let diff = diff as i64;
         self.estimate += if diff > 0 {
             if self.samples <= WARMUP {
                 diff
@@ -87,5 +89,16 @@ mod tests {
             f.update(900_000_000);
         }
         assert_eq!(f.offset(), Some(900_000_000), "часы переставили");
+    }
+
+    #[test]
+    fn extreme_offsets_do_not_overflow_filter() {
+        let mut filter = OffsetFilter::default();
+        assert_eq!(filter.update(i64::MIN), i64::MIN);
+        assert_eq!(filter.update(i64::MAX), i64::MIN);
+        for _ in 1..STEP_CONFIRM {
+            filter.update(i64::MAX);
+        }
+        assert_eq!(filter.offset(), Some(i64::MAX));
     }
 }

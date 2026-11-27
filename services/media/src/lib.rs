@@ -6,5 +6,6 @@ pub mod hls;
 pub mod output;
 pub mod raop;
 pub mod rx;
+pub mod track_queue;
 pub mod tx;
 pub use codec;
