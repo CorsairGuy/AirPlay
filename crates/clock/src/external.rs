@@ -55,6 +55,106 @@ pub struct Selection {
     pub clock_change_offset: Option<u64>,
     pub sender_master_verified: bool,
 }
+/// What a provenancing provider claims about the supplied clock owner. It is a
+/// statement about identity and epoch only — never about freshness, accuracy or
+/// audible synchronization.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Claim {
+    pub daemon_instance: u128,
+    pub clock_id: u64,
+    pub master_start_raw_ns: u64,
+    pub start_marker: StartMarker,
+    pub clock_change_offset: Option<u64>,
+}
+
+/// One bounded attestation of the patched sender-master role.
+///
+/// Constructing it is the provider's explicit act; it holds for at most
+/// [`Attestation::MAX_VALID_FOR`] after the observation and cannot be refreshed
+/// in place — a new observation means a new `Attestation`. A `Selection` is
+/// derived only for a published sample that still matches this identity, and
+/// `sender_master_verified` is set from the attestation itself, so no caller can
+/// assert it by hand.
+pub struct Attestation {
+    claim: Claim,
+    observed: Instant,
+    valid_for: Duration,
+}
+
+impl Attestation {
+    /// Upper bound accepted for one claim; longer-lived evidence is stale by
+    /// policy, not by a hardware property.
+    pub const MAX_VALID_FOR: Duration = Duration::from_secs(5);
+
+    pub fn new(claim: Claim, observed: Instant, valid_for: Duration) -> Result<Self, Error> {
+        if claim.daemon_instance == 0
+            || claim.clock_id == 0
+            || claim.master_start_raw_ns == 0
+            || valid_for.is_zero()
+            || valid_for > Self::MAX_VALID_FOR
+        {
+            return Err(Error::Invalid);
+        }
+        Ok(Self {
+            claim,
+            observed,
+            valid_for,
+        })
+    }
+
+    pub fn claim(&self) -> Claim {
+        self.claim
+    }
+
+    /// `false` after the bound or when time went backwards: the owner must
+    /// obtain a fresh observation, not extend this one.
+    pub fn is_fresh(&self, now: Instant) -> bool {
+        now.checked_duration_since(self.observed)
+            .is_some_and(|age| age <= self.valid_for)
+    }
+
+    /// Derive the pinned selection for this published sample. `epoch` is the
+    /// caller's process-unique selection epoch, not something the daemon states.
+    pub fn selection(
+        &self,
+        epoch: u64,
+        sample: Snapshot,
+        now: Instant,
+    ) -> Result<Selection, Error> {
+        if !self.is_fresh(now) {
+            return Err(Error::Stale);
+        }
+        if sample.clock_id != self.claim.clock_id
+            || sample.clock_change_offset != self.claim.clock_change_offset
+        {
+            return Err(Error::EpochChanged);
+        }
+        match self.claim.start_marker {
+            StartMarker::StableEpoch
+                if sample.master_start_time != self.claim.master_start_raw_ns =>
+            {
+                return Err(Error::EpochChanged);
+            }
+            // The patched master rewrites that marker on keepalive: newer is a
+            // refreshed publication, older is a different epoch.
+            StartMarker::RefreshedPublication
+                if sample.master_start_time < self.claim.master_start_raw_ns =>
+            {
+                return Err(Error::EpochChanged);
+            }
+            _ => {}
+        }
+        Ok(Selection {
+            daemon_instance: self.claim.daemon_instance,
+            domain: Domain::new(self.claim.clock_id, epoch).map_err(|_| Error::Invalid)?,
+            master_start_raw_ns: self.claim.master_start_raw_ns,
+            start_marker: self.claim.start_marker,
+            clock_change_offset: self.claim.clock_change_offset,
+            sender_master_verified: true,
+        })
+    }
+}
+
 /// Measured affine RAW = raw_ns + elapsed(Instant)*(1+rate_ppb/1e9).
 /// rate_error_ppb bounds additional uncertainty growth, not an invented servo.
 #[derive(Clone, Copy, Debug)]
@@ -439,6 +539,206 @@ mod tests {
                 c.at
             ),
             Err(Error::Invalid)
+        );
+    }
+}
+
+#[cfg(test)]
+mod attestation_tests {
+    use super::*;
+
+    fn claim() -> Claim {
+        Claim {
+            daemon_instance: 7,
+            clock_id: 9,
+            master_start_raw_ns: 1_000,
+            start_marker: StartMarker::StableEpoch,
+            clock_change_offset: Some(42),
+        }
+    }
+
+    fn sample() -> Snapshot {
+        Snapshot {
+            clock_id: 9,
+            local_time: 2_000_000_000,
+            offset: 5,
+            clock_change_offset: Some(42),
+            master_start_time: 1_000,
+        }
+    }
+
+    fn correlation(at: Instant) -> Correlation {
+        Correlation {
+            at,
+            raw_ns: 2_000_000_000,
+            rate_ppb: 0,
+            rate_error_ppb: 0,
+            uncertainty_ns: 0,
+            valid_for: Duration::from_millis(10),
+        }
+    }
+
+    #[test]
+    fn fresh_attestation_pins_its_own_identity_and_epoch() {
+        let at = Instant::now();
+        let attestation = Attestation::new(claim(), at, Duration::from_secs(1)).unwrap();
+        let selection = attestation.selection(3, sample(), at).unwrap();
+        assert!(selection.sender_master_verified);
+        assert_eq!(selection.daemon_instance, 7);
+        assert_eq!(selection.domain.id(), 9);
+        assert_eq!(selection.domain.epoch(), 3);
+        assert_eq!(selection.master_start_raw_ns, 1_000);
+        assert_eq!(selection.clock_change_offset, Some(42));
+        let mut q =
+            Qualifier::new(selection, Duration::from_secs(1), Duration::from_micros(1)).unwrap();
+        assert!(
+            q.observe(selection, sample(), correlation(at), at, at)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn expired_attestation_never_extends_itself() {
+        let at = Instant::now();
+        let attestation = Attestation::new(claim(), at, Duration::from_millis(500)).unwrap();
+        assert!(attestation.is_fresh(at));
+        assert!(!attestation.is_fresh(at + Duration::from_millis(501)));
+        assert_eq!(
+            attestation.selection(1, sample(), at + Duration::from_millis(501)),
+            Err(Error::Stale)
+        );
+        assert!(
+            !attestation.is_fresh(at - Duration::from_millis(1)),
+            "backwards time is not freshness"
+        );
+    }
+
+    #[test]
+    fn unattestable_claims_and_unbounded_lifetimes_are_rejected() {
+        let at = Instant::now();
+        for bad in [
+            Claim {
+                daemon_instance: 0,
+                ..claim()
+            },
+            Claim {
+                clock_id: 0,
+                ..claim()
+            },
+            Claim {
+                master_start_raw_ns: 0,
+                ..claim()
+            },
+        ] {
+            assert!(Attestation::new(bad, at, Duration::from_secs(1)).is_err());
+        }
+        assert!(Attestation::new(claim(), at, Duration::ZERO).is_err());
+        assert!(
+            Attestation::new(
+                claim(),
+                at,
+                Attestation::MAX_VALID_FOR + Duration::from_millis(1)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn another_clock_or_change_offset_is_not_the_attested_one() {
+        let at = Instant::now();
+        let attestation = Attestation::new(claim(), at, Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            attestation.selection(
+                1,
+                Snapshot {
+                    clock_id: 10,
+                    ..sample()
+                },
+                at
+            ),
+            Err(Error::EpochChanged)
+        );
+        assert_eq!(
+            attestation.selection(
+                1,
+                Snapshot {
+                    clock_change_offset: None,
+                    ..sample()
+                },
+                at
+            ),
+            Err(Error::EpochChanged)
+        );
+    }
+
+    #[test]
+    fn stable_epoch_requires_the_exact_marker_and_refreshed_allows_newer() {
+        let at = Instant::now();
+        let stable = Attestation::new(claim(), at, Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            stable.selection(
+                1,
+                Snapshot {
+                    master_start_time: 1_001,
+                    ..sample()
+                },
+                at
+            ),
+            Err(Error::EpochChanged)
+        );
+        let refreshed = Attestation::new(
+            Claim {
+                start_marker: StartMarker::RefreshedPublication,
+                ..claim()
+            },
+            at,
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let selection = refreshed
+            .selection(
+                1,
+                Snapshot {
+                    master_start_time: 1_500,
+                    ..sample()
+                },
+                at,
+            )
+            .unwrap();
+        assert_eq!(selection.start_marker, StartMarker::RefreshedPublication);
+        assert_eq!(
+            refreshed.selection(
+                1,
+                Snapshot {
+                    master_start_time: 999,
+                    ..sample()
+                },
+                at
+            ),
+            Err(Error::EpochChanged)
+        );
+    }
+
+    #[test]
+    fn a_later_different_clock_revokes_the_qualified_timeline() {
+        let at = Instant::now();
+        let attestation = Attestation::new(claim(), at, Duration::from_secs(2)).unwrap();
+        let selection = attestation.selection(1, sample(), at).unwrap();
+        let mut q =
+            Qualifier::new(selection, Duration::from_secs(1), Duration::from_micros(1)).unwrap();
+        q.observe(selection, sample(), correlation(at), at, at)
+            .unwrap();
+        let other = Snapshot {
+            clock_id: 11,
+            ..sample()
+        };
+        assert_eq!(
+            q.observe(selection, other, correlation(at), at, at),
+            Err(Error::EpochChanged)
+        );
+        assert_eq!(
+            q.observe(selection, sample(), correlation(at), at, at),
+            Err(Error::Revoked)
         );
     }
 }
