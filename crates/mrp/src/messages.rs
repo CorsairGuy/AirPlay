@@ -391,8 +391,12 @@ fn supported_commands(now: &NowPlaying) -> Node {
     supported
 }
 
+// Match the existing remote card limit and leave room for the surrounding MRP frame.
+const MAX_CARD_ARTWORK_BYTES: usize = 2 * 1024 * 1024;
+
 fn content_item(now: &NowPlaying, request: Option<&Node>) -> Node {
     use f::ContentItemMetadata as m;
+    let artwork = now.artwork.as_ref().filter(|art| !art.data.is_empty() && art.data.len() <= MAX_CARD_ARTWORK_BYTES);
     let mut md = Node::default();
     md.text(m::title, &now.title)
         .text(m::trackArtistName, &now.artist)
@@ -401,14 +405,14 @@ fn content_item(now: &NowPlaying, request: Option<&Node>) -> Node {
         .float(m::playbackRate, if now.playing { 1.0 } else { 0.0 })
         .float(m::defaultPlaybackRate, 1.0)
         .double(m::elapsedTimeTimestamp, cocoa_now())
-        .boolean(m::artworkAvailable, now.artwork.is_some());
+        .boolean(m::artworkAvailable, artwork.is_some());
     if let Some(duration) = now.duration.filter(|d| d.is_finite() && *d > 0.0) {
         md.double(m::duration, duration);
     }
     let mut item = Node::default();
     item.text(f::ContentItem::identifier, &now.content_id);
     let (mut width, mut height) = (0, 0);
-    if let Some(art) = &now.artwork {
+    if let Some(art) = artwork {
         (width, height) = (art.width, art.height);
         md.text(m::artworkMIMEType, &art.mime)
             .text(m::artworkIdentifier, &art.id);
@@ -695,6 +699,23 @@ mod tests {
             assert_eq!(queue.string(f::PlaybackQueue::requestId), Some("range-id"));
             assert_eq!(queue.raw(f::PlaybackQueue::contentItems).is_some(), expected);
         }
+    }
+
+    #[test]
+    fn oversized_artwork_is_not_emitted_or_advertised() {
+        let d = device();
+        let mut now = playing();
+        now.artwork.as_mut().unwrap().data = Arc::new(vec![7; MAX_CARD_ARTWORK_BYTES + 1]);
+        let mut request = Node::default();
+        request.double(f::PlaybackQueueRequestMessage::artworkWidth, 600.0);
+        let response = state(&d, &now, Some(&request), None);
+        let body = response.nested(f::ProtocolMessage::setStateMessage).unwrap();
+        let queue = body.nested(f::SetStateMessage::playbackQueue).unwrap();
+        let item = queue.nested(f::PlaybackQueue::contentItems).unwrap();
+        assert!(item.raw(f::ContentItem::artworkData).is_none());
+        let metadata = item.nested(f::ContentItem::metadata).unwrap();
+        assert_eq!(metadata.number(f::ContentItemMetadata::artworkAvailable), Some(0));
+        assert_eq!(metadata.string(f::ContentItemMetadata::title), Some("Песня"));
     }
 
     #[test]
