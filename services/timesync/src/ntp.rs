@@ -139,8 +139,7 @@ impl NtpClock {
     /// «Его NTP − наше NTP», нс.
     pub fn ntp_offset(&self) -> Option<i64> {
         let s = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        if s
-            .last_received
+        if s.last_received
             .is_none_or(|at| at.elapsed() > MAX_SAMPLE_AGE)
         {
             return None;
