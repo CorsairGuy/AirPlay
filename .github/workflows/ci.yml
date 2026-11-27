@@ -48,6 +48,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test -p runtime --lib
       - run: cargo test -p runtime --tests
+      - name: Audio-only profile
+        run: cargo test -p runtime --no-default-features
+      - name: Mirroring profile
+        run: cargo test -p runtime --features mirroring
+      - name: Audio-only tree stays free of video crates
+        shell: bash
+        run: |
+          cargo tree -p runtime --no-default-features --prefix none > audio-tree.txt
+          if grep -E '^(mirror|video|hls|capture) v' audio-tree.txt; then
+            echo 'Unexpected video dependency in audio-only profile'
+            exit 1
+          fi
       - name: Workspace has no CLI binaries
         shell: bash
         run: |
