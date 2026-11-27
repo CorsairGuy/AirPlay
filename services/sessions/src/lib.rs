@@ -4,9 +4,16 @@ use coordinator::outputs::ReceiverEndpoint;
 use media::tx::{Session, pool::SessionPool};
 use std::future::Future;
 
+pub mod buffered_sender;
+pub mod output_card;
+pub mod output_router;
 pub mod output_worker;
+pub mod pcm_sender;
 pub mod photo;
 pub mod preparer;
+pub mod ptp_group;
+pub mod send_control;
+pub mod serve;
 pub mod session;
 pub mod transport;
 

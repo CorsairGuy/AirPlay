@@ -1,5 +1,5 @@
 //! Same backend/data over TCP bridge versus in-process duplex; localhost only.
-use crate::card::Card;
+use remote::card::Card;
 use crypto::{Channel, kdf::ControlKeys};
 use media::control::bridge;
 use media::control::{MrpService, Remote};

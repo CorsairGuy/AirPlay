@@ -1,53 +1,14 @@
 //! Приёмник AirPlay как библиотека: то же, что `airplay`, для
-//! программ под конкретное железо. Они собирают [`serve::Options`],
+//! программ под конкретное железо. Они собирают [`sessions::serve::Options`],
 //! при необходимости подставляют свой вывод звука
 //! (`options.audio.sink = Some(audio::SinkFactory::new(...))`) и показ видео
 //! (`options.mirror = Some(mirror::VideoSinkFactory::new(...))`, обычно с
 //! `video::DecodingSink` и своим `video::FrameSink`), затем вызывают
-//! [`serve::run`].
+//! [`sessions::serve::run`].
 
-pub use ::media::events;
-pub use ::media::output::local_process;
-pub use ::remote::card;
-pub use ::remote::card_transport;
-pub use ::remote::continuous_control;
-pub use discovery;
-pub use discovery::{
-    capabilities as discovery_capabilities, catalog as discovery_catalog, feed as discovery_feed,
-};
-pub use identity;
-#[cfg(target_os = "linux")]
-pub use identity::daemon_identity;
-pub use identity::{route_pairing, sender_store, state};
+// CLI-specific frontends; embedders use the owning service crates directly.
 pub mod media;
 #[cfg(test)]
 mod mrp_path_tests;
-pub use media::output::card as output_card;
-pub mod coordinator;
-pub use coordinator::{output_control, output_router, output_worker, ptp_group, relay_selection};
-pub use media::tx as send;
-pub mod send_control;
 #[cfg(unix)]
 pub mod send_ipc;
-pub mod sessions;
-pub use ::media::tx::{source_process, source_runtime};
-pub use ::remote::mrp_service;
-pub use ::remote::{mrp_log, station_log};
-/// Compatibility import for older adapters; new code uses mrp_service.
-pub use mrp_service as station_mrp;
-pub use sessions::{preparer as session_preparer, serve};
-/// Compatibility macro for older adapters.
-#[macro_export]
-macro_rules! station_elog {($($arg:tt)*)=>{{$crate::mrp_log!($($arg)*);}}}
-
-pub use audio;
-pub use audio_stream;
-pub use device;
-#[cfg(feature = "mirroring")]
-pub use mirror;
-#[cfg(feature = "mirroring")]
-pub use video;
-
-#[cfg(feature = "hls")]
-pub use hls;
-pub use timesync;

@@ -1,5 +1,5 @@
 //! Local process bridge. Bounded text requests over a private Unix socket.
-use crate::send_control::RelayControl;
+use sessions::send_control::RelayControl;
 use anyhow::{Context, Result, bail};
 use std::{
     os::unix::fs::{MetadataExt, PermissionsExt},
@@ -161,7 +161,7 @@ impl Drop for Task {
     }
 }
 pub(crate) async fn run<R: tokio::io::AsyncRead + Unpin>(
-    options: crate::media::tx::Options,
+    options: sessions::pcm_sender::Options,
     input: R,
     stop: watch::Receiver<bool>,
     path: PathBuf,
@@ -170,7 +170,7 @@ pub(crate) async fn run<R: tokio::io::AsyncRead + Unpin>(
     let server = Server::bind(&path, control.clone())?;
     let mut serving = Task(tokio::spawn(server.run(stop.clone())));
     tokio::select! {
-        result=crate::media::tx::run_controlled(options,input,stop,control)=>result,
+        result=sessions::pcm_sender::run_controlled(options,input,stop,control)=>result,
         result=&mut serving.0=>{result.context("relay IPC task failed")??;bail!("relay IPC stopped before sender")}
     }
 }

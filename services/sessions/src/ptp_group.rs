@@ -1,8 +1,6 @@
 //! Explicit outgoing local-master lifecycle; no clock/discovery/capture startup.
-use crate::{
-    coordinator::output_control::OutputRequest,
-    coordinator::output_worker::{self, SessionPreparer},
-};
+use remote::output_control::OutputRequest;
+use crate::output_worker::{self, SessionPreparer};
 use ::discovery::catalog::{OutputCatalog, ReceiverEndpoint};
 use ::media::tx::{AudioPacket, MediaClock, Session, pool::SessionPool};
 use anyhow::{Context, Result, bail};
@@ -60,7 +58,7 @@ pub struct RawPcmSource<R> {
 }
 impl ContinuousSource {
     pub fn for_card(
-        card: &crate::card::Card,
+        card: &remote::card::Card,
         timeline: ::media::tx::continuous::Timeline,
         clock: MediaClock,
         input: mpsc::Receiver<::media::tx::continuous_source::SourceFrame>,
@@ -264,7 +262,7 @@ impl PtpGroup {
     /// pipeline instead of dropping a still-running pool. No hidden tasks.
     pub async fn run_card_continuous_with_local(
         self,
-        card: Arc<crate::card::Card>,
+        card: Arc<remote::card::Card>,
         source: ContinuousSource,
         outputs: GroupOutputs<impl SessionPreparer>,
         sink: impl ::media::tx::LocalSink,
@@ -298,7 +296,7 @@ impl PtpGroup {
     /// branches, whose cleanup is awaited. The adapter retains route ownership.
     pub async fn run_card_pcm_with_local(
         self,
-        card: Arc<crate::card::Card>,
+        card: Arc<remote::card::Card>,
         source: RawPcmSource<impl tokio::io::AsyncRead + Unpin>,
         outputs: GroupOutputs<impl SessionPreparer>,
         sink: impl ::media::tx::LocalSink,
@@ -311,7 +309,7 @@ impl PtpGroup {
     /// source epoch, RTP timestamps or receiver lead. The adapter owns calibration.
     pub async fn run_card_pcm_with_local_lead(
         self,
-        card: Arc<crate::card::Card>,
+        card: Arc<remote::card::Card>,
         source: RawPcmSource<impl tokio::io::AsyncRead + Unpin>,
         outputs: GroupOutputs<impl SessionPreparer>,
         sink: impl ::media::tx::LocalSink,
@@ -560,7 +558,7 @@ impl<P: SessionPreparer> SessionPreparer for QualifiedPreparer<P> {
     async fn prepare_authorized(
         &mut self,
         receiver: ReceiverEndpoint,
-        authorization: Option<&crate::identity::route_pairing::AuthorizationContext>,
+        authorization: Option<&identity::route_pairing::AuthorizationContext>,
     ) -> Result<Session> {
         self.timeline.reading_at(std::time::Instant::now())?;
         let session = self
@@ -721,8 +719,8 @@ mod tests {
             Ok(())
         }
     }
-    fn pipeline_card(remote: ::media::control::Remote) -> Arc<crate::card::Card> {
-        crate::card::Card::new(
+    fn pipeline_card(remote: ::media::control::Remote) -> Arc<remote::card::Card> {
+        remote::card::Card::new(
             mrp::messages::Device {
                 name: "Pipeline card".into(),
                 model: "AirPlayReceiver".into(),
@@ -853,7 +851,7 @@ mod tests {
             let (_clock, _user, group, origin) = fixture();
             let card = pipeline_card(::media::control::Remote::new());
             let (_control, requests) =
-                crate::coordinator::output_control::OutputControl::channel(4);
+                remote::output_control::OutputControl::channel(4);
             let (_catalog, discovery) =
                 watch::channel(Arc::new(OutputCatalog::new(vec![]).unwrap()));
             let (updates, state) = watch::channel(output_worker::Snapshot::default());
@@ -943,7 +941,7 @@ mod tests {
             MediaClock::at(origin, 0),
             input,
         );
-        let (_control, requests) = crate::coordinator::output_control::OutputControl::channel(4);
+        let (_control, requests) = remote::output_control::OutputControl::channel(4);
         let (_catalog, discovery) = watch::channel(Arc::new(OutputCatalog::new(vec![]).unwrap()));
         let (updates, final_state) = watch::channel(output_worker::Snapshot::default());
         let outputs = GroupOutputs {
@@ -1064,7 +1062,7 @@ mod tests {
             input,
             controls,
         };
-        let (_control, requests) = crate::coordinator::output_control::OutputControl::channel(4);
+        let (_control, requests) = remote::output_control::OutputControl::channel(4);
         let (_catalog, discovery) = watch::channel(Arc::new(OutputCatalog::new(vec![]).unwrap()));
         let (updates, _) = watch::channel(output_worker::Snapshot::default());
         let outputs = GroupOutputs {
@@ -1133,7 +1131,7 @@ mod tests {
                 controls,
             };
             let (_control, requests) =
-                crate::coordinator::output_control::OutputControl::channel(4);
+                remote::output_control::OutputControl::channel(4);
             let (_catalog, discovery) =
                 watch::channel(Arc::new(OutputCatalog::new(vec![]).unwrap()));
             let (updates, final_state) = watch::channel(output_worker::Snapshot::default());
@@ -1259,7 +1257,7 @@ mod tests {
             .await
             .unwrap();
         let (_pcm, audio) = tokio::sync::broadcast::channel(4);
-        let (control, requests) = crate::coordinator::output_control::OutputControl::channel(4);
+        let (control, requests) = remote::output_control::OutputControl::channel(4);
         drop(control);
         let (_catalog, discovery) = watch::channel(Arc::new(OutputCatalog::new(vec![]).unwrap()));
         let (state, _) = watch::channel(output_worker::Snapshot::default());
@@ -1306,7 +1304,7 @@ mod tests {
         let producer = group.producer(MediaClock::at(origin, 0));
         let renderer_stop = group.stop();
         let (_pcm, audio) = tokio::sync::broadcast::channel(4);
-        let (control, requests) = crate::coordinator::output_control::OutputControl::channel(4);
+        let (control, requests) = remote::output_control::OutputControl::channel(4);
         drop(control);
         let (_catalog, discovery) = watch::channel(Arc::new(OutputCatalog::new(vec![]).unwrap()));
         let (state, _) = watch::channel(output_worker::Snapshot::default());
@@ -1373,7 +1371,7 @@ mod tests {
             let (pcm, audio) = tokio::sync::broadcast::channel(4);
             let local_audio = pcm.subscribe();
             pcm.send(packet.clone()).unwrap();
-            let (control, requests) = crate::coordinator::output_control::OutputControl::channel(4);
+            let (control, requests) = remote::output_control::OutputControl::channel(4);
             let catalog = OutputCatalog::new(vec![::discovery::catalog::OutputRoute {
                 uid: "row".into(),
                 name: "speaker".into(),
@@ -1454,7 +1452,7 @@ mod tests {
         let (pcm, audio) = tokio::sync::broadcast::channel(4);
         let local_audio = pcm.subscribe();
         drop(pcm);
-        let (_control, requests) = crate::coordinator::output_control::OutputControl::channel(4);
+        let (_control, requests) = remote::output_control::OutputControl::channel(4);
         let (_catalog, discovery) = watch::channel(Arc::new(OutputCatalog::new(vec![]).unwrap()));
         let (state, _) = watch::channel(output_worker::Snapshot::default());
         let dropped = Arc::new(AtomicBool::new(false));
@@ -1509,7 +1507,7 @@ mod tests {
         let producer = group.producer(MediaClock::at(origin, 0));
         let mut renderer_stop = group.stop();
         let (_pcm, audio) = tokio::sync::broadcast::channel(4);
-        let (control, requests) = crate::coordinator::output_control::OutputControl::channel(4);
+        let (control, requests) = remote::output_control::OutputControl::channel(4);
         let catalog = OutputCatalog::new(vec![::discovery::catalog::OutputRoute {
             uid: "row".into(),
             name: "speaker".into(),

@@ -8,13 +8,14 @@ use std::process::ExitCode;
 #[cfg(feature = "mirroring")]
 mod video_process;
 
-use airplay::identity::state;
+use identity::state;
 #[cfg(feature = "mirroring")]
-use airplay::mirror;
-use airplay::sessions::serve;
+use mirror;
+use sessions::serve;
 #[cfg(all(feature = "mirroring", feature = "ffmpeg"))]
-use airplay::video;
-use airplay::{audio_stream, device};
+use video;
+use audio_stream;
+use device;
 
 use tracing_subscriber::EnvFilter;
 

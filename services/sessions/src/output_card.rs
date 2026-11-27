@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use mrp::{schema::field::AVOutputDeviceDescriptor as fields, wire::Node};
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::coordinator::output_worker::Snapshot;
+use crate::output_worker::Snapshot;
 
 fn key(uid: &str) -> String {
     uuid::Uuid::parse_str(uid)
