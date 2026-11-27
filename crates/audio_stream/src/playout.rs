@@ -418,6 +418,9 @@ impl Playout {
             return;
         }
         let mut s = self.lock();
+        // Отправитель объявил поток заново: неподтверждённый кандидат набран
+        // из пакетов до границы и к новому потоку не относится.
+        s.pending = None;
         let until = s.unwrap.peek(boundary);
         s.packets.retain(|&ts, _| ts >= until);
         let cutoff = until - 1;
@@ -993,6 +996,20 @@ mod epoch_tests {
         assert_eq!(p.resync_count(), 1);
         assert_eq!(p.buffered_packets(), 3);
         assert_eq!(keys(&p), vec![0, 1024, 2048]);
+    }
+
+    #[test]
+    fn classic_flush_drops_a_pending_candidate() {
+        let p = Playout::inert();
+        p.push(1_000_000_000, AAC_44100, vec![1]);
+        p.push(0, AAC_44100, vec![2]);
+        assert!(p.lock().pending.is_some(), "кандидат набран");
+        p.flush_classic(1_000_000_000);
+        assert!(
+            p.lock().pending.is_none(),
+            "граница FLUSH снимает кандидата"
+        );
+        assert_eq!(p.resync_count(), 0);
     }
 
     #[test]
