@@ -399,11 +399,12 @@ impl Media {
                 ok()
             }
             ("FLUSH", _) => {
-                // Classic FLUSH: отправитель перемотал или сменил трек.
-                if req.headers.get("RTP-Info").is_some() {
-                    self.player.with(self.id, |s| s.playout().clear());
-                    debug!("FLUSH AirPlay 1: буфер очищен");
-                }
+                let boundary = req.headers.get("RTP-Info").and_then(classic_flush_boundary);
+                self.player.with(self.id, |s| match boundary {
+                    Some(timestamp) => s.playout().flush_classic(timestamp),
+                    None => s.playout().clear(),
+                });
+                debug!(?boundary, "FLUSH AirPlay 1");
                 ok()
             }
             ("SETPEERS", _) | ("SETPEERSX", _) => {
@@ -1438,6 +1439,10 @@ fn other_receivers(body: &[u8], sender: &[IpAddr]) -> usize {
 }
 
 /// SETPEERS — массив адресов, SETPEERSX — массив словарей с `Addresses`.
+fn classic_flush_boundary(info: &str) -> Option<u32> {
+    info.split(';').find_map(|part| part.trim().strip_prefix("rtptime=")?.trim().parse().ok())
+}
+
 fn parse_peers(body: &[u8]) -> Vec<IpAddr> {
     let Some(Value::Array(items)) = rtsp::plist::parse(body) else {
         return Vec::new();
@@ -1477,6 +1482,15 @@ impl From<&str> for SetupError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classic_flush_reads_the_rtp_boundary() {
+        assert_eq!(classic_flush_boundary("seq=12;rtptime=4048"), Some(4048));
+        assert_eq!(classic_flush_boundary("seq=1; rtptime=4294967295"), Some(u32::MAX));
+        assert_eq!(classic_flush_boundary("seq=1"), None);
+        assert_eq!(classic_flush_boundary("rtptime=4294967296"), None);
+        assert_eq!(classic_flush_boundary("rtptime=-1"), None);
+    }
 
     #[test]
     fn now_playing_command_maps_to_the_existing_events() {

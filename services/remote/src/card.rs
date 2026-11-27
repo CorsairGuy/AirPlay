@@ -740,6 +740,19 @@ mod phase6_tests {
     }
 
     #[test]
+    fn adjacent_tracks_can_share_the_same_album_artwork() {
+        let card = card("same-album");
+        let art = jpeg(100, 100);
+        card.metadata(&Metadata { title: Some("first".into()), ..Default::default() });
+        card.artwork("image/jpeg", &art);
+        card.metadata(&Metadata { title: Some("second".into()), ..Default::default() });
+        assert!(card.feed.borrow().cover.is_none());
+        card.artwork("image/jpeg", &art);
+        assert_eq!(card.feed.borrow().cover.as_ref().unwrap().id, hash(&art));
+        assert_eq!(card.feed.borrow().title, "second");
+    }
+
+    #[test]
     fn pause_keeps_track_position_and_resume_continues_it() {
         let card = card("pause");
         let _rx = card.feed.subscribe();
