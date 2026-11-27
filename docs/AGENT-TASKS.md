@@ -457,6 +457,7 @@
 
 ### C81 — Мирроринг TX: повторный запуск после отмены pairing (P1)
 
+Статус: **на проверке**. В services/media/tests/mirror_tx.rs добавлен тест cancelled_setup_stages_leave_no_sockets_and_retry_gets_new_parameters: три попытки MirrorSession::connect к loopback-приёмнику — обрыв сразу после pair-verify, обрыв после аудио-SETUP (клиент обязан закрыть event-канал и перестать слать timing 0xD2; проверено таймаутами 300/400 мс на приёмнике) и успешная третья попытка с TEARDOWN. Каждая попытка получает новый shk, новый sessionUUID и новый timing-порт; video data-сокет в отменённых раундах не открывается. Команда: cargo test --offline -p media --test mirror_tx — 3 passed. Ограничения: loopback-приёмник и mock-протокол, реальный Apple TV не проверялся; отказ Apple TV воспроизводить защищённый контент (FairPlay/HDCP) отдельно не проверялся и не заявляется — тест покрывает только отмену на этапах pairing/SETUP; полноценный mirroring с кадрами в отменённых раундах не запускался.
 После C05/C44, test-only в `services/media/tests/mirror_tx.rs`. Референсы: v12 фаза 5 D10/D18 и [doubletake `5e2f1cbe`](https://github.com/omarroth/doubletake/blob/5e2f1cbe/internal/airplay/mirror.go). Готово: отмена на каждом этапе не оставляет event/timing socket, новая попытка использует новые сессионные параметры; отрицание воспроизведения на Apple TV указать отдельно.
 
 ### C82 — Discovery: два одинаковых имени, разные идентичности (P1)
