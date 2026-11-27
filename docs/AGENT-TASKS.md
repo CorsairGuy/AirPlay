@@ -205,7 +205,7 @@
 
 ### C21 — NTP/PTP: независимые wire-векторы и malformed packets (P1)
 
-Статус: открыта. Область: **только новые тесты и fixtures** `crates/clock`; `services/timesync` занят координатором. Референсы: v12 D27/D57/L-62, [airplay-cli](https://github.com/music-assistant/airplay-cli) с закреплённым commit и wire-записи, если они законно доступны. Проверить Sync/Follow_Up, Delay, Signaling/TLV, длины, endian, идентичность источника и границы timestamp; не считать документ одной реализации нормативным стандартом. Готово: происхождение каждого вектора и тесты отказов; исправления движка вынести отдельным предложением.
+Статус: **на проверке** (Buffy, `feat/c21-clock-wire`). Добавлены независимые Follow_Up/Announce/Delay/Signaling векторы и отказные тесты `crates/clock/tests/ptp_wire.rs`; найден и исправлен разбор Timestamp: переполнение `secs * 1e9` на 48-битных секундах (паника в debug) и наносекунды >= 1 с теперь отклоняются. `cargo test --offline -p clock` — 13 passed (5 новых + 6 прежних wire-тестов + unit). Область: **только новые тесты и fixtures** `crates/clock`; `services/timesync` занят координатором. Референсы: v12 D27/D57/L-62, [airplay-cli](https://github.com/music-assistant/airplay-cli) с закреплённым commit и wire-записи, если они законно доступны. Проверить Sync/Follow_Up, Delay, Signaling/TLV, длины, endian, идентичность источника и границы timestamp; не считать документ одной реализации нормативным стандартом. Готово: происхождение каждого вектора и тесты отказов; исправления движка вынести отдельным предложением.
 
 ### C22 — Фото / HTTP: ограничения и жизненный цикл (P2)
 
