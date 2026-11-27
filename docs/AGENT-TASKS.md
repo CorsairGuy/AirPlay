@@ -477,6 +477,7 @@
 
 ### C86 — Station: граница PCM и источников без device-кода (P1)
 
+Статус: **частично проверена**. Ветка от C37. Добавлен docs/STATION-PIPELINE-CONTRACTS-20261127.md: таблица контрактов между continuous/continuous_source, runtime/src/pipeline/{pcm,buffered}.rs и срезом Станции a1aefc79; зафиксированы отсутствующие в runtime контракты — вход pause/seek/EOF (run* принимает только AsyncRead и stop), маркер перемотки и поколение, контракт локального рендера при паузе; расхождение очереди 512 против QUEUE_PACKETS=64 объяснено разными политиками задержки, а не ошибкой. Синтетический адаптер с pause/seek/EOF — services/media/tests/station_adapter.rs из C37 (4 passed). Команда: cargo test --offline -p media --test station_adapter. Ограничения: внешний docs/CORE_SENDER_ADAPTER.md на a1aefc79 недоступен (404); сквозной runtime с получателями требует сокетов и здесь не запускался; реальный адаптер Станции, Quasar/Glagol/ALSA, её конфиги и процесс не переносились; устройство не проверялось.
 После C37: сравнить `runtime/src/pipeline`, `services/media/src/tx/continuous_source.rs` и pinned [Station adapter `a1aefc79`](https://github.com/CorsairGuy/yandex_station_airplay/blob/a1aefc790522f271114c80c081a8e07cd6fe1e86/docs/CORE_SENDER_ADAPTER.md). Готово: synthetic adapter с pause/seek/EOF и таблица недостающих общих контрактов; Quasar/Glagol/ALSA, конфиги и процесс Станции не переносить.
 
 ### C87 — CI: проверка библиотечного API без CLI (P1)
