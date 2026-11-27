@@ -779,7 +779,7 @@ mod event_tests {
         let mut plain = Vec::new();
         request.encode(&mut plain);
         let mut wire = Vec::new();
-        channel.seal(&plain, &mut wire);
+        channel.seal(&plain, &mut wire).unwrap();
         socket.write_all(&wire).await.unwrap();
         let mut size = [0u8; 2];
         tokio::time::timeout(Duration::from_secs(2), socket.read_exact(&mut size))

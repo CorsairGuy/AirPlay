@@ -341,7 +341,7 @@ async fn forward<B: AsyncRead + AsyncWrite + Unpin>(
                 outgoing.extend_from_slice(&from_backend[..n]);
                 while let Some(frame) = take_mrp_frame(&mut outgoing)? {
                     let mut out = Vec::with_capacity(frame.len() + 64);
-                    channel.seal(&frame, &mut out);
+                    channel.seal(&frame, &mut out).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
                     client.write_all(&out).await?;
                 }
             }

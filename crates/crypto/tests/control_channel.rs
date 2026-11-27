@@ -18,7 +18,7 @@ fn channels(seed: u8) -> (Channel, Channel) {
 fn sealed(seed: u8, msg: &[u8]) -> Vec<u8> {
     let (_, mut controller) = channels(seed);
     let mut wire = Vec::new();
-    controller.seal(msg, &mut wire);
+    controller.seal(msg, &mut wire).unwrap();
     wire
 }
 
@@ -77,8 +77,8 @@ fn valid_frame_before_corrupt_frame_is_not_partially_committed() {
     let (mut accessory, mut controller) = channels(12);
     let mut first = Vec::new();
     let mut second = Vec::new();
-    controller.seal(b"first", &mut first);
-    controller.seal(b"second", &mut second);
+    controller.seal(b"first", &mut first).unwrap();
+    controller.seal(b"second", &mut second).unwrap();
     *second.last_mut().unwrap() ^= 1;
     let mut wire = first;
     wire.extend_from_slice(&second);
@@ -145,10 +145,12 @@ fn super_short_and_empty_buffers_are_harmless() {
 fn sealing_empty_input_produces_nothing_and_large_input_splits() {
     let (_, mut controller) = channels(7);
     let mut wire = Vec::new();
-    controller.seal(&[], &mut wire);
+    controller.seal(&[], &mut wire).unwrap();
     assert!(wire.is_empty());
 
-    controller.seal(&vec![7u8; MAX_FRAME + 1], &mut wire);
+    controller
+        .seal(&vec![7u8; MAX_FRAME + 1], &mut wire)
+        .unwrap();
     // Два кадра: MAX_FRAME и 1 байт, каждый с префиксом длины и тегом.
     let tag = 16;
     assert_eq!(wire.len(), MAX_FRAME + 1 + 2 * (2 + tag));

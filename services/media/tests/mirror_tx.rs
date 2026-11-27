@@ -81,7 +81,7 @@ impl Conn {
         match self.channel.as_mut() {
             Some(channel) => {
                 let mut sealed = Vec::new();
-                channel.seal(&plain, &mut sealed);
+                channel.seal(&plain, &mut sealed)?;
                 self.stream.write_all(&sealed).await?;
             }
             None => self.stream.write_all(&plain).await?,
