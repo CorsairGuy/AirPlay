@@ -122,6 +122,38 @@ impl FileStore {
             write: Mutex::new(()),
         })
     }
+
+    // Caller holds `write`; publish the complete snapshot before changing memory.
+    fn persist(&self, entries: &[(Vec<u8>, [u8; 32])]) -> std::io::Result<()> {
+        let text: String = entries
+            .iter()
+            .map(|(key, pk)| format!("{} {}\n", hex::encode(key), hex::encode(pk)))
+            .collect();
+        let temporary = self
+            .path
+            .with_file_name(format!(".pairings-{}.tmp", uuid::Uuid::new_v4()));
+        let mut created = false;
+        let result: std::io::Result<()> = (|| {
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options.open(&temporary)?;
+            created = true;
+            file.write_all(text.as_bytes())?;
+            file.sync_all()?;
+            drop(file);
+            fs::rename(&temporary, &self.path)?;
+            Ok(())
+        })();
+        if result.is_err() && created {
+            let _ = fs::remove_file(&temporary);
+        }
+        result
+    }
 }
 
 #[cfg(test)]
@@ -201,6 +233,21 @@ mod tests {
     }
 
     #[test]
+    fn failed_add_does_not_change_memory_or_overwrite_an_existing_key() {
+        let dir = test_dir();
+        let store = FileStore::open(&dir).unwrap();
+        store.try_add(b"one", [1; 32]).unwrap();
+        fs::remove_file(dir.join("pairings")).unwrap();
+        fs::create_dir(dir.join("pairings")).unwrap();
+        assert!(store.try_add(b"one", [2; 32]).is_err());
+        assert!(store.try_add(b"two", [3; 32]).is_err());
+        assert_eq!(store.get(b"one"), Some([1; 32]));
+        assert_eq!(store.get(b"two"), None);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn concurrent_revokes_on_shared_store_persist_every_removal() {
         let dir = test_dir();
         let store = std::sync::Arc::new(FileStore::open(&dir).unwrap());
@@ -241,51 +288,34 @@ impl PairingStore for FileStore {
         if !entries.iter().any(|(key, _)| key.as_slice() == id) {
             return Ok(false);
         }
-        let text: String = entries
-            .iter()
+        let remaining: Vec<_> = entries
+            .into_iter()
             .filter(|(key, _)| key.as_slice() != id)
-            .map(|(key, pk)| format!("{} {}\n", hex::encode(key), hex::encode(pk)))
             .collect();
-        let temporary = self
-            .path
-            .with_file_name(format!(".pairings-{}.tmp", uuid::Uuid::new_v4()));
-        let result: std::io::Result<()> = (|| {
-            let mut options = OpenOptions::new();
-            options.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            let mut file = options.open(&temporary)?;
-            file.write_all(text.as_bytes())?;
-            file.sync_all()?;
-            drop(file);
-            fs::rename(&temporary, &self.path)?;
-            Ok(())
-        })();
-        if result.is_err() {
-            let _ = fs::remove_file(&temporary);
-        }
-        result?;
+        self.persist(&remaining)?;
         self.mem.remove(id)?;
         Ok(true)
     }
 
     fn add(&self, id: &[u8], public_key: [u8; 32]) {
-        let _guard = self.write.lock().unwrap();
-        self.mem.add(id, public_key);
-        let text: String = self
-            .mem
-            .entries()
-            .iter()
-            .map(|(id, pk)| format!("{} {}\n", hex::encode(id), hex::encode(pk)))
-            .collect();
-        if let Err(e) = fs::write(&self.path, text) {
-            tracing::error!(
-                "не удалось сохранить сопряжения в {}: {e}",
-                self.path.display()
-            );
+        if let Err(e) = self.try_add(id, public_key) {
+            tracing::error!("не удалось сохранить сопряжение: {e}");
         }
+    }
+
+    fn try_add(&self, id: &[u8], public_key: [u8; 32]) -> std::io::Result<()> {
+        if id.is_empty() {
+            return Err(std::io::Error::new(
+                ErrorKind::InvalidInput,
+                "empty pairing identifier",
+            ));
+        }
+        let _guard = self.write.lock().unwrap();
+        let mut entries = self.mem.entries();
+        entries.retain(|(key, _)| key.as_slice() != id);
+        entries.push((id.to_vec(), public_key));
+        self.persist(&entries)?;
+        self.mem.add(id, public_key);
+        Ok(())
     }
 }

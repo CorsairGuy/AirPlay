@@ -61,6 +61,33 @@ fn verify_once(store: &MemoryStore, ctl: Identity, acc: &pair::hap::Accessory) -
 }
 
 #[test]
+fn pair_setup_rejects_if_persistent_write_is_unsupported() {
+    struct FailingStore;
+    impl PairingStore for FailingStore {
+        fn get(&self, _: &[u8]) -> Option<[u8; 32]> {
+            None
+        }
+        fn add(&self, _: &[u8], _: [u8; 32]) {
+            panic!("fallible writes must not call legacy add")
+        }
+        fn len(&self) -> usize {
+            0
+        }
+    }
+    let store = FailingStore;
+    let mut server = PairSetup::new(accessory(), "1234");
+    let mut client = ControllerSetup::new(controller(31, "ctl-1"), "1234", false);
+    let m2 = reply(server.handle(&client.m1(), &store).unwrap());
+    let m4 = reply(server.handle(&client.m3(&m2).unwrap(), &store).unwrap());
+    assert!(client.check_m4(&m4).unwrap().is_none());
+    assert!(matches!(
+        server.handle(&client.m5().unwrap(), &store).unwrap(),
+        SetupOutcome::Rejected(_)
+    ));
+    assert!(store.is_empty());
+}
+
+#[test]
 fn add_get_remove_roundtrip() {
     let store = MemoryStore::default();
     assert!(store.is_empty());
