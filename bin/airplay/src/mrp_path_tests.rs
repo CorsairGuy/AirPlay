@@ -72,8 +72,12 @@ async fn probe(service: MrpService, fragmented: bool) -> Node {
                 match frame {
                     Frame::Reply { seq: 9 } => ack = true,
                     Frame::Sync { mut messages, .. } if !messages.is_empty() => {
+                        // Initial DeviceInfo is unsolicited and may precede the request ACK.
+                        let Some(index) = messages.iter().position(|message| message.string(2) == Some("same-request")) else {
+                            continue;
+                        };
                         assert!(ack, "request ACK precedes the response");
-                        let mut response = messages.remove(0);
+                        let mut response = messages.remove(index);
                         assert_eq!(response.number(1), Some(15));
                         assert_eq!(response.string(2), Some("same-request"));
                         let unique = mrp::schema::field::ProtocolMessage::uniqueIdentifier;

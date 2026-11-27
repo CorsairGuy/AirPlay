@@ -13,7 +13,7 @@ use pair::{
 use rand::RngCore;
 use tokio::{
     net::{TcpStream, UdpSocket},
-    sync::{broadcast, watch},
+    sync::{broadcast, mpsc, oneshot, watch},
     task::JoinHandle,
     time::{sleep, sleep_until, timeout},
 };
@@ -478,6 +478,7 @@ impl<T> Drop for Task<T> {
 /// paced packets and returns counters; it does not reconnect behind the caller.
 pub struct Session {
     config: SessionConfig,
+    session_id: u32,
     rtsp: Option<Rtsp>,
     audio: UdpSocket,
     control: Arc<UdpSocket>,
@@ -557,12 +558,24 @@ impl SyncPacket {
 struct TargetPacket {
     audio: Vec<u8>,
     sync: SyncPacket,
+    header: rtp::Header,
+}
+struct FlushRequest {
+    sequence: u16,
+    timestamp: u32,
+    reply: oneshot::Sender<Result<()>>,
 }
 impl TargetPacketizer {
     fn clear_retransmit_cache(&mut self) {
         match self {
             Self::Ntp(packetizer) => packetizer.clear_retransmit_cache(),
             Self::Ptp(packetizer) => packetizer.clear_retransmit_cache(),
+        }
+    }
+    fn restart_spurt(&mut self) {
+        match self {
+            Self::Ntp(packetizer) => packetizer.restart_spurt(),
+            Self::Ptp(packetizer) => packetizer.restart_spurt(),
         }
     }
     fn initial_timestamp(&self) -> u32 {
@@ -585,6 +598,7 @@ impl TargetPacketizer {
                 TargetPacket {
                     audio: packet.audio,
                     sync: SyncPacket::Ntp(packet.sync),
+                    header: packet.header,
                 }
             }
             Self::Ptp(p) => {
@@ -592,6 +606,7 @@ impl TargetPacketizer {
                 TargetPacket {
                     audio: packet.audio,
                     sync: SyncPacket::Ptp(packet.sync),
+                    header: packet.header,
                 }
             }
         })
@@ -946,6 +961,7 @@ impl Session {
         let (metadata, _) = watch::channel(None);
         Ok(Self {
             config,
+            session_id,
             rtsp: Some(rtsp),
             audio,
             control,
@@ -1000,6 +1016,7 @@ impl Session {
             .take()
             .context("missing receiver control connection")?;
         let (control_stop, stopping) = watch::channel(false);
+        let (flush_tx, flush_rx) = mpsc::channel(1);
         let mut owner = Task(tokio::spawn(control_owner(
             rtsp,
             volume,
@@ -1011,9 +1028,11 @@ impl Session {
             },
             self.peer_changes.take(),
             self.metadata.subscribe(),
+            flush_rx,
+            self.session_id,
         )));
         let result = tokio::select! {
-            result = self.stream(&mut audio, &mut stop, progress.as_ref()) => result,
+            result = self.stream(&mut audio, &mut stop, progress.as_ref(), flush_tx) => result,
             result = &mut owner.0 => {
                 result.context("receiver control task failed")??;
                 bail!("receiver control task ended before media");
@@ -1045,6 +1064,7 @@ impl Session {
         audio: &mut broadcast::Receiver<Arc<AudioPacket>>,
         stop: &mut watch::Receiver<bool>,
         progress: Option<&watch::Sender<Option<MediaProgress>>>,
+        flush: mpsc::Sender<FlushRequest>,
     ) -> Result<StreamStats> {
         let mut stats = StreamStats::default();
         let mut last_sync = Instant::now() - Duration::from_secs(2);
@@ -1090,10 +1110,25 @@ impl Session {
                         _ = wait_stop(stop) => break,
                     }
                     if !chunk.source_is_current() { continue; }
-                    if last_source.as_ref().is_some_and(|previous| !previous.same_source_revision(&chunk)) {
+                    let discontinuity = last_source.as_ref().is_some_and(|previous| !previous.same_source_revision(&chunk));
+                    if discontinuity {
                         self.packetizer.clear_retransmit_cache();
+                        self.packetizer.restart_spurt();
                     }
                     let packet = self.packetizer.packetize(&chunk)?;
+                    if discontinuity {
+                        let (reply, accepted) = oneshot::channel();
+                        flush.send(FlushRequest { sequence: packet.header.seq, timestamp: packet.header.timestamp, reply }).await.context("receiver control stopped before FLUSH")?;
+                        tokio::select! {
+                            result = accepted => result.context("receiver control dropped FLUSH")??,
+                            _ = wait_stop(stop) => break,
+                        }
+                        if !chunk.source_is_current() { continue; }
+                        if chunk.play_at(self.latency()).is_none_or(|deadline| deadline <= Instant::now()) {
+                            bail!("PCM packet expired while waiting for FLUSH");
+                        }
+                        last_sync = Instant::now() - Duration::from_secs(2);
+                    }
                     if last_sync.elapsed() >= Duration::from_secs(1) {
                         self.control.send_to(packet.sync.bytes(), self.control_destination).await?;
                         last_sync = Instant::now();
@@ -1142,6 +1177,8 @@ async fn control_owner(
     mut current: Option<Volume>,
     mut peers: Option<PeerChanges>,
     mut metadata: watch::Receiver<Option<TrackMetadata>>,
+    mut flush: mpsc::Receiver<FlushRequest>,
+    session_id: u32,
 ) -> Result<u64> {
     let mut updates = 0;
     let mut requested = false;
@@ -1160,6 +1197,17 @@ async fn control_owner(
             break;
         }
         tokio::select! {
+            Some(request) = flush.recv() => {
+                let result = rtsp.request("FLUSH", None, Vec::new(), None, &[
+                    ("Range", "npt=0-".into()),
+                    ("Session", session_id.to_string()),
+                    ("RTP-Info", format!("seq={};rtptime={}", request.sequence, request.timestamp)),
+                ]).await.map(|_| ());
+                match result {
+                    Ok(()) => { let _ = request.reply.send(Ok(())); }
+                    Err(error) => { let message = format!("FLUSH failed: {error:#}"); let _ = request.reply.send(Err(anyhow!(message.clone()))); bail!(message); }
+                }
+            }
             changed=async {match peers.as_mut() {Some(peers)=>peers.requested.changed().await,None=>std::future::pending().await}}, if peers_open => {
                 match changed {
                     Ok(())=>{
@@ -1675,6 +1723,7 @@ mod tests {
         let (volume, changes) = watch::channel(placeholder);
         let (stop, stopped) = watch::channel(false);
         let (_metadata, no_metadata) = watch::channel(None);
+        let (_flush, flush_rx) = mpsc::channel(1);
         let owner = tokio::spawn(control_owner(
             rtsp,
             changes,
@@ -1682,6 +1731,8 @@ mod tests {
             None,
             None,
             no_metadata,
+            flush_rx,
+            1,
         ));
         assert!(
             timeout(Duration::from_millis(230), received.recv())
@@ -1765,6 +1816,7 @@ mod tests {
         let (metadata, _keep_metadata) = watch::channel(None);
         let session = Session {
             metadata,
+            session_id: 1,
             rtsp: Some(Rtsp::new(
                 Connection::new(client),
                 "rtsp://test/1".into(),
@@ -1837,6 +1889,72 @@ mod tests {
                 .play_at(Duration::from_millis(500))
                 .unwrap()
         );
+        peer.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn source_change_flushes_before_sending_marked_packet() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        let (noticed, observed_flush) = oneshot::channel();
+        let (release, proceed) = oneshot::channel();
+        let peer = tokio::spawn(async move {
+            let mut conn = Connection::new(server);
+            let mut noticed = Some(noticed);
+            let mut proceed = Some(proceed);
+            loop {
+                let request = conn.event_request().await.unwrap();
+                if request.method == "FLUSH" {
+                    noticed.take().unwrap().send(request.headers.get("RTP-Info").unwrap().to_owned()).unwrap();
+                    proceed.take().unwrap().await.unwrap();
+                }
+                let done = request.method == "TEARDOWN";
+                let mut bytes = Vec::new();
+                rtsp::Response::to(&request, 200).encode(&mut bytes);
+                conn.send(&bytes).await.unwrap();
+                if done { break; }
+            }
+        });
+        let receiving = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let audio = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        audio.connect(receiving.local_addr().unwrap()).await.unwrap();
+        let control_peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let config = SessionConfig::new(listener.local_addr().unwrap(), Identity::new("test", "test"));
+        let (metadata, _keep_metadata) = watch::channel(None);
+        let session = Session {
+            session_id: 1, metadata,
+            rtsp: Some(Rtsp::new(Connection::new(client), "rtsp://test/1".into(), "test".into(), 1, Duration::from_secs(1))),
+            packetizer: TargetPacketizer::Ntp(rtp::PcmPacketizer::new([7; 32], 1, 7, config.latency_frames)),
+            config, audio,
+            control: Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap()),
+            control_destination: control_peer.local_addr().unwrap(),
+            _timing_task: None, _event_task: None, peers: None, peer_changes: None,
+        };
+        let (pcm, packets) = broadcast::channel(8);
+        let (_volume, volumes) = watch::channel(Volume::db(-30.0).unwrap());
+        let (stop, stopped) = watch::channel(false);
+        let running = tokio::spawn(session.run(packets, volumes, stopped));
+        let (source, revision) = watch::channel(crate::tx::continuous_source::State::default());
+        let clock = crate::tx::MediaClock::now();
+        pcm.send(Arc::new(clock.packet(0, &[0; crate::tx::PACKET_BYTES]).unwrap().guard_source(revision))).unwrap();
+        let mut bytes = [0; 2048];
+        timeout(Duration::from_secs(1), receiving.recv(&mut bytes)).await.unwrap().unwrap();
+        source.send_replace(crate::tx::continuous_source::State { generation: 1, paused: false });
+        let next = clock.packet(FRAMES_PER_PACKET as u64, &[1; crate::tx::PACKET_BYTES]).unwrap().guard_source(source.subscribe());
+        pcm.send(Arc::new(next)).unwrap();
+        let info = timeout(Duration::from_secs(1), observed_flush).await.unwrap().unwrap();
+        assert!(info.starts_with("seq=8;rtptime="));
+        assert!(timeout(Duration::from_millis(30), receiving.recv(&mut bytes)).await.is_err());
+        release.send(()).unwrap();
+        let size = timeout(Duration::from_secs(1), receiving.recv(&mut bytes)).await.unwrap().unwrap();
+        assert!(size > 12);
+        assert_eq!(bytes[1] & 0x80, 0x80);
+        assert_eq!(u16::from_be_bytes([bytes[2], bytes[3]]), 8);
+        let timestamp = u32::from_be_bytes(bytes[4..8].try_into().unwrap());
+        assert_eq!(info, format!("seq=8;rtptime={timestamp}"));
+        stop.send_replace(true);
+        running.await.unwrap().unwrap();
         peer.await.unwrap();
     }
 
