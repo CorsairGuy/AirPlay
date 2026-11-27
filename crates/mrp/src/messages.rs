@@ -341,7 +341,10 @@ pub fn state(
     queue.int(f::PlaybackQueue::location, 0);
     let wanted = request.is_none_or(|r| {
         use f::PlaybackQueueRequestMessage as q;
-        r.number(q::location).unwrap_or(0) == 0 && r.number(q::length) != Some(0)
+        // Both fields are protobuf int32. A negative length is encoded as a
+        // sign-extended varint and must not be mistaken for a huge positive one.
+        r.number(q::location).unwrap_or(0) == 0
+            && r.number(q::length).is_none_or(|length| (length as i32) > 0)
     });
     if !now.title.is_empty() && wanted {
         queue.node(f::PlaybackQueue::contentItems, &content_item(now, request));
@@ -673,6 +676,25 @@ mod tests {
             item.raw(f::ContentItem::artworkData),
             Some(&[0xff, 0xd8, 0xff][..])
         );
+    }
+
+    #[test]
+    fn one_item_queue_honors_requested_range_and_correlation() {
+        use f::PlaybackQueueRequestMessage as q;
+        let d = device();
+        let now = playing();
+        for (location, length, expected) in [
+            (0, 1, true), (0, 0, false), (1, 1, false),
+            (u64::MAX, 1, false), (0, u64::MAX, false),
+        ] {
+            let mut request = Node::default();
+            request.int(q::location, location).int(q::length, length).text(q::requestID, "range-id");
+            let answer = state(&d, &now, Some(&request), None);
+            let body = answer.nested(f::ProtocolMessage::setStateMessage).unwrap();
+            let queue = body.nested(f::SetStateMessage::playbackQueue).unwrap();
+            assert_eq!(queue.string(f::PlaybackQueue::requestId), Some("range-id"));
+            assert_eq!(queue.raw(f::PlaybackQueue::contentItems).is_some(), expected);
+        }
     }
 
     #[test]
