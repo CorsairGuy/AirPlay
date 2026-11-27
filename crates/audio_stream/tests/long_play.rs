@@ -206,9 +206,16 @@ fn three_hours_of_media_keep_the_queue_bounded() {
     let playout = playout(&captured);
     playout.set_anchor(anchor(0, true));
     let packets = 3 * 3600 * RATE / FRAMES;
+    let started = Instant::now();
     for index in 0..packets {
         playout.push(index.wrapping_mul(FRAMES), 0x1600_0000, vec![0; 8]);
     }
+    let elapsed = started.elapsed();
+    // Виртуальная шкала: три часа медиа проходят за секунды реального времени.
+    assert!(
+        elapsed < Duration::from_secs(120),
+        "стенд не ускоренный: {elapsed:?} на 3 часа медиа"
+    );
     let buffered = playout.buffered_packets();
     assert!(buffered > 0, "вывод не успел забрать ни одного пакета");
     assert!(buffered <= 4096, "очередь выросла до {buffered}");
@@ -237,4 +244,77 @@ fn a_lost_connection_releases_the_buffer_and_a_new_session_starts() {
     assert!(first_position(&captured, 30_000).unwrap() >= before);
     assert!(sample_count(&captured) > before);
     second.stop();
+}
+
+/// Повтор и пропуск меток: дубль не звучит второй раз, пропущенный пакет не
+/// подменяется соседним, а последующие метки сохраняют порядок.
+#[test]
+fn duplicate_and_missing_packets_are_dropped_without_replay() {
+    let captured = Arc::new(Mutex::new(Captured::default()));
+    let playout = playout(&captured);
+    playout.set_anchor(anchor(0, true));
+
+    let mut slot = 0u32;
+    for marker in 0..12i16 {
+        if marker == 5 {
+            slot += 1; // пакет 5 потерян: дырка в таймлайне
+            continue;
+        }
+        playout.push(slot * FRAMES, 0x1600_0000, pcm_packet(marker));
+        if marker == 3 || marker == 7 {
+            // Повтор с той же меткой: вывод уже видел этот пакет.
+            playout.push(slot * FRAMES, 0x1600_0000, pcm_packet(marker));
+        }
+        slot += 1;
+    }
+    wait_for_marker(&captured, 11, 1);
+
+    for marker in [3i16, 7, 11] {
+        let heard = captured
+            .lock()
+            .expect("captured")
+            .samples
+            .iter()
+            .filter(|sample| **sample == marker)
+            .count();
+        // Один пакет — не меньше 2048 сэмплов. Верхняя граница допускает
+        // один повторённый кадр от подстройки курсора, но не второй пакет.
+        let packet = FRAMES as usize * CHANNELS;
+        assert!(
+            (packet..=packet + CHANNELS).contains(&heard),
+            "маркер {marker} прозвучал {heard} сэмплов вместо одного пакета"
+        );
+    }
+    let missing = captured
+        .lock()
+        .expect("captured")
+        .samples
+        .iter()
+        .filter(|sample| **sample == 5)
+        .count();
+    assert_eq!(missing, 0, "потерянный пакет не должен подменяться");
+    playout.stop();
+}
+
+/// Повторный запуск после stop не оставляет очереди и не копит пакеты в
+/// закрытую сессию; буфер каждого запуска ограничен.
+#[test]
+fn repeated_stop_and_restart_leave_no_queue() {
+    let captured = Arc::new(Mutex::new(Captured::default()));
+    for round in 0..20i16 {
+        let playout = playout(&captured);
+        playout.set_anchor(anchor(0, true));
+        for index in 0..600u32 {
+            playout.push(index * FRAMES, 0x1600_0000, pcm_packet(round));
+        }
+        assert!(playout.buffered_packets() <= 4096, "раунд {round}");
+        playout.stop();
+        assert_eq!(playout.buffered_packets(), 0, "раунд {round}");
+        playout.push(0, 0x1600_0000, pcm_packet(round));
+        assert_eq!(
+            playout.buffered_packets(),
+            0,
+            "пакеты после stop в раунде {round}"
+        );
+    }
 }
