@@ -443,6 +443,150 @@ mod tests {
         server.await.unwrap();
     }
 
+    fn error_response(cseq: &str, code: u16) -> Vec<u8> {
+        format!("RTSP/1.0 {code} Failed
+CSeq: {cseq}
+Content-Length: 0
+
+")
+            .into_bytes()
+    }
+
+    /// Приёмник, который отвечает 500 на запрос с индексом `fail_at`
+    /// (SETUP=0, RECORD=1, FLUSH=2) и собирает данные с data-порта.
+    async fn failing_receiver(
+        control: TcpListener,
+        data: TcpListener,
+        fail_at: usize,
+    ) -> (
+        tokio::task::JoinHandle<Vec<String>>,
+        tokio::task::JoinHandle<Vec<u8>>,
+        u16,
+    ) {
+        let data_port = data.local_addr().unwrap().port();
+        let frames = tokio::spawn(async move {
+            let (mut socket, _) = data.accept().await.unwrap();
+            let mut wire = Vec::new();
+            socket.read_to_end(&mut wire).await.unwrap();
+            wire
+        });
+        let requests = tokio::spawn(async move {
+            let (mut socket, _) = control.accept().await.unwrap();
+            let mut buf = Vec::new();
+            let mut methods = Vec::new();
+            let mut chunk = [0u8; 2048];
+            while methods.len() < 4 {
+                let n = socket.read(&mut chunk).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                while let Some(request) = rtsp::decode_request(&mut buf).unwrap() {
+                    let cseq = request
+                        .headers
+                        .get("CSeq")
+                        .map(str::to_owned)
+                        .unwrap_or_default();
+                    let index = methods.len();
+                    methods.push(request.method.clone());
+                    let reply = if index == fail_at {
+                        error_response(&cseq, 500)
+                    } else if request.method == "SETUP" {
+                        ok_response(&cseq, &reply_body(data_port))
+                    } else {
+                        ok_response(&cseq, &[])
+                    };
+                    socket.write_all(&reply).await.unwrap();
+                }
+            }
+            methods
+        });
+        (requests, frames, data_port)
+    }
+
+    async fn session(
+        address: std::net::SocketAddr,
+        config: BufferedConfig,
+    ) -> anyhow::Result<BufferedSession> {
+        let stream = TcpStream::connect(address).await.unwrap();
+        let rtsp = Rtsp::new(
+            Connection::new(stream),
+            "rtsp://127.0.0.1/1".into(),
+            "DACP".into(),
+            1,
+            Duration::from_secs(2),
+        );
+        BufferedSession::start(rtsp, config).await
+    }
+
+    #[tokio::test]
+    async fn record_failure_drops_the_data_link_and_a_new_session_uses_new_keys() {
+        let control = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let control_addr = control.local_addr().unwrap();
+        let data = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (requests, frames, _) = failing_receiver(control, data, 1).await;
+
+        let config = BufferedConfig::aac_44100(control_addr, 7001, [9; 32], 0x1111_1111);
+        let error = match session(control_addr, config).await {
+            Ok(_) => panic!("RECORD с ошибкой не должен давать сессию"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("RECORD"), "{error}");
+
+        let methods = requests.await.unwrap();
+        assert_eq!(methods, ["SETUP", "RECORD"], "до FLUSH дело не дошло");
+        // Сессия брошена: data-порт закрыт, приёмник увидел конец потока.
+        assert!(frames.await.unwrap().is_empty());
+
+        // Повторный запуск — новые ключи, новая сессия, старый ключ не подходит.
+        let control = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let control_addr = control.local_addr().unwrap();
+        let data = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (requests, frames, data_port) = fake_receiver(control, data).await;
+        let mut config = BufferedConfig::aac_44100(control_addr, 7002, [7; 32], 0x2222_2222);
+        config.seq = 10;
+        let mut session = session(control_addr, config).await.unwrap();
+        assert_eq!(session.reply().data_port, data_port);
+        session.send_frame(b"new").await.unwrap();
+        session.finish().await.unwrap();
+        assert_eq!(requests.await.unwrap()[0], "SETUP ");
+
+        let wire = frames.await.unwrap();
+        let mut probe = wire.clone();
+        let mut packet = rtp::split_buffered(&mut probe).expect("пакет новой сессии");
+        let (header, payload) = AudioCipher::new(&[7; 32]).open(&mut packet).unwrap();
+        assert_eq!((header.seq, payload), (10, &b"new"[..]));
+        // Ключ прежней, неудавшейся сессии не открывает новый поток.
+        let mut probe = wire;
+        let mut packet = rtp::split_buffered(&mut probe).unwrap();
+        assert!(
+            AudioCipher::new(&[9; 32]).open(&mut packet).is_none(),
+            "старый ключ не должен подходить новой сессии"
+        );
+    }
+
+    #[tokio::test]
+    async fn flush_failure_still_closes_the_data_link_and_skips_teardown() {
+        let control = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let control_addr = control.local_addr().unwrap();
+        let data = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (requests, frames, _) = failing_receiver(control, data, 2).await;
+
+        let config = BufferedConfig::aac_44100(control_addr, 7003, [5; 32], 1);
+        let mut session = session(control_addr, config).await.unwrap();
+        session.send_frame(b"frame").await.unwrap();
+        let error = session.finish().await.unwrap_err();
+        assert!(error.to_string().contains("FLUSH"), "{error}");
+
+        let methods = requests.await.unwrap();
+        assert_eq!(
+            methods,
+            ["SETUP", "RECORD", "FLUSH"],
+            "TEARDOWN не отправляется после ошибки FLUSH"
+        );
+        assert!(!frames.await.unwrap().is_empty(), "кадр дошёл до data-порта");
+    }
+
     #[test]
     fn config_rejects_zero_ports_and_long_timeouts() {
         let mut config =
