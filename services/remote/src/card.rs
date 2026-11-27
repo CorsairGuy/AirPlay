@@ -555,6 +555,14 @@ mod tests {
                 .validate("ProtocolMessage")
                 .unwrap();
         }
+        // Опустение output не оставляет строк и повторное пустое обновление
+        // ничего не рассылает: карточка не «возвращает» удалённый output.
+        let empty = card.feed.borrow().clone();
+        assert!(empty.outputs.is_empty());
+        assert!(
+            crate::mrp_service::model::topology_updates(&card.identity, &empty, &empty).is_empty(),
+            "повторное пустое обновление не должно слать пакеты"
+        );
     }
 
     #[test]
@@ -716,6 +724,132 @@ mod phase6_tests {
             1,
             0,
         ]
+    }
+
+    fn png(width: u32, height: u32) -> Vec<u8> {
+        let mut body = vec![
+            0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, b'I', b'H', b'D', b'R',
+        ];
+        body.extend(width.to_be_bytes());
+        body.extend(height.to_be_bytes());
+        body
+    }
+
+    #[test]
+    fn zero_and_oversized_images_are_not_shown() {
+        let card = card("dims");
+        card.artwork("image/jpeg", &jpeg(10, 10));
+        assert!(card.feed.borrow().cover.is_some());
+
+        for (width, height) in [(0, 10), (10, 0), (8193, 10), (10, 8193)] {
+            card.artwork("image/jpeg", &jpeg(width, height));
+            assert!(
+                card.feed.borrow().cover.is_none(),
+                "{width}x{height} не должен показываться"
+            );
+            card.artwork("image/jpeg", &jpeg(10, 10));
+        }
+
+        // Нулевая сторона в PNG тоже отклоняется.
+        card.artwork("image/png", &png(0, 5));
+        assert!(card.feed.borrow().cover.is_none());
+        card.artwork("image/png", &png(8192, 1));
+        assert_eq!(
+            card.feed
+                .borrow()
+                .cover
+                .as_ref()
+                .map(|c| (c.width, c.height)),
+            Some((8192, 1)),
+            "предельная сторона допустима"
+        );
+    }
+
+    #[test]
+    fn the_artwork_mime_comes_from_the_bytes() {
+        let card = card("mime");
+        card.artwork("image/jpeg", &png(16, 16));
+        assert_eq!(card.feed.borrow().cover.as_ref().unwrap().mime, "image/png");
+        card.artwork("image/png", &jpeg(16, 16));
+        assert_eq!(
+            card.feed.borrow().cover.as_ref().unwrap().mime,
+            "image/jpeg"
+        );
+    }
+
+    #[test]
+    fn empty_artwork_clears_rather_than_keeps_the_old_cover() {
+        let card = card("empty-art");
+        card.artwork("image/jpeg", &jpeg(8, 8));
+        assert!(card.feed.borrow().cover.is_some());
+        card.artwork("image/jpeg", &[]);
+        assert!(card.feed.borrow().cover.is_none());
+        // Следующий трек получает свою обложку независимо от прошлой.
+        card.metadata(&Metadata {
+            title: Some("new".into()),
+            ..Default::default()
+        });
+        card.artwork("image/jpeg", &jpeg(9, 9));
+        assert_eq!(card.feed.borrow().cover.as_ref().unwrap().width, 9);
+    }
+
+    #[test]
+    fn artwork_dimensions_change_with_the_same_asset_key() {
+        let card = card("range");
+        card.metadata(&Metadata {
+            title: Some("song".into()),
+            ..Default::default()
+        });
+        card.artwork("image/jpeg", &jpeg(100, 100));
+        let mut request = crate::mrp_service::wire::Node::default();
+        request
+            .double(
+                crate::mrp_service::model::f("PlaybackQueueRequestMessage", "artworkWidth"),
+                40.0,
+            )
+            .double(
+                crate::mrp_service::model::f("PlaybackQueueRequestMessage", "artworkHeight"),
+                40.0,
+            );
+        let answer = crate::mrp_service::model::state(
+            &card.identity,
+            &card.feed.borrow(),
+            Some(&request),
+            None,
+        );
+        let body = answer
+            .nested(crate::mrp_service::schema::extension(
+                crate::mrp_service::model::kind("SET_STATE_MESSAGE"),
+            ))
+            .unwrap();
+        let queue = body
+            .nested(crate::mrp_service::model::f(
+                "SetStateMessage",
+                "playbackQueue",
+            ))
+            .unwrap();
+        let item = queue
+            .nested(crate::mrp_service::model::f(
+                "PlaybackQueue",
+                "contentItems",
+            ))
+            .unwrap();
+        // Размеры в данных не масштабируются: отдаётся фактическая картинка с
+        // её реальными размерами, а не запрошенные 40x40.
+        assert_eq!(
+            item.number(crate::mrp_service::model::f(
+                "ContentItem",
+                "artworkDataWidth"
+            )),
+            Some(100)
+        );
+        assert_eq!(
+            item.number(crate::mrp_service::model::f(
+                "ContentItem",
+                "artworkDataHeight"
+            )),
+            Some(100)
+        );
     }
 
     #[test]

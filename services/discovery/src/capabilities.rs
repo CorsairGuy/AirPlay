@@ -877,6 +877,96 @@ mod tests {
 
     /// Одинаково названные колонки на разных хостах — два устройства, а не
     /// одно с двумя адресами.
+    fn endpoints_of(devices: &[Device]) -> Vec<SocketAddr> {
+        devices
+            .iter()
+            .flat_map(|device| device.endpoints.iter().copied())
+            .collect()
+    }
+
+    #[test]
+    fn a_link_local_without_scope_is_not_given_an_invented_one() {
+        let table = table(vec![record(
+            mdns::AIRPLAY,
+            "tv6",
+            "tv6.local.",
+            "fe80::1234",
+            7000,
+            &[("features", "0x5A7FFFF7,0x1E"), ("psi", "UID-V6B")],
+        )]);
+        let Some(SocketAddr::V6(address)) = endpoints_of(&devices(&table)).first().copied() else {
+            panic!("ожидался IPv6");
+        };
+        assert_eq!(
+            address.scope_id(),
+            0,
+            "без scope подключаться нельзя, но выдумывать его тоже нельзя"
+        );
+    }
+
+    #[test]
+    fn ipv4_mapped_ipv6_is_not_silently_collapsed_to_ipv4() {
+        let table = table(vec![record(
+            mdns::AIRPLAY,
+            "mapped",
+            "mapped.local.",
+            "::ffff:192.0.2.5",
+            7000,
+            &[("features", "0x5A7FFFF7,0x1E"), ("psi", "UID-MAPPED")],
+        )]);
+        let endpoints = endpoints_of(&devices(&table));
+        let Some(SocketAddr::V6(address)) = endpoints.first() else {
+            panic!("ожидался IPv6-сокет, получены {endpoints:?}");
+        };
+        assert!(
+            address.ip().to_ipv4_mapped().is_some(),
+            "адрес остаётся mapped-формой, семейство не подменяется"
+        );
+    }
+
+    #[test]
+    fn two_addresses_of_one_device_stay_two_endpoints() {
+        let table = table(vec![record(
+            mdns::AIRPLAY,
+            "multi",
+            "multi.local.",
+            "fe80::1,192.0.2.7",
+            7000,
+            &[("features", "0x5A7FFFF7,0x1E"), ("psi", "UID-MULTI")],
+        )]);
+        let addresses = endpoints_of(&devices(&table));
+        assert_eq!(
+            addresses.len(),
+            2,
+            "адреса одной записи не схлопываются: {addresses:?}"
+        );
+        assert!(
+            addresses
+                .iter()
+                .any(|address| matches!(address, SocketAddr::V4(_)))
+        );
+        assert!(
+            addresses
+                .iter()
+                .any(|address| matches!(address, SocketAddr::V6(_)))
+        );
+    }
+
+    #[test]
+    fn the_receiver_port_comes_from_the_advertisement() {
+        let table = table(vec![record(
+            mdns::AIRPLAY,
+            "port",
+            "port.local.",
+            "192.0.2.8",
+            7100,
+            &[("features", "0x5A7FFFF7,0x1E"), ("psi", "UID-PORT")],
+        )]);
+        let endpoints = endpoints_of(&devices(&table));
+        assert_eq!(endpoints.len(), 1);
+        assert_eq!(endpoints[0].port(), 7100);
+    }
+
     #[test]
     fn identically_named_devices_stay_separate() {
         let table = table(vec![
