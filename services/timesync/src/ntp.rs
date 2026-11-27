@@ -303,4 +303,87 @@ mod tests {
         assert!(received.wrapping_sub(before) <= span);
         assert!(transmitted.wrapping_sub(before) <= span);
     }
+
+    /// Симметричный обмен: t2=t3=t1+offset+q, t4=t1+rtt, q=rtt/2 — тогда
+    /// формула `((t2-t1)+(t3-t4))/2` даёт ровно `offset`.
+    fn sample_reply(t1: u64, offset: i64, rtt: i64) -> [u8; 32] {
+        let mut resp = [0u8; 32];
+        resp[8..16].copy_from_slice(&ns_to_ntp(t1));
+        let t2 = t1 as i64 + offset + rtt / 2;
+        resp[16..24].copy_from_slice(&ns_to_ntp(t2 as u64));
+        resp[24..32].copy_from_slice(&ns_to_ntp(t2 as u64));
+        resp
+    }
+
+    #[test]
+    fn stale_sample_stops_the_mapping_and_a_fresh_reply_restores_it() {
+        let clock = NtpClock::default();
+        let t1 = local_ns();
+        let resp = sample_reply(t1, 5_000_000_000, 200_000);
+        clock.on_reply(&resp, t1 + 200_000);
+        assert!(clock.ntp_offset().is_some());
+        assert!(clock.offset(NTP_TIMELINE).is_some());
+
+        // Срок давности истёк: формальное наличие значения не заменяет свежесть.
+        {
+            let mut state = clock.0.lock().unwrap();
+            state.last_received =
+                Some(Instant::now() - MAX_SAMPLE_AGE - Duration::from_millis(1));
+        }
+        assert!(clock.ntp_offset().is_none());
+        assert!(clock.offset(NTP_TIMELINE).is_none(), "устаревший mapping не отдаётся плееру");
+
+        // Новый ответ очищает историю и снова даёт mapping.
+        let t1 = local_ns();
+        let resp = sample_reply(t1, 7_000_000_000, 200_000);
+        clock.on_reply(&resp, t1 + 200_000);
+        let offset = clock.ntp_offset().unwrap();
+        assert!((offset - 7_000_000_000).abs() < 1_000, "{offset}");
+        assert_eq!(clock.0.lock().unwrap().recent.len(), 1, "старые сэмплы сброшены");
+    }
+
+    #[test]
+    fn the_lowest_rtt_sample_wins() {
+        let clock = NtpClock::default();
+        let t1 = local_ns();
+        // Первый сэмпл: смещение 1 мс, RTT 2 мс.
+        let slow = sample_reply(t1, 1_000_000, 2_000_000);
+        clock.on_reply(&slow, t1 + 2_000_000);
+        // Второй: смещение 5 мс, RTT близок к нулю — он точнее.
+        let fast = sample_reply(t1, 5_000_000, 100_000);
+        clock.on_reply(&fast, t1 + 100_000);
+        let offset = clock.ntp_offset().unwrap();
+        assert!((offset - 5_000_000).abs() < 1_000, "{offset}");
+    }
+
+    #[test]
+    fn replies_with_zero_or_reversed_server_time_are_ignored() {
+        let clock = NtpClock::default();
+        let t1 = local_ns();
+        let mut zero = sample_reply(t1, 0, 100_000);
+        zero[16..24].fill(0);
+        clock.on_reply(&zero, t1 + 100_000);
+        assert!(clock.ntp_offset().is_none(), "t2=0 не принимается");
+
+        let mut reversed = sample_reply(t1, 0, 100_000);
+        reversed[24..32].copy_from_slice(&ns_to_ntp(t1.saturating_sub(1_000_000)));
+        clock.on_reply(&reversed, t1 + 100_000);
+        assert!(clock.ntp_offset().is_none(), "t3<t2 не принимается");
+
+        let short = [0u8; 16];
+        clock.on_reply(&short, t1);
+        assert!(clock.ntp_offset().is_none());
+    }
+
+    #[test]
+    fn only_the_ntp_timeline_is_mapped() {
+        let clock = NtpClock::default();
+        let t1 = local_ns();
+        let resp = sample_reply(t1, 3_000_000_000, 100_000);
+        clock.on_reply(&resp, t1 + 100_000);
+        assert!(clock.offset(NTP_TIMELINE).is_some());
+        for timeline in [0, 1, 2, NTP_TIMELINE.wrapping_add(1)] {
+            assert!(clock.offset(timeline).is_none(), "timeline {timeline}");
+        }
+    }
 }
