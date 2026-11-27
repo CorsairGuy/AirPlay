@@ -8,6 +8,16 @@
 //! отстаёт или спешит больше чем на полмиллисекунды, в очередной пакет
 //! добавляем или из него выбрасываем один кадр. На слух это незаметно, в
 //! отличие от ресемплинга не стоит процессору ничего.
+//!
+//! Долгая сессия переживает перезапуск отправителя: новую шкалу меток
+//! объявляет сам отправитель (`FLUSH` с `RTP-Info`, [`Playout::rebase`]), а
+//! без объявления шкала начинается заново только после серии пакетов с новой
+//! меткой. Одиночный запоздавший пакет из прошлой эпохи не меняет шкалу и не
+//! сдвигает `played_through`: он отбрасывается. При подтверждённой смене очередь
+//! очищается, отметка о проигранном сбрасывается, якорь переставляется на
+//! новую метку, и до следующего якоря отправителя вывод идёт по своим часам.
+//! Без этого сброс метки заворачивался через 32-битную арифметику в «далёкое
+//! будущее» и поток замирал навсегда.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -27,6 +37,12 @@ const RESYNC_NS: i64 = 100_000_000;
 /// Предел очереди пакетов (около полутора минут AAC 44,1 кГц): сессия на
 /// паузе или ушедший вперёд отправитель не должны съедать память без предела.
 const MAX_BUFFERED_PACKETS: usize = 4096;
+/// Скачок метки больше этого числа секунд — не джиттер, а новая шкала
+/// (перезапуск отправителя или потеря сессии).
+pub const MAX_TS_JUMP_SECS: i64 = 10;
+/// Сколько пакетов подряд должно подтвердить новую шкалу. Одиночный
+/// запоздавший пакет из прошлой эпохи её не меняет.
+const EPOCH_CONFIRM_PACKETS: usize = 3;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -87,6 +103,28 @@ impl Unwrap {
             Some((last, ext)) => ext + rtp::ts_diff(ts, last) as i64,
         }
     }
+
+    /// Новая шкала: метка `ts` становится началом отсчёта.
+    fn reset(&mut self, ts: u32) {
+        self.last = Some((ts, ts as i64));
+    }
+}
+
+/// Прыжок больше допустимого означает новую шкалу времени, а не джиттер.
+fn is_discontinuity(delta_frames: i64, rate: i64) -> bool {
+    delta_frames.abs() > rate * MAX_TS_JUMP_SECS
+}
+
+/// Пакеты, которые могут быть началом новой шкалы меток. До подтверждения
+/// они не попадают в очередь: иначе одиночный запоздавший пакет звучал бы в
+/// старой эпохе или занимал место под метки, которых не будет.
+#[derive(Default)]
+struct Pending {
+    /// Метка первого пакета кандидата — от неё начнётся новая шкала.
+    base: u32,
+    /// Метка последнего принятого пакета кандидата.
+    last: u32,
+    packets: Vec<(u32, u32, Vec<u8>)>,
 }
 
 #[derive(Default)]
@@ -107,8 +145,112 @@ struct State {
     epoch: u64,
     /// Самая поздняя метка, которую вывод уже прошёл (или выбросил).
     /// Пакет с более ранней меткой опоздал и не должен звучать заново.
+    /// При подтверждённой смене шкалы сбрасывается: она относится к прежним
+    /// меткам и иначе задержала бы весь новый поток.
     played_through: Option<i64>,
+    /// Самая поздняя расширенная метка текущей шкалы. От неё считается
+    /// расхождение с новым пакетом, поэтому кандидат на новую шкалу её не
+    /// двигает: одиночный пакет не должен выглядеть как перезапуск.
+    high_water: Option<i64>,
+    /// Пакеты, которые могут быть началом новой шкалы.
+    pending: Option<Pending>,
+    /// Сколько раз шкала меток начиналась заново.
+    resyncs: u64,
     stopped: bool,
+}
+
+impl State {
+    /// Кладёт пакет в очередь на текущей шкале.
+    fn store(&mut self, timestamp: u32, ssrc: u32, payload: Vec<u8>) {
+        let ext = self.unwrap.peek(timestamp);
+        // Дубль или пакет, который вывод уже прошёл: первый вариант уже
+        // прозвучал (или был выброшен), повторять его нельзя.
+        if self.packets.contains_key(&ext)
+            || self.played_through.is_some_and(|played| ext <= played)
+        {
+            debug!(ext, "пакет уже играл или повторён, отброшен");
+            return;
+        }
+        let ext = self.unwrap.extend(timestamp);
+        self.high_water = Some(self.high_water.map_or(ext, |hw| hw.max(ext)));
+        self.packets.insert(ext, Packet { ssrc, payload });
+        if self.packets.len() > MAX_BUFFERED_PACKETS {
+            let excess = self.packets.len() - MAX_BUFFERED_PACKETS;
+            let stale: Vec<i64> = self.packets.keys().take(excess).copied().collect();
+            for ts in stale {
+                self.packets.remove(&ts);
+            }
+            debug!(
+                dropped = excess,
+                "буфер переполнен, старые пакеты отброшены"
+            );
+        }
+    }
+
+    /// Пакет далеко от текущей шкалы. Одиночный такой пакет — опоздавший,
+    /// шкалу меняет только серия из [`EPOCH_CONFIRM_PACKETS`] подряд.
+    /// Возвращает `true`, если новая шкала подтверждена и очередь перестроена.
+    fn consider_new_epoch(
+        &mut self,
+        timestamp: u32,
+        ssrc: u32,
+        payload: Vec<u8>,
+        rate: i64,
+    ) -> bool {
+        let continues = self.pending.as_ref().is_some_and(|p| {
+            let step = rtp::ts_diff(timestamp, p.last) as i64;
+            (0..=rate).contains(&step)
+        });
+        if continues {
+            if let Some(p) = self.pending.as_mut() {
+                p.last = timestamp;
+                p.packets.push((timestamp, ssrc, payload));
+            }
+        } else {
+            self.pending = Some(Pending {
+                base: timestamp,
+                last: timestamp,
+                packets: vec![(timestamp, ssrc, payload)],
+            });
+        }
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|p| p.packets.len() < EPOCH_CONFIRM_PACKETS)
+        {
+            return false;
+        }
+        let Some(pending) = self.pending.take() else {
+            return false;
+        };
+        info!(
+            packets = pending.packets.len(),
+            "разрыв меток времени: поток начинается заново"
+        );
+        self.packets.clear();
+        self.played_through = None;
+        self.unwrap.reset(pending.base);
+        self.high_water = None;
+        // Прежний якорь относится к старой шкале: до следующего якоря
+        // отправителя играем по своим часам — путь realtime-потока без PTP.
+        if self.anchor.is_some() {
+            let playing = self.anchor.is_some_and(|a| a.playing);
+            self.anchor = Some(Anchor {
+                rtp: pending.last,
+                network_ns: 0,
+                timeline: 0,
+                playing,
+            });
+            self.local_anchor = true;
+            self.fallback_local_ns = now_ns() as i64;
+        }
+        self.epoch += 1;
+        self.resyncs += 1;
+        for (ts, ssrc, payload) in pending.packets {
+            self.store(ts, ssrc, payload);
+        }
+        true
+    }
 }
 
 pub struct Playout {
@@ -153,25 +295,27 @@ impl Playout {
             // Сессия закрыта, а подключение ещё живёт: не копим пакеты в никуда.
             return;
         }
+        let rate = s
+            .format
+            .or_else(|| Format::from_ssrc(ssrc))
+            .map_or(44_100, |f| f.sample_rate.max(1)) as i64;
         let ext = s.unwrap.peek(timestamp);
-        // Дубль или пакет, который вывод уже прошёл: первый вариант уже
-        // прозвучал (или был выброшен), повторять его нельзя.
-        if s.packets.contains_key(&ext) || s.played_through.is_some_and(|played| ext <= played) {
-            debug!(ext, "пакет уже играл или повторён, отброшен");
-            return;
-        }
-        let ext = s.unwrap.extend(timestamp);
-        s.packets.insert(ext, Packet { ssrc, payload });
-        if s.packets.len() > MAX_BUFFERED_PACKETS {
-            let excess = s.packets.len() - MAX_BUFFERED_PACKETS;
-            let stale: Vec<i64> = s.packets.keys().take(excess).copied().collect();
-            for ts in stale {
-                s.packets.remove(&ts);
+        if s.high_water
+            .is_some_and(|hw| is_discontinuity(ext - hw, rate))
+        {
+            if !s.consider_new_epoch(timestamp, ssrc, payload, rate) {
+                // Кандидат ещё не подтверждён: пакет ждёт в нём, а не в очереди.
+                return;
             }
-            debug!(
-                dropped = excess,
-                "буфер переполнен, старые пакеты отброшены"
-            );
+        } else {
+            // Поток идёт на прежней шкале: кандидат был одиночным пакетом.
+            if let Some(held) = s.pending.take() {
+                debug!(
+                    held = held.packets.len(),
+                    "кандидат на новую шкалу отброшен"
+                );
+            }
+            s.store(timestamp, ssrc, payload);
         }
         drop(s);
         self.changed();
@@ -244,6 +388,9 @@ impl Playout {
     /// FLUSHBUFFERED: выбросить пакеты с `from` (если задано) до `until`.
     pub fn flush(&self, from: Option<u32>, until: u32) {
         let mut s = self.lock();
+        // Отправитель переопределил поток: неподтверждённый кандидат к нему
+        // уже не относится.
+        s.pending = None;
         let until = s.unwrap.peek(until);
         let from = from.map(|f| s.unwrap.peek(f));
         let before = s.packets.len();
@@ -276,10 +423,43 @@ impl Playout {
     /// (перемотка, смена трека).
     pub fn clear(&self) {
         let mut s = self.lock();
+        s.pending = None;
         let dropped = s.packets.len();
         s.packets.clear();
         s.epoch += 1;
         debug!(dropped, "FLUSH: буфер очищен");
+        drop(s);
+        self.changed();
+    }
+
+    /// Отправитель сам объявил метку новой шкалы (`FLUSH` с `RTP-Info`):
+    /// очередь и отметка о проигранном сбрасываются, отсчёт начинается с
+    /// `rtp`. Это надёжный сигнал смены эпохи — серия пакетов для него не
+    /// нужна, первый же пакет новой шкалы попадает в очередь. Остаётся
+    /// эвристика по скачку для потока, который сменил шкалу без объявления.
+    pub fn rebase(&self, rtp: u32) {
+        let mut s = self.lock();
+        s.pending = None;
+        let dropped = s.packets.len();
+        s.packets.clear();
+        s.unwrap.reset(rtp);
+        s.played_through = None;
+        // Опорная точка новой шкалы: пакеты прежней шкалы далеко позади не
+        // попадут в очередь, а станут кандидатом на новую смену.
+        s.high_water = Some(rtp as i64);
+        if let Some(anchor) = s.anchor {
+            s.anchor = Some(Anchor {
+                rtp,
+                network_ns: 0,
+                timeline: 0,
+                playing: anchor.playing,
+            });
+            s.local_anchor = true;
+            s.fallback_local_ns = now_ns() as i64;
+        }
+        s.epoch += 1;
+        s.resyncs += 1;
+        info!(rtp, dropped, "отправитель объявил новую шкалу меток");
         drop(s);
         self.changed();
     }
@@ -306,12 +486,20 @@ impl Playout {
         let mut s = self.lock();
         s.stopped = true;
         s.packets.clear();
+        s.pending = None;
         drop(s);
         self.changed();
     }
 
     pub fn buffered_packets(&self) -> usize {
         self.lock().packets.len()
+    }
+
+    /// Сколько раз шкала меток времени начиналась заново: объявленная
+    /// отправителем (`FLUSH` с `RTP-Info`) или подтверждённая серией пакетов.
+    /// Штатный FLUSH без смены метки меняет эпоху, но счётчик не увеличивает.
+    pub fn resync_count(&self) -> u64 {
+        self.lock().resyncs
     }
 }
 
@@ -675,6 +863,221 @@ mod s13_tests {
         let s = p.lock();
         let first = *s.packets.keys().next().unwrap();
         assert!(first > 0, "старые пакеты должны быть выброшены");
+    }
+}
+
+#[cfg(test)]
+mod epoch_tests {
+    use super::*;
+
+    impl Playout {
+        /// Плейаут без потока вывода: проверяем только состояние очереди.
+        fn inert() -> Self {
+            let shared = Arc::new((Mutex::new(State::default()), Condvar::new()));
+            Self {
+                shared,
+                offsets: (0, None),
+            }
+        }
+    }
+
+    const AAC_44100: u32 = 0x1600_0000;
+
+    fn keys(p: &Playout) -> Vec<i64> {
+        p.lock().packets.keys().copied().collect()
+    }
+
+    #[test]
+    fn discontinuity_threshold_is_ten_seconds() {
+        let rate = 44_100;
+        assert!(!is_discontinuity(rate * 9, rate));
+        assert!(!is_discontinuity(0, rate));
+        assert!(!is_discontinuity(-rate * 9, rate));
+        assert!(is_discontinuity(rate * 10 + 1, rate));
+        assert!(is_discontinuity(-rate * 10 - 1, rate));
+    }
+
+    #[test]
+    fn single_late_packet_does_not_start_a_new_epoch() {
+        let p = Playout::inert();
+        p.push(1_000_000_000, AAC_44100, vec![1]);
+        p.push(1_000_000_352, AAC_44100, vec![2]);
+        let before = keys(&p);
+        // Один запоздавший пакет из прошлой эпохи.
+        p.push(0, AAC_44100, vec![9]);
+        assert_eq!(p.resync_count(), 0);
+        assert_eq!(keys(&p), before, "пакет не попал в очередь");
+        // Поток продолжается на прежней шкале.
+        p.push(1_000_000_704, AAC_44100, vec![3]);
+        assert_eq!(p.resync_count(), 0);
+        assert_eq!(keys(&p), vec![1_000_000_000, 1_000_000_352, 1_000_000_704]);
+        assert!(p.lock().pending.is_none());
+    }
+
+    #[test]
+    fn single_forward_jump_does_not_start_a_new_epoch() {
+        let p = Playout::inert();
+        p.push(352_000, AAC_44100, vec![1]);
+        // Один пакет на 30 секунд вперёд.
+        p.push(352_000 + 44_100 * 30, AAC_44100, vec![2]);
+        assert_eq!(p.resync_count(), 0);
+        p.push(352_000 + 352, AAC_44100, vec![3]);
+        assert_eq!(p.resync_count(), 0);
+        assert_eq!(keys(&p), vec![352_000, 352_352], "пакет вперёд отброшен");
+    }
+
+    #[test]
+    fn two_packets_are_not_enough_to_rebase() {
+        let p = Playout::inert();
+        p.push(1_000_000_000, AAC_44100, vec![1]);
+        p.push(0, AAC_44100, vec![2]);
+        p.push(1024, AAC_44100, vec![3]);
+        assert_eq!(p.resync_count(), 0);
+        // Поток вернулся на прежнюю шкалу: кандидат отброшен.
+        p.push(1_000_000_352, AAC_44100, vec![4]);
+        assert_eq!(p.resync_count(), 0);
+        assert_eq!(keys(&p), vec![1_000_000_000, 1_000_000_352]);
+    }
+
+    #[test]
+    fn confirmed_restart_rebases_the_queue() {
+        let p = Playout::inert();
+        p.push(1_000_000_000, AAC_44100, vec![1]);
+        p.push(1_000_000_352, AAC_44100, vec![2]);
+        for (i, ts) in [0u32, 1024, 2048].into_iter().enumerate() {
+            p.push(ts, AAC_44100, vec![10 + i as u8]);
+        }
+        assert_eq!(p.resync_count(), 1);
+        assert_eq!(keys(&p), vec![0, 1024, 2048], "новая шкала от нуля");
+        let s = p.lock();
+        let payloads: Vec<u8> = s.packets.values().map(|p| p.payload[0]).collect();
+        assert_eq!(payloads, vec![10, 11, 12], "пакеты кандидата сохранены");
+        assert_eq!(s.high_water, Some(2048));
+        assert_eq!(s.played_through, None, "старая отметка не действует");
+    }
+
+    #[test]
+    fn rebase_keeps_playing_and_reanchors() {
+        let p = Playout::inert();
+        p.play_from(1_000_000_000);
+        p.push(1_000_000_000, AAC_44100, vec![1]);
+        for ts in [0u32, 1024, 2048] {
+            p.push(ts, AAC_44100, vec![2]);
+        }
+        let s = p.lock();
+        assert_eq!(s.resyncs, 1);
+        assert!(s.local_anchor, "до нового якоря — свои часы");
+        let anchor = s.anchor.as_ref().expect("якорь есть");
+        assert!(anchor.playing, "играть продолжаем");
+        assert_eq!(anchor.rtp, 2048);
+    }
+
+    #[test]
+    fn old_played_through_does_not_block_the_new_scale() {
+        let p = Playout::inert();
+        p.push(1_000_000_000, AAC_44100, vec![1]);
+        p.lock().played_through = Some(1_000_000_000);
+        for ts in [0u32, 1024, 2048] {
+            p.push(ts, AAC_44100, vec![2]);
+        }
+        assert_eq!(p.resync_count(), 1);
+        assert_eq!(p.buffered_packets(), 3);
+        assert_eq!(keys(&p), vec![0, 1024, 2048]);
+    }
+
+    #[test]
+    fn flush_drops_a_pending_candidate() {
+        let p = Playout::inert();
+        p.push(1_000_000_000, AAC_44100, vec![1]);
+        p.push(0, AAC_44100, vec![2]);
+        assert!(p.lock().pending.is_some());
+        p.flush(None, 1_000_000_000);
+        assert!(p.lock().pending.is_none());
+        assert_eq!(p.resync_count(), 0);
+    }
+
+    #[test]
+    fn declared_scale_rebases_without_waiting_for_a_series() {
+        let p = Playout::inert();
+        p.play_from(1_000_000_000);
+        p.push(1_000_000_000, AAC_44100, vec![1]);
+        p.lock().played_through = Some(1_000_000_000);
+        p.rebase(0);
+        assert_eq!(p.resync_count(), 1);
+        assert_eq!(p.buffered_packets(), 0, "очередь прежней шкалы брошена");
+        p.push(0, AAC_44100, vec![2]);
+        assert_eq!(keys(&p), vec![0], "первый пакет сразу на новой шкале");
+        let s = p.lock();
+        assert_eq!(s.played_through, None, "старая отметка не действует");
+        assert_eq!(s.high_water, Some(0));
+        let anchor = s.anchor.as_ref().expect("якорь есть");
+        assert!(anchor.playing, "играть продолжаем");
+        assert_eq!(anchor.rtp, 0);
+        assert!(s.local_anchor, "до нового якоря — свои часы");
+    }
+
+    #[test]
+    fn packets_from_the_previous_scale_wait_after_a_declared_rebase() {
+        let p = Playout::inert();
+        p.push(1_000_000_000, AAC_44100, vec![1]);
+        p.rebase(0);
+        // Запоздавший пакет прежней шкалы не попадает в очередь нового потока.
+        p.push(1_000_000_352, AAC_44100, vec![2]);
+        assert_eq!(p.buffered_packets(), 0);
+        assert_eq!(p.resync_count(), 1, "шкала уже объявлена отправителем");
+        p.push(352, AAC_44100, vec![3]);
+        assert_eq!(keys(&p), vec![352]);
+        assert!(p.lock().pending.is_none(), "кандидат отброшен потоком");
+    }
+
+    #[test]
+    fn alternating_scales_never_confirm_a_new_epoch() {
+        let p = Playout::inert();
+        p.push(500_000_000, AAC_44100, vec![0]);
+        // Два получателя/две шкалы: пары пакетов чередуются и серия не набирается.
+        for round in 0..8u32 {
+            p.push(round, AAC_44100, vec![1]);
+            p.push(500_000_000 + round * 352, AAC_44100, vec![2]);
+        }
+        assert_eq!(p.resync_count(), 0);
+        // Пакеты действующей шкалы идут в очередь, пакеты-выскочки — нет.
+        let scale: Vec<i64> = (0..=7).map(|r| 500_000_000 + r * 352).collect();
+        assert_eq!(keys(&p), scale, "прежняя шкала не тронута");
+    }
+
+    #[test]
+    fn long_session_keeps_one_scale_through_losses_and_reordering() {
+        let p = Playout::inert();
+        // Около трёх минут 44,1 кГц: потери и перестановки внутри окна.
+        let mut last = 0u32;
+        for i in 0..20_000u32 {
+            let ts = i.wrapping_mul(352);
+            if i % 97 == 0 {
+                continue; // потеря
+            }
+            if i % 53 == 0 && i > 0 {
+                p.push(last, AAC_44100, vec![1]); // повтор
+            }
+            p.push(ts, AAC_44100, vec![2]);
+            last = ts;
+        }
+        assert_eq!(p.resync_count(), 0, "без объявления шкала не менялась");
+        let s = p.lock();
+        assert_eq!(s.packets.len(), MAX_BUFFERED_PACKETS);
+        assert_eq!(s.high_water, Some(19_999 * 352));
+        assert!(
+            s.played_through.is_none(),
+            "без вывода отметка не выставляется сама"
+        );
+    }
+
+    #[test]
+    fn wrap_around_is_not_a_discontinuity() {
+        let p = Playout::inert();
+        p.push(u32::MAX - 100, AAC_44100, vec![1]);
+        p.push(252, AAC_44100, vec![2]);
+        assert_eq!(p.resync_count(), 0);
+        assert_eq!(p.buffered_packets(), 2);
     }
 }
 
