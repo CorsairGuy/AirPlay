@@ -253,6 +253,42 @@ fn repeated_stop_and_restart_leave_no_queue() {
         playout.stop();
         assert_eq!(playout.buffered_packets(), 0, "round {round}");
         playout.push(0, 0x1600_0000, pcm_packet(round));
-        assert_eq!(playout.buffered_packets(), 0, "push after stop, round {round}");
+        assert_eq!(
+            playout.buffered_packets(),
+            0,
+            "push after stop, round {round}"
+        );
+    }
+}
+
+/// Duplicate timestamps carry different markers so a replay is observable
+/// even when the playout clock adjusts the exact number of output samples.
+#[test]
+fn duplicate_timestamps_do_not_emit_replacement_payloads() {
+    let captured = Arc::new(Mutex::new(Captured::default()));
+    let playout = playout(&captured);
+    playout.set_anchor(anchor(0, false));
+    for marker in 1..12i16 {
+        if marker == 5 {
+            continue;
+        }
+        let timestamp = marker as u32 * FRAMES;
+        playout.push(timestamp, 0x1600_0000, pcm_packet(marker));
+        if marker == 3 || marker == 7 {
+            playout.push(timestamp, 0x1600_0000, pcm_packet(marker + 100));
+        }
+    }
+    playout.set_anchor(anchor(0, true));
+    wait_for_marker(&captured, 11, 1);
+    playout.stop();
+    let samples = captured.lock().unwrap();
+    for forbidden in [5, 103, 107] {
+        assert!(
+            !samples.samples.contains(&forbidden),
+            "unexpected marker {forbidden}"
+        );
+    }
+    for marker in [3, 7, 11] {
+        assert!(samples.samples.contains(&marker), "missing marker {marker}");
     }
 }
