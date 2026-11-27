@@ -34,6 +34,9 @@ pub struct Card {
     outputs: Option<crate::output_control::OutputControl>,
     groups: Arc<crate::mrp_service::control::GroupControlState>,
     source: crate::continuous_control::SourceControl,
+    /// Хеш обложки, снятой при смене трека: позднее событие с этими же
+    /// байтами принадлежит предыдущему элементу и не должно попасть в новый.
+    stale_cover: std::sync::Mutex<Option<String>>,
 }
 
 /// SHA-256 в hex, как `hash()` в sources.rs станции.
@@ -203,6 +206,7 @@ impl Card {
             outputs,
             groups: Default::default(),
             source: Default::default(),
+            stale_cover: std::sync::Mutex::new(None),
         })
     }
 
@@ -306,7 +310,10 @@ impl Events for Card {
                 feed.artist.clear();
                 feed.album.clear();
                 feed.duration = None;
-                feed.cover = None;
+                let cleared = feed.cover.take();
+                if let Ok(mut stale) = self.stale_cover.lock() {
+                    *stale = cleared.map(|cover| cover.id);
+                }
                 feed.position = 0.0;
                 feed.position_sampled = std::time::Instant::now();
             }
@@ -334,6 +341,21 @@ impl Events for Card {
     }
 
     fn artwork(&self, mime: &str, data: &[u8]) {
+        // DMAP-артворк не несёт идентификатора трека. Если байты совпадают с
+        // обложкой, снятой при смене элемента, это позднее событие прошлого
+        // трека: карточку оно не меняет.
+        let id = hash(data);
+        {
+            let mut stale = match self.stale_cover.lock() {
+                Ok(stale) => stale,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if stale.as_deref() == Some(id.as_str()) {
+                self.inner.artwork(mime, data);
+                return;
+            }
+            *stale = None;
+        }
         // Как sources.rs станции: только картинка с известными размерами.
         let cover = image_info(data)
             .filter(|(_, w, h)| (1..=8192).contains(w) && (1..=8192).contains(h))
@@ -716,6 +738,79 @@ mod phase6_tests {
             1,
             0,
         ]
+    }
+
+    #[test]
+    fn a_late_artwork_of_the_previous_track_is_ignored() {
+        let card = card("late");
+        let old = jpeg(100, 100);
+        card.artwork("image/jpeg", &old);
+        let old_id = card.feed.borrow().cover.as_ref().unwrap().id.clone();
+
+        card.metadata(&::media::events::Metadata {
+            title: Some("next".into()),
+            ..Default::default()
+        });
+        assert!(card.feed.borrow().cover.is_none(), "новая карточка без обложки");
+        let next_id = card.feed.borrow().content_id.clone();
+
+        // Поздний артворк предыдущего трека: байты те же.
+        card.artwork("image/jpeg", &old);
+        assert!(
+            card.feed.borrow().cover.is_none(),
+            "обложка прошлого трека не достаётся новому"
+        );
+        assert_eq!(card.feed.borrow().content_id, next_id);
+
+        // Настоящая новая обложка принимается и снимает «устаревшую» метку.
+        let fresh = jpeg(120, 90);
+        card.artwork("image/jpeg", &fresh);
+        let cover = card.feed.borrow().cover.as_ref().unwrap().clone();
+        assert_eq!(cover.id, hash(&fresh));
+        assert_ne!(cover.id, old_id);
+        card.artwork("image/jpeg", &old);
+        assert_eq!(
+            card.feed.borrow().cover.as_ref().unwrap().id,
+            hash(&old),
+            "фильтр действует только сразу после смены трека"
+        );
+    }
+
+    #[test]
+    fn a_duration_only_update_keeps_the_track_and_its_cover() {
+        let card = card("dur");
+        card.metadata(&::media::events::Metadata {
+            title: Some("song".into()),
+            artist: Some("artist".into()),
+            ..Default::default()
+        });
+        card.artwork("image/jpeg", &jpeg(64, 64));
+        let content_id = card.feed.borrow().content_id.clone();
+        card.metadata(&::media::events::Metadata {
+            duration: Some(std::time::Duration::from_secs(200)),
+            ..Default::default()
+        });
+        let feed = card.feed.borrow();
+        assert_eq!(feed.title, "song");
+        assert_eq!(feed.artist, "artist");
+        assert_eq!(feed.duration, Some(200.0));
+        assert!(feed.cover.is_some());
+        assert_eq!(feed.content_id, content_id, "content id не менялся");
+    }
+
+    #[test]
+    fn pause_and_reconnect_keep_the_current_item() {
+        let card = card("pause");
+        card.metadata(&::media::events::Metadata {
+            title: Some("song".into()),
+            ..Default::default()
+        });
+        card.playing(false);
+        assert!(!card.feed.borrow().playing);
+        assert_eq!(card.feed.borrow().title, "song");
+        let content_id = card.feed.borrow().content_id.clone();
+        card.playing(true);
+        assert_eq!(card.feed.borrow().content_id, content_id);
     }
 
     #[test]
