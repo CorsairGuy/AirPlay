@@ -1120,4 +1120,54 @@ mod tests {
         assert!(device_by_id(&table, "Кухня").is_none());
         assert!(device_by_id(&table, "AA:BB:CC:DD:EE:01").is_some());
     }
+
+    /// Таблица вход→решение: каждый объявленный профиль либо запускается,
+    /// либо получает свой код отказа; отсутствующие features важнее запроса.
+    #[test]
+    fn refusal_table_covers_all_declared_profiles() {
+        fn outcome(device: &Device, want: Want) -> String {
+            match select(device, want) {
+                Selection::Start { profile, .. } => profile.label().to_string(),
+                Selection::Refuse(refusal) => format!("{:?}", refusal.code),
+            }
+        }
+        fn device_with(features: Option<&str>) -> Device {
+            let mut txt = vec![("deviceid", "AA:BB:CC:DD:EE:FF")];
+            if let Some(features) = features {
+                txt.push(("features", features));
+            }
+            let table = table(vec![record(
+                mdns::AIRPLAY,
+                "Кухня",
+                "speaker.local.",
+                "192.0.2.10",
+                7000,
+                &txt,
+            )]);
+            devices(&table).remove(0)
+        }
+
+        let audio_and_screen = device_with(Some("0x280,0x0"));
+        assert_eq!(
+            outcome(&audio_and_screen, Want::Audio),
+            Profile::AirPlay2RealtimeAudio.label()
+        );
+        assert_eq!(
+            outcome(&audio_and_screen, Want::Screen),
+            "SenderUnavailable"
+        );
+
+        let screen_only = device_with(Some("0x80,0x0"));
+        assert_eq!(outcome(&screen_only, Want::Audio), "AudioUnsupported");
+        assert_eq!(outcome(&screen_only, Want::Screen), "SenderUnavailable");
+
+        let silent = device_with(Some("0x0,0x0"));
+        assert_eq!(outcome(&silent, Want::Audio), "AudioUnsupported");
+        assert_eq!(outcome(&silent, Want::Screen), "ScreenUnsupported");
+
+        let no_features = device_with(None);
+        assert_eq!(outcome(&no_features, Want::Audio), "CapabilitiesUnknown");
+        assert_eq!(outcome(&no_features, Want::Screen), "CapabilitiesUnknown");
+    }
+
 }
