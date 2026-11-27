@@ -11,6 +11,7 @@ pub struct Channel {
     keys: ControlKeys,
     read_counter: u64,
     write_counter: u64,
+    read_failed: bool,
 }
 
 impl Channel {
@@ -19,6 +20,7 @@ impl Channel {
             keys,
             read_counter: 0,
             write_counter: 0,
+            read_failed: false,
         }
     }
 
@@ -43,7 +45,12 @@ impl Channel {
     /// Расшифровывает все полные кадры из начала `buf`, удаляет их из буфера
     /// и дописывает открытый текст в `out`. Неполный кадр остаётся в `buf`.
     pub fn open(&mut self, buf: &mut Vec<u8>, out: &mut Vec<u8>) -> Result<(), Error> {
+        if self.read_failed {
+            return Err(Error::Aead);
+        }
         let mut pos = 0;
+        let mut counter = self.read_counter;
+        let mut decoded = Vec::new();
         while buf.len() - pos >= 2 {
             // We send at most MAX_FRAME, but iOS sends longer frames on the MRP
             // data stream (seen 1087 and 1125 bytes); any u16 length is valid.
@@ -53,16 +60,28 @@ impl Channel {
                 break;
             }
             let aad = [buf[pos], buf[pos + 1]];
-            let plain = aead::open(
+            let Some(next_counter) = counter.checked_add(1) else {
+                self.read_failed = true;
+                return Err(Error::Aead);
+            };
+            let plain = match aead::open(
                 &self.keys.read,
-                &self.read_counter.to_le_bytes(),
+                &counter.to_le_bytes(),
                 &aad,
                 &buf[pos + 2..end],
-            )?;
-            self.read_counter += 1;
-            out.extend_from_slice(&plain);
+            ) {
+                Ok(plain) => plain,
+                Err(error) => {
+                    self.read_failed = true;
+                    return Err(error);
+                }
+            };
+            counter = next_counter;
+            decoded.extend_from_slice(&plain);
             pos = end;
         }
+        self.read_counter = counter;
+        out.extend_from_slice(&decoded);
         buf.drain(..pos);
         Ok(())
     }
@@ -103,5 +122,23 @@ mod tests {
         ctl.seal(b"GET /info RTSP/1.0\r\n\r\n", &mut wire);
         wire[5] ^= 1;
         assert!(acc.open(&mut wire, &mut Vec::new()).is_err());
+    }
+
+    #[test]
+    fn exhausted_read_counter_fails_without_wrapping() {
+        let shared = [9u8; 32];
+        let mut receiver = Channel::new(ControlKeys::accessory(&shared));
+        let mut sender = Channel::new(ControlKeys::controller(&shared));
+        receiver.read_counter = u64::MAX;
+        sender.write_counter = u64::MAX;
+        let len = [1u8, 0];
+        let mut wire = len.to_vec();
+        wire.extend_from_slice(&aead::seal(&sender.keys.write, &u64::MAX.to_le_bytes(), &len, b"x"));
+        let original = wire.clone();
+        let mut out = Vec::new();
+        assert!(receiver.open(&mut wire, &mut out).is_err());
+        assert!(out.is_empty());
+        assert_eq!(wire, original);
+        assert!(receiver.open(&mut wire, &mut out).is_err());
     }
 }
