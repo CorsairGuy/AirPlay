@@ -1958,6 +1958,164 @@ mod tests {
         peer.await.unwrap();
     }
 
+    fn retransmit_request(first: u16, count: u16) -> [u8; 8] {
+        let mut packet = [0x80, 0x55, 0xaa, 0xbb, 0, 0, 0, 0];
+        packet[4..6].copy_from_slice(&first.to_be_bytes());
+        packet[6..8].copy_from_slice(&count.to_be_bytes());
+        packet
+    }
+
+    /// Ждёт ответ повтора (0xD6), пропуская синхронизацию (0xD4).
+    async fn retransmit_reply(peer: &UdpSocket) -> Option<Vec<u8>> {
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(400);
+        let mut bytes = [0u8; 2048];
+        while tokio::time::Instant::now() < deadline {
+            let left = deadline - tokio::time::Instant::now();
+            match timeout(left, peer.recv(&mut bytes)).await {
+                Ok(Ok(n)) if n >= 4 && bytes[1] == 0xd6 => {
+                    return Some(bytes[..n].to_vec());
+                }
+                Ok(Ok(_)) => continue,
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    #[tokio::test]
+    async fn stale_retransmit_after_flush_is_dropped_and_new_packet_differs() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        let (noticed, observed_flush) = oneshot::channel();
+        let (release, proceed) = oneshot::channel();
+        let peer = tokio::spawn(async move {
+            let mut conn = Connection::new(server);
+            let mut noticed = Some(noticed);
+            let mut proceed = Some(proceed);
+            loop {
+                let request = conn.event_request().await.unwrap();
+                if request.method == "FLUSH" {
+                    noticed.take().unwrap().send(()).unwrap();
+                    proceed.take().unwrap().await.unwrap();
+                }
+                let done = request.method == "TEARDOWN";
+                let mut bytes = Vec::new();
+                rtsp::Response::to(&request, 200).encode(&mut bytes);
+                conn.send(&bytes).await.unwrap();
+                if done {
+                    break;
+                }
+            }
+        });
+        let receiving = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let audio = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        audio.connect(receiving.local_addr().unwrap()).await.unwrap();
+        let control_peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let control = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let control_addr = control.local_addr().unwrap();
+        let config = SessionConfig::new(listener.local_addr().unwrap(), Identity::new("test", "test"));
+        let (metadata, _keep_metadata) = watch::channel(None);
+        let session = Session {
+            session_id: 1,
+            metadata,
+            rtsp: Some(Rtsp::new(
+                Connection::new(client),
+                "rtsp://test/1".into(),
+                "test".into(),
+                1,
+                Duration::from_secs(1),
+            )),
+            packetizer: TargetPacketizer::Ntp(rtp::PcmPacketizer::new(
+                [7; 32],
+                1,
+                7,
+                config.latency_frames,
+            )),
+            config,
+            audio,
+            control: control.clone(),
+            control_destination: control_peer.local_addr().unwrap(),
+            _timing_task: None,
+            _event_task: None,
+            peers: None,
+            peer_changes: None,
+        };
+        let (pcm, packets) = broadcast::channel(8);
+        let (_volume, volumes) = watch::channel(Volume::db(-30.0).unwrap());
+        let (stop, stopped) = watch::channel(false);
+        let running = tokio::spawn(session.run(packets, volumes, stopped));
+        let (source, revision) = watch::channel(crate::tx::continuous_source::State::default());
+        let clock = crate::tx::MediaClock::now();
+        pcm.send(Arc::new(
+            clock
+                .packet(0, &[5; crate::tx::PACKET_BYTES])
+                .unwrap()
+                .guard_source(revision),
+        ))
+        .unwrap();
+        let mut bytes = [0; 2048];
+        let first_len = timeout(Duration::from_secs(1), receiving.recv(&mut bytes))
+            .await
+            .unwrap()
+            .unwrap();
+        let first_audio = bytes[..first_len].to_vec();
+        assert_eq!(u16::from_be_bytes([bytes[2], bytes[3]]), 7);
+
+        // До FLUSH повтор выдаётся.
+        control_peer
+            .send_to(&retransmit_request(7, 1), control_addr)
+            .await
+            .unwrap();
+        let reply = retransmit_reply(&control_peer).await.expect("повтор до FLUSH");
+        assert_eq!(reply[1], 0xd6);
+        assert_eq!(u16::from_be_bytes([reply[2], reply[3]]), 7);
+        // Ответ повтора — 4-байтовый заголовок и исходный RTP-пакет целиком.
+        assert_eq!(&reply[4..], &first_audio[..]);
+
+        // Смена поколения источника чистит кэш повторов.
+        source.send_replace(crate::tx::continuous_source::State { generation: 1, paused: false });
+        let next = clock
+            .packet(FRAMES_PER_PACKET as u64, &[5; crate::tx::PACKET_BYTES])
+            .unwrap()
+            .guard_source(source.subscribe());
+        pcm.send(Arc::new(next)).unwrap();
+        timeout(Duration::from_secs(1), observed_flush).await.unwrap().unwrap();
+        release.send(()).unwrap();
+        let size = timeout(Duration::from_secs(1), receiving.recv(&mut bytes))
+            .await
+            .unwrap()
+            .unwrap();
+        let head = bytes[..size].to_vec();
+        assert_eq!(u16::from_be_bytes([bytes[2], bytes[3]]), 8);
+
+        // Старый запрос после FLUSH ничего не возвращает: прежний ciphertext не
+        // уходит в новый поток.
+        control_peer
+            .send_to(&retransmit_request(7, 1), control_addr)
+            .await
+            .unwrap();
+        assert!(
+            retransmit_reply(&control_peer).await.is_none(),
+            "повтор прежнего поколения после FLUSH не выдаётся"
+        );
+
+        // Новый пакет повторяется только по новому номеру и отличается от старого
+        // ciphertext при том же открытом PCM (значит, nonce не повторён).
+        control_peer
+            .send_to(&retransmit_request(8, 1), control_addr)
+            .await
+            .unwrap();
+        let reply = retransmit_reply(&control_peer).await.expect("повтор нового пакета");
+        assert_eq!(u16::from_be_bytes([reply[2], reply[3]]), 8);
+        assert_eq!(&reply[4..], &head[..]);
+        assert_ne!(&reply[4..], &first_audio[..]);
+
+        stop.send_replace(true);
+        running.await.unwrap().unwrap();
+        peer.await.unwrap();
+    }
+
     #[test]
     fn volume_is_validated_before_entering_control_channel() {
         for value in [f32::NAN, f32::INFINITY, -31.0, 1.0] {
