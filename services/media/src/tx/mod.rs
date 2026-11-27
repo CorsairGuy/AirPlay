@@ -12,6 +12,7 @@
 pub mod airplay1;
 pub mod buffered;
 pub mod buffered_link;
+pub mod buffered_pacing;
 pub mod buffered_session;
 pub mod continuous;
 pub mod continuous_source;
@@ -19,6 +20,7 @@ pub mod group;
 mod local;
 mod local_pipe;
 pub mod mirror;
+pub mod pcm_source;
 mod packet;
 pub mod pool;
 mod session;

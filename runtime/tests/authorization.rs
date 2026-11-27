@@ -96,9 +96,9 @@ async fn selection_pin(disconnect: bool) {
     );
     let (control, requests) = remote::output_control::OutputControl::channel(4);
     let (_pcm, packets) = tokio::sync::broadcast::channel(4);
-    let (updates, state) = watch::channel(sessions::output_worker::Snapshot::default());
+    let (updates, state) = watch::channel(runtime::routing::worker::Snapshot::default());
     let (stop, stopped) = watch::channel(false);
-    let worker = tokio::spawn(sessions::output_worker::run(
+    let worker = tokio::spawn(runtime::routing::worker::run(
         SessionPool::new(packets),
         requests,
         catalog,

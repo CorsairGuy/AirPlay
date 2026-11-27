@@ -8,8 +8,8 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use sessions::serve;
 use media::events;
+use runtime::lifecycle::receiver as serve;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -223,7 +223,7 @@ async fn two_receivers_are_independent_across_stop_and_restart() {
 
     // Один движок времени на процесс: экземпляры получают его клоны.
     let clock = timesync::TimeSync::idle(1);
-    let a = serve::start(options(
+    let a = runtime::AirPlay::start(options(
         "Профиль A",
         state_a.path(),
         port_a,
@@ -242,9 +242,13 @@ async fn two_receivers_are_independent_across_stop_and_restart() {
     .await
     .expect("экземпляр B");
 
-    assert_eq!(a.port(), port_a);
+    assert_eq!(a.receiver().port(), port_a);
     assert_eq!(b.port(), port_b);
-    assert_ne!(a.device_id(), b.device_id(), "identity должна быть своя");
+    assert_ne!(
+        a.receiver().device_id(),
+        b.device_id(),
+        "identity должна быть своя"
+    );
 
     // Профили не перетекают: имена, модели и deviceID разные.
     let (ia, ib) = tokio::join!(
@@ -255,7 +259,7 @@ async fn two_receivers_are_independent_across_stop_and_restart() {
     assert_eq!(string(&ib, "name"), "Профиль B");
     assert_eq!(string(&ia, "model"), "AppleTV3,2");
     assert_eq!(string(&ib, "model"), "AudioAccessory5,1");
-    assert_eq!(string(&ia, "deviceID"), a.device_id());
+    assert_eq!(string(&ia, "deviceID"), a.receiver().device_id());
     assert_eq!(string(&ib, "deviceID"), b.device_id());
     let address_a = SocketAddr::from(([127, 0, 0, 1], port_a));
     let address_b = SocketAddr::from(([127, 0, 0, 1], port_b));
@@ -273,7 +277,7 @@ async fn two_receivers_are_independent_across_stop_and_restart() {
     assert_eq!(string(&b2, "name"), "Профиль B");
 
     // Остановка A: её порт закрыт, B отвечает и не меняет identity.
-    let device_a = a.device_id().to_owned();
+    let device_a = a.receiver().device_id().to_owned();
     a.stop().await;
     assert!(
         TcpStream::connect(address_a).await.is_err(),

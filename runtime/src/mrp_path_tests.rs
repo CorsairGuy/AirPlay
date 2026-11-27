@@ -1,5 +1,4 @@
 //! Same backend/data over TCP bridge versus in-process duplex; localhost only.
-use remote::card::Card;
 use crypto::{Channel, kdf::ControlKeys};
 use media::control::bridge;
 use media::control::{MrpService, Remote};
@@ -8,6 +7,7 @@ use mrp::{
     messages::Device,
     wire::Node,
 };
+use remote::card::Card;
 use std::{sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -73,7 +73,10 @@ async fn probe(service: MrpService, fragmented: bool) -> Node {
                     Frame::Reply { seq: 9 } => ack = true,
                     Frame::Sync { mut messages, .. } if !messages.is_empty() => {
                         // Initial DeviceInfo is unsolicited and may precede the request ACK.
-                        let Some(index) = messages.iter().position(|message| message.string(2) == Some("same-request")) else {
+                        let Some(index) = messages
+                            .iter()
+                            .position(|message| message.string(2) == Some("same-request"))
+                        else {
                             continue;
                         };
                         assert!(ack, "request ACK precedes the response");

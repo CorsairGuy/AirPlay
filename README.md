@@ -6,7 +6,7 @@
 
 ## Структура
 
-`services/` содержит семь логических пакетов: `coordinator`, `discovery`, `identity`, `media`, `remote`, `sessions` и `timesync`. Это библиотеки с разными обязанностями, а не семь обязательных процессов. `crates/` содержит общие протоколы, кодеки и транспорты, `bin/airplay` — CLI и композицию ядра. Windows-приложение предполагается отдельно.
+`services/` содержит семь логических пакетов: `coordinator`, `discovery`, `identity`, `media`, `remote`, `sessions` и `timesync`. Это библиотеки с разными обязанностями, а не семь обязательных процессов. `crates/` содержит протоколы, кодеки и транспорты; `runtime/` связывает сервисы и предоставляет библиотечный API приложению. `bin/airplay` удалён. Windows-приложение предполагается отдельно.
 
 ## Сборка и проверки
 
@@ -15,7 +15,7 @@ cargo build --release
 cargo test --workspace
 ```
 
-Минимальный профиль без видео: `cargo build -p airplay --no-default-features --profile release-small`. Для видео и HLS могут потребоваться дополнительные системные зависимости и feature-флаги; подробности — в [BUILD_PROFILES](docs/BUILD_PROFILES.md). Команды и ограничения текущего Windows-toolchain — в [задачах агентов](docs/AGENT-TASKS.md). Тестировать аппаратную совместимость нужно отдельно от локальных тестов.
+Минимальный профиль без видео: `cargo build -p runtime --no-default-features --profile release-small`; зеркалирование: `cargo build -p runtime --features mirroring`. Это сборка библиотеки, не исполняемой программы. Для видео и HLS могут потребоваться дополнительные системные зависимости и feature-флаги; подробности — в [BUILD_PROFILES](docs/BUILD_PROFILES.md). Команды и ограничения текущего Windows-toolchain — в [задачах агентов](docs/AGENT-TASKS.md). Тестировать аппаратную совместимость нужно отдельно от локальных тестов.
 
 ## Лицензия
 

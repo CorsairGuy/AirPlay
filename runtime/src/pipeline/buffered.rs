@@ -1,20 +1,13 @@
 //! Paced buffered AAC sender. The caller owns input and receiver selection.
 use anyhow::{Context, Result, anyhow, bail};
-use media::tx::{AAC_FRAMES_PER_PACKET, BufferedConfig, BufferedSession, adts_frames};
+use media::tx::buffered_pacing::frame_deadline;
+use media::tx::{BufferedConfig, BufferedSession, adts_frames};
 use std::{net::SocketAddr, time::Duration};
 use tokio::{
     io::AsyncReadExt,
     net::{TcpListener, TcpStream},
     time::{Instant, sleep_until},
 };
-
-pub fn frame_duration() -> Duration {
-    Duration::from_secs_f64(AAC_FRAMES_PER_PACKET as f64 / 44_100.0)
-}
-
-pub fn frame_deadline(start: Instant, index: u64) -> Instant {
-    start + frame_duration() * index as u32
-}
 
 struct ControlTask(tokio::task::JoinHandle<()>);
 impl Drop for ControlTask {

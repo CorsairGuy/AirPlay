@@ -7,15 +7,15 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::{future::Future, pin::Pin};
 
-use ::media::tx::{AudioPacket, Identity, MediaClock, Session, SessionConfig, Volume};
+use ::media::tx::{AudioPacket, Identity, Session, SessionConfig, Volume};
 use anyhow::{Context, Result, anyhow, bail};
-use tokio::io::{AsyncRead, AsyncReadExt};
+use media::tx::pcm_source::produce;
+use tokio::io::AsyncRead;
 use tokio::sync::{broadcast, watch};
 use tokio::task::JoinSet;
 
 const RATE: u64 = ::media::tx::SAMPLE_RATE as u64;
 const FRAMES: usize = ::media::tx::FRAMES_PER_PACKET;
-const PCM_BYTES: usize = ::media::tx::PACKET_BYTES;
 const QUEUE_PACKETS: usize = 64;
 
 #[derive(Debug)]
@@ -65,45 +65,6 @@ pub fn parse_endpoint(value: &str) -> Result<(String, u16)> {
     Ok((host.to_owned(), port))
 }
 
-/// Input is S16BE, stereo, 44.1 kHz. A final complete stereo frame is padded
-/// with silence to the packet boundary; a truncated sample/frame is an error.
-async fn produce<R: AsyncRead + Unpin>(
-    mut input: R,
-    output: broadcast::Sender<Arc<AudioPacket>>,
-) -> Result<u64> {
-    let clock = MediaClock::now();
-    let mut frame_index = 0_u64;
-    loop {
-        let mut pcm = [0_u8; PCM_BYTES];
-        let mut used = 0;
-        while used < pcm.len() {
-            let count = input
-                .read(&mut pcm[used..])
-                .await
-                .context("чтение PCM потока")?;
-            if count == 0 {
-                break;
-            }
-            used += count;
-        }
-        if used == 0 {
-            return Ok(frame_index);
-        }
-        if used % 4 != 0 {
-            bail!("PCM поток закончился посреди S16BE стереокадра");
-        }
-        let packet = Arc::new(clock.packet(frame_index, &pcm)?);
-        tokio::time::sleep_until(packet.produced_at().into()).await;
-        output
-            .send(packet)
-            .map_err(|_| anyhow!("нет активных получателей PCM"))?;
-        frame_index += FRAMES as u64;
-        if used < PCM_BYTES {
-            return Ok(frame_index);
-        }
-    }
-}
-
 /// All receivers connect before a single media clock starts. Any peer failure
 /// stops this run: reconnect/group restoration is deliberately not implicit.
 pub async fn run<R: AsyncRead + Unpin>(
@@ -124,7 +85,7 @@ pub async fn run_controlled<R: AsyncRead + Unpin>(
     options: Options,
     input: R,
     stop: watch::Receiver<bool>,
-    control: crate::send_control::RelayControl,
+    control: crate::routing::control::RelayControl,
 ) -> Result<()> {
     run_inner(options, input, stop, None, Some(control)).await
 }
@@ -137,7 +98,7 @@ pub async fn run_selected<R: AsyncRead + Unpin>(
     selected: &[String],
     input: R,
     stop: watch::Receiver<bool>,
-    control: crate::send_control::RelayControl,
+    control: crate::routing::control::RelayControl,
 ) -> Result<()> {
     if !options.targets.is_empty() {
         bail!("logical routes and explicit targets cannot be combined");
@@ -160,7 +121,7 @@ pub async fn run_selected_discovered<R: AsyncRead + Unpin>(
     selected: &[String],
     input: R,
     stop: watch::Receiver<bool>,
-    control: crate::send_control::RelayControl,
+    control: crate::routing::control::RelayControl,
 ) -> Result<()> {
     for uid in selected {
         if let ::discovery::capabilities::Selection::Refuse(refusal) =
@@ -197,7 +158,7 @@ pub async fn run_with_local_controlled<R: AsyncRead + Unpin, S: ::media::tx::Loc
     input: R,
     stop: watch::Receiver<bool>,
     sink: S,
-    control: crate::send_control::RelayControl,
+    control: crate::routing::control::RelayControl,
 ) -> Result<()> {
     if options.local.is_some() {
         bail!("local process and supplied LocalSink are mutually exclusive");
@@ -236,7 +197,7 @@ async fn run_inner<R: AsyncRead + Unpin>(
     input: R,
     mut stop: watch::Receiver<bool>,
     local: Option<LocalFactory>,
-    control: Option<crate::send_control::RelayControl>,
+    control: Option<crate::routing::control::RelayControl>,
 ) -> Result<()> {
     options.validate()?;
     if *stop.borrow() {
@@ -460,10 +421,10 @@ mod tests {
             .with_test_writer()
             .with_env_filter("audio_stream=debug,timesync::ntp=debug,airplay::media=debug")
             .try_init();
-        use crate::session::Context as ReceiverContext;
         use ::media::rx::Player;
         use audio::Sink;
         use device::{DeviceInfo, Features};
+        use sessions::session::Context as ReceiverContext;
         use std::sync::Mutex;
 
         struct Capture {
@@ -541,7 +502,7 @@ mod tests {
         let address = listener.local_addr().unwrap();
         let receiver = tokio::spawn(async move {
             let (stream, peer) = listener.accept().await.unwrap();
-            crate::transport::serve_connection(stream, context, peer).await
+            sessions::transport::serve_connection(stream, context, peer).await
         });
         let (_stop, stopped) = watch::channel(false);
         let mut pcm = Vec::new();
@@ -572,7 +533,7 @@ mod tests {
             }
         }
         let local_seen = Arc::new(Mutex::new(Vec::new()));
-        let control = crate::send_control::RelayControl::default();
+        let control = crate::routing::control::RelayControl::default();
         let monitoring = if with_local || with_routes {
             let handle = control.clone();
             Some(tokio::spawn(async move {

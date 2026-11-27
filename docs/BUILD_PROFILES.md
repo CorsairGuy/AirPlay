@@ -1,23 +1,14 @@
 # Профили сборки
 
-Стандартный профиль сохраняет зеркалирование и прежний API:
+`bin/airplay` удалён по решению пользователя. Ядро предоставляет библиотечный пакет `runtime`; исполняемый файл создаёт использующее его приложение.
 
 ```sh
-cargo build -p airplay --release
+cargo build -p runtime --release
+cargo test -p runtime --no-default-features
+cargo test -p runtime --features mirroring
+cargo test --workspace
 ```
 
-Устройства только со звуком собирают выбранный пакет без default features:
+По умолчанию runtime не включает зеркалирование; `mirroring` включает приём зеркальных кадров. `hls` требует FFmpeg и системные зависимости. Видео-декодирование с FFmpeg выбирает потребитель через `video/ffmpeg`; AAC через `codec/ffmpeg`. Наличие поддержки сборки не подтверждает работу на устройстве.
 
-```sh
-cargo build -p airplay --no-default-features --profile release-small
-cargo test -p airplay --no-default-features
-cargo tree -p airplay --no-default-features
-```
-
-В дереве этого пакета нет ap_mirror, ap_video, ap_hls, ap_capture и mediaserver. Команда для всего workspace продолжает собирать самостоятельные видео-компоненты; --no-default-features не удаляет их из workspace. Неиспользуемые прямые зависимости hls/mediaserver убраны из airplay.
-
-Feature mirroring включает optional mirror/video и доступные только с ним поля Options/Context и re-export API. Audio-only CLI отвергает --mirror/--video-* и --display до старта служб, RTSP отвергает video stream110. Набор возможностей остаётся аудио. NTP realtime audio, AP2/PTP, MRP и sender не выключаются вместе с видео.
-
-Feature ffmpeg включает codec/ffmpeg; weak video?/ffmpeg не включает видео сама. Проверка внешнего FFmpeg и всех целевых архитектур остаётся отдельной задачей. CI дополнена audio-only тестами и проверкой дерева зависимостей.
-
-Проверены оба профиля на Pi/Linux в контейнере --network none:94 library +1 CLI в audio-only,94 application +79 sender +1 CLI в default; cargo check обоих без предупреждений. Установка на Станцию и проверка её звука не выполнялись.
+На Windows для MSYS2 UCRT64 см. [AGENT-TASKS](AGENT-TASKS.md). Ранее описанные сборки CLI, `airplay.exe` и Windows-TV-скрипты относятся к удалённой программе и не являются текущим способом запуска.
