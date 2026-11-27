@@ -12,6 +12,7 @@ pub struct Channel {
     read_counter: u64,
     write_counter: u64,
     read_failed: bool,
+    write_failed: bool,
 }
 
 impl Channel {
@@ -21,25 +22,47 @@ impl Channel {
             read_counter: 0,
             write_counter: 0,
             read_failed: false,
+            write_failed: false,
         }
     }
 
     /// Шифрует данные и дописывает кадры в `out`.
-    pub fn seal(&mut self, mut data: &[u8], out: &mut Vec<u8>) {
-        while !data.is_empty() {
-            let (frame, rest) = data.split_at(data.len().min(MAX_FRAME));
+    ///
+    /// Операция атомарна: при исчерпании счётчика записей (2^64 кадров)
+    /// возвращается [`Error::CounterExhausted`], `out` не меняется и ни один
+    /// nonce не повторяется. После ошибки канал закрыт для записи.
+    pub fn seal(&mut self, data: &[u8], out: &mut Vec<u8>) -> Result<(), Error> {
+        if self.write_failed {
+            return Err(Error::CounterExhausted);
+        }
+        if data.is_empty() {
+            return Ok(());
+        }
+        let frames = data.len().div_ceil(MAX_FRAME) as u64;
+        // Последний допустимый nonce — u64::MAX; его используем, но следующий
+        // вызов обязан отказать, а не обнулить счётчик.
+        let Some(last) = self.write_counter.checked_add(frames - 1) else {
+            self.write_failed = true;
+            return Err(Error::CounterExhausted);
+        };
+        let mut rest = data;
+        let mut counter = self.write_counter;
+        while !rest.is_empty() {
+            let (frame, tail) = rest.split_at(rest.len().min(MAX_FRAME));
             let len = (frame.len() as u16).to_le_bytes();
-            let sealed = aead::seal(
-                &self.keys.write,
-                &self.write_counter.to_le_bytes(),
-                &len,
-                frame,
-            );
-            self.write_counter += 1;
+            let sealed = aead::seal(&self.keys.write, &counter.to_le_bytes(), &len, frame);
+            if counter < last {
+                counter += 1;
+            }
             out.extend_from_slice(&len);
             out.extend_from_slice(&sealed);
-            data = rest;
+            rest = tail;
         }
+        self.write_counter = last.saturating_add(1);
+        if last == u64::MAX {
+            self.write_failed = true;
+        }
+        Ok(())
     }
 
     /// Расшифровывает все полные кадры из начала `buf`, удаляет их из буфера
@@ -60,9 +83,9 @@ impl Channel {
                 break;
             }
             let aad = [buf[pos], buf[pos + 1]];
-            let Some(next_counter) = counter.checked_add(1) else {
+            let             Some(next_counter) = counter.checked_add(1) else {
                 self.read_failed = true;
-                return Err(Error::Aead);
+                return Err(Error::CounterExhausted);
             };
             let plain = match aead::open(
                 &self.keys.read,
@@ -92,6 +115,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn seal_exhaustion_is_atomic_and_terminal() {
+        let shared = [3u8; 32];
+        let mut sender = Channel::new(ControlKeys::controller(&shared));
+        sender.write_counter = u64::MAX;
+        let mut wire = Vec::new();
+        // один кадр при счётчике MAX допустим
+        sender.seal(b"a", &mut wire).unwrap();
+        let mut second = Vec::new();
+        assert!(matches!(
+            sender.seal(b"b", &mut second),
+            Err(Error::CounterExhausted)
+        ));
+        assert!(second.is_empty(), "частичная запись недопустима");
+        // После ошибки запись закрыта, счётчик не обнуляется.
+        assert!(sender.seal(b"c", &mut second).is_err());
+        assert!(second.is_empty());
+    }
+
+    #[test]
+    fn seal_of_empty_input_does_not_touch_the_counter() {
+        let shared = [4u8; 32];
+        let mut sender = Channel::new(ControlKeys::controller(&shared));
+        sender.write_counter = u64::MAX;
+        let mut wire = Vec::new();
+        sender.seal(&[], &mut wire).unwrap();
+        assert!(wire.is_empty());
+        sender.seal(b"x", &mut wire).unwrap();
+        assert!(!wire.is_empty());
+    }
+
+    #[test]
     fn roundtrip_across_frames_and_partial_reads() {
         let shared = [7u8; 32];
         let mut acc = Channel::new(ControlKeys::accessory(&shared));
@@ -99,7 +153,7 @@ mod tests {
 
         let msg: Vec<u8> = (0..3000u32).map(|i| i as u8).collect();
         let mut wire = Vec::new();
-        ctl.seal(&msg, &mut wire);
+        ctl.seal(&msg, &mut wire).unwrap();
         assert_eq!(wire.len(), msg.len() + 3 * (2 + TAG_LEN));
 
         // Подаём по кускам, как из сокета.
@@ -119,7 +173,7 @@ mod tests {
         let mut acc = Channel::new(ControlKeys::accessory(&shared));
         let mut ctl = Channel::new(ControlKeys::controller(&shared));
         let mut wire = Vec::new();
-        ctl.seal(b"GET /info RTSP/1.0\r\n\r\n", &mut wire);
+        ctl.seal(b"GET /info RTSP/1.0\r\n\r\n", &mut wire).unwrap();
         wire[5] ^= 1;
         assert!(acc.open(&mut wire, &mut Vec::new()).is_err());
     }

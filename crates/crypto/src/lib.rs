@@ -19,4 +19,6 @@ pub enum Error {
     FrameTooLong(usize),
     #[error("SRP: {0}")]
     Srp(&'static str),
+    #[error("счётчик nonce исчерпан: канал закрыт")]
+    CounterExhausted,
 }
