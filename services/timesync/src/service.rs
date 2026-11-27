@@ -244,6 +244,61 @@ mod tests {
         let _general = UdpSocket::bind(addresses.1).await.unwrap();
     }
     #[tokio::test]
+    async fn dual_service_follows_a_source_and_serves_receivers_on_one_pair() {
+        let event = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let general = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let peer = Peer {
+            ip: "127.0.0.1".parse().unwrap(),
+            ports: Ports {
+                event: event.local_addr().unwrap().port(),
+                general: general.local_addr().unwrap().port(),
+            },
+        };
+        let service = Service::bind_dual(
+            config(peer, Policy::FollowOnly(peer.ip)),
+            Arc::new(TestClock),
+        )
+        .await
+        .unwrap();
+        let addresses = service.addresses();
+        let mut status = service.subscribe();
+        let mut remote = Master::new(Domain::new(50, 1).unwrap()).unwrap();
+        remote.set_peers(&[peer.ip]).unwrap();
+        let mut buffer = [0u8; 1024];
+        let followed = timeout(Duration::from_secs(2), async {
+            let mut round = 0;
+            loop {
+                emit(&mut remote, round, &event, &general, addresses).await;
+                round += 1;
+                let value = *status.borrow_and_update();
+                if value.selection.role == Role::Follower(peer.ip) && value.mapping.is_some() {
+                    break value;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("inbound evidence must be followed");
+        assert_eq!(followed.quality, Some(Quality::OneWay));
+        assert_eq!(followed.selection.domain.unwrap().id(), 50);
+        let outbound = followed
+            .outbound
+            .expect("outbound mapping survives following");
+        assert_eq!(outbound.domain().id(), 100);
+        assert_ne!(outbound.domain(), followed.selection.domain.unwrap());
+        // The same socket pair still serves receivers while we follow.
+        while event.try_recv(&mut buffer).is_ok() {}
+        let (size, _) = timeout(Duration::from_secs(1), event.recv_from(&mut buffer))
+            .await
+            .expect("outbound Sync while following")
+            .unwrap();
+        assert!(size >= 44);
+        assert_eq!(buffer[0] & 15, 0);
+        assert_eq!(&buffer[20..28], &100u64.to_be_bytes());
+        service.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn opt_in_probe_completes_over_loopback_without_changing_mapping_quality() {
         let event = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let general = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -507,6 +562,21 @@ impl Drop for StatusGuard {
 }
 impl Service {
     pub async fn bind(config: Config, clock: Arc<dyn ClockSource>) -> io::Result<Self> {
+        Self::bind_mode(config, clock, false).await
+    }
+
+    /// One socket pair and one physical source with an explicit co-resident
+    /// outbound master. Receivers are served from our own domain while the
+    /// selected role may follow an inbound source; domains never mix.
+    pub async fn bind_dual(config: Config, clock: Arc<dyn ClockSource>) -> io::Result<Self> {
+        Self::bind_mode(config, clock, true).await
+    }
+
+    async fn bind_mode(
+        config: Config,
+        clock: Arc<dyn ClockSource>,
+        dual: bool,
+    ) -> io::Result<Self> {
         let network = config.network;
         if network.bind_ip.is_unspecified()
             || network.bind_ip.is_multicast()
@@ -536,13 +606,23 @@ impl Service {
             local: initial.clock(),
         };
         let ips = network.peers.iter().map(|peer| peer.ip).collect::<Vec<_>>();
-        let mut engine = Engine::new(
-            network.domain,
-            initial,
-            &ips,
-            config.election,
-            config.follow,
-        )?;
+        let mut engine = if dual {
+            Engine::new_dual(
+                network.domain,
+                initial,
+                &ips,
+                config.election,
+                config.follow,
+            )?
+        } else {
+            Engine::new(
+                network.domain,
+                initial,
+                &ips,
+                config.election,
+                config.follow,
+            )?
+        };
         if let Some(probe) = config.probe {
             engine.enable_probe(probe)?;
         }

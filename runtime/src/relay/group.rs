@@ -596,6 +596,7 @@ mod tests {
             ),
             quality: Some(Quality::Local),
             link: None,
+            outbound: None,
         });
         let timeline =
             Arc::new(MasterTimeline::new(source, status, Duration::from_millis(100)).unwrap());

@@ -67,6 +67,9 @@ pub struct MasterTimeline {
     status: watch::Receiver<Snapshot>,
     domain: Domain,
     max_ahead: Duration,
+    /// `true`: the selected role must be our local master. `false`: the
+    /// co-resident outbound master is used, even while following inbound.
+    selected: bool,
 }
 
 /// One-way group cancellation lease. Pass `subscribe()` to the session pool,
@@ -208,6 +211,48 @@ impl MasterTimeline {
             status,
             domain,
             max_ahead,
+            selected: true,
+        };
+        timeline.reading_at(Instant::now())?;
+        Ok(timeline)
+    }
+
+    /// Co-resident outbound master: valid while the selected role follows an
+    /// inbound source, because the outbound map is in our own domain. The
+    /// inbound mapping is never relabelled as ours.
+    pub fn new_dual(
+        source: Arc<InstantSource>,
+        status: watch::Receiver<Snapshot>,
+        max_ahead: Duration,
+    ) -> io::Result<Self> {
+        if max_ahead > Duration::from_secs(1) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "unbounded producer prediction",
+            ));
+        }
+        let domain = status
+            .borrow()
+            .outbound
+            .map(|map| map.domain())
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "outbound PTP role is not qualified",
+                )
+            })?;
+        if domain.id() != source.own.id() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "outbound master is not the injected physical source",
+            ));
+        }
+        let timeline = Self {
+            source,
+            status,
+            domain,
+            max_ahead,
+            selected: false,
         };
         timeline.reading_at(Instant::now())?;
         Ok(timeline)
@@ -232,15 +277,20 @@ impl MasterTimeline {
             ));
         }
         let snapshot = *self.status.borrow();
-        if snapshot.selection.role != Role::Master
-            || snapshot.selection.domain != Some(self.domain)
-            || snapshot.quality != Some(Quality::Local)
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "PTP role/domain/epoch changed",
-            ));
-        }
+        let mapping = if self.selected {
+            if snapshot.selection.role != Role::Master
+                || snapshot.selection.domain != Some(self.domain)
+                || snapshot.quality != Some(Quality::Local)
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "PTP role/domain/epoch changed",
+                ));
+            }
+            snapshot.mapping
+        } else {
+            snapshot.outbound
+        };
         if produced
             .checked_duration_since(now)
             .is_some_and(|ahead| ahead > self.max_ahead)
@@ -251,8 +301,7 @@ impl MasterTimeline {
             ));
         }
         let (local_now, own) = self.source.sample_at(now)?;
-        let mapping = snapshot
-            .mapping
+        let mapping = mapping
             .ok_or_else(|| io::Error::new(io::ErrorKind::WouldBlock, "PTP mapping absent"))?;
         if mapping.domain() != self.domain || mapping.rate_ppb() != 0 {
             return Err(io::Error::new(
@@ -468,10 +517,59 @@ mod tests {
             ),
             quality: Some(Quality::Local),
             link: None,
+            outbound: None,
         };
         let (updates, status) = watch::channel(snapshot);
         let timeline = MasterTimeline::new(source, status, Duration::from_millis(100)).unwrap();
         (origin, updates, timeline)
+    }
+
+    #[test]
+    fn dual_timeline_reads_the_outbound_map_while_following_inbound() {
+        let origin = Instant::now();
+        let local = LocalClock::new(1).unwrap();
+        let own = Domain::new(7, 1).unwrap();
+        let source = Arc::new(InstantSource::new(origin, local, own, 1_000_000_000));
+        let foreign = Domain::new(50, 2).unwrap();
+        let snapshot = Snapshot {
+            selection: Selection {
+                role: Role::Follower("192.0.2.1".parse().unwrap()),
+                domain: Some(foreign),
+            },
+            mapping: Some(
+                ClockMap::new(
+                    local.at(0),
+                    foreign.reading(9_000_000_000),
+                    0,
+                    2_000_000_000,
+                )
+                .unwrap(),
+            ),
+            quality: Some(Quality::OneWay),
+            link: None,
+            outbound: Some(
+                ClockMap::new(local.at(0), own.reading(1_000_000_000), 0, 2_000_000_000).unwrap(),
+            ),
+        };
+        let (updates, status) = watch::channel(snapshot);
+        let timeline =
+            MasterTimeline::new_dual(source.clone(), status, Duration::from_millis(100)).unwrap();
+        assert_eq!(timeline.domain(), own);
+        let reading = timeline.reading_at_now(origin, origin).unwrap();
+        assert_eq!(reading.domain().id(), own.id());
+        assert_ne!(reading.domain(), foreign, "inbound is never relabelled");
+        // A single-role timeline must refuse the same snapshot: the selected
+        // role is somebody else's, not ours.
+        assert!(
+            MasterTimeline::new(source, updates.subscribe(), Duration::from_millis(100)).is_err()
+        );
+        let mut revoked = snapshot;
+        revoked.outbound = None;
+        updates.send_replace(revoked);
+        assert!(
+            timeline.reading_at_now(origin, origin).is_err(),
+            "no outbound map, no outgoing clock"
+        );
     }
     #[test]
     fn service_and_producer_use_same_physical_source_and_selected_epoch() {
