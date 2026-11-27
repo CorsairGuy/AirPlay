@@ -127,12 +127,21 @@ pub enum Direction {
     Previous,
 }
 
+/// Право применить загруженную очередь. Выдаётся [`TrackQueue::begin_load`];
+/// если за время разрешения источника началась новая загрузка или выбор,
+/// [`TrackQueue::apply_load`] вернёт `Cancelled` и очередь не изменится.
+#[derive(Debug)]
+pub struct LoadGuard {
+    revision: Arc<()>,
+}
+
 /// Queue with a current item. Indices are internal; identities are not.
 #[derive(Debug, Default)]
 pub struct TrackQueue {
     tracks: Vec<Track>,
     items: Vec<QueueItemId>,
     current: Option<usize>,
+    position_ms: u64,
     revision: Arc<()>,
     next_item: u64,
 }
@@ -177,6 +186,20 @@ impl TrackQueue {
         self.current.and_then(|index| self.items.get(index).copied())
     }
 
+    /// Позиция внутри текущего элемента, мс. Ноль без текущего элемента.
+    pub fn position_ms(&self) -> u64 {
+        self.position_ms
+    }
+
+    /// Перемотка внутри текущего элемента. Ограничивается известной
+    /// длительностью; неизвестная длительность принимает любое значение.
+    pub fn seek(&mut self, position_ms: u64) -> Result<u64, QueueError> {
+        let track = self.current().ok_or(QueueError::Empty)?;
+        let limit = track.duration_ms.unwrap_or(u64::MAX);
+        self.position_ms = position_ms.min(limit);
+        Ok(self.position_ms)
+    }
+
     fn assign(&mut self, count: usize) -> Vec<QueueItemId> {
         let ids = (0..count)
             .map(|offset| QueueItemId(self.next_item + offset as u64))
@@ -217,6 +240,45 @@ impl TrackQueue {
         self.tracks = resolved;
         self.items = items;
         self.current = Some(0);
+        self.position_ms = 0;
+        self.revision = Arc::new(());
+        Ok(&self.tracks)
+    }
+
+    /// Начать загрузку, которую источник может готовить асинхронно.
+    pub fn begin_load(&mut self) -> LoadGuard {
+        self.revision = Arc::new(());
+        LoadGuard {
+            revision: self.revision.clone(),
+        }
+    }
+
+    /// Применить уже разрешённые треки, если загрузка не устарела.
+    pub fn apply_load(
+        &mut self,
+        guard: LoadGuard,
+        tracks: Vec<Track>,
+    ) -> Result<&[Track], QueueError> {
+        if !Arc::ptr_eq(&guard.revision, &self.revision) {
+            return Err(QueueError::Cancelled);
+        }
+        if tracks.is_empty() {
+            return Err(QueueError::Empty);
+        }
+        if tracks.len() > Self::MAX_TRACKS {
+            return Err(QueueError::TooManyTracks);
+        }
+        if tracks
+            .iter()
+            .any(|track| track.title.len() > Self::MAX_TITLE_BYTES)
+        {
+            return Err(QueueError::InvalidMetadata);
+        }
+        let items = self.assign(tracks.len());
+        self.tracks = tracks;
+        self.items = items;
+        self.current = Some(0);
+        self.position_ms = 0;
         self.revision = Arc::new(());
         Ok(&self.tracks)
     }
@@ -256,6 +318,9 @@ impl TrackQueue {
             return Err(QueueError::Cancelled);
         }
         let index = self.index_of(pending.item).ok_or(QueueError::Unknown)?;
+        if self.current != Some(index) {
+            self.position_ms = 0;
+        }
         self.current = Some(index);
         Ok(&self.tracks[index])
     }
@@ -276,6 +341,7 @@ impl TrackQueue {
             Direction::Previous => current.checked_sub(1)?,
         };
         self.current = Some(next);
+        self.position_ms = 0;
         self.revision = Arc::new(());
         self.current()
     }
@@ -302,6 +368,9 @@ impl TrackQueue {
     fn remove_index(&mut self, index: usize) {
         self.tracks.remove(index);
         self.items.remove(index);
+        if self.current == Some(index) {
+            self.position_ms = 0;
+        }
         self.revision = Arc::new(());
         self.current = match self.current {
             Some(current) if current == index => None,
@@ -583,6 +652,79 @@ mod tests {
         assert!(queue.current().is_none());
         assert!(!queue.remove(&ids(&["b"])[0]));
         assert_eq!(queue.len(), 1);
+    }
+
+    #[test]
+    fn seek_is_clamped_and_resets_on_change_of_item() {
+        let mut source = FakeSource::with(&[("a", "A"), ("b", "B")]);
+        let mut queue = TrackQueue::new();
+        queue.load(&mut source, &ids(&["a", "b"])).unwrap();
+        assert_eq!(queue.seek(90_000).unwrap(), 90_000);
+        assert_eq!(
+            queue.seek(999_999).unwrap(),
+            180_000,
+            "ограничено длительностью"
+        );
+        assert_eq!(
+            queue.seek(u64::MAX).unwrap(),
+            180_000,
+            "переполнение не допускается"
+        );
+        queue.step(Direction::Next);
+        assert_eq!(queue.position_ms(), 0, "новый элемент начинается с нуля");
+        assert_eq!(queue.seek(1_000).unwrap(), 1_000);
+        let first = queue.item_ids()[0];
+        let pending = queue.begin_select_item(first).unwrap();
+        queue.commit_select(pending).unwrap();
+        assert_eq!(queue.position_ms(), 0);
+    }
+
+    #[test]
+    fn seek_without_current_item_is_empty() {
+        let mut queue = TrackQueue::new();
+        assert_eq!(queue.seek(10), Err(QueueError::Empty));
+        assert_eq!(queue.position_ms(), 0);
+    }
+
+    #[test]
+    fn a_slow_load_loses_to_a_newer_load_or_selection() {
+        let mut source = FakeSource::with(&[("a", "A"), ("b", "B")]);
+        let mut queue = TrackQueue::new();
+        queue.load(&mut source, &ids(&["a"])).unwrap();
+        let stale = queue.begin_load();
+        let _newer = queue.begin_load();
+        let tracks = vec![source.resolve(&ids(&["b"])[0]).unwrap()];
+        assert_eq!(
+            queue.apply_load(stale, tracks),
+            Err(QueueError::Cancelled)
+        );
+        assert_eq!(queue.len(), 1, "устаревшая загрузка не меняет очередь");
+
+        let stale = queue.begin_load();
+        let pending = queue.begin_select(&ids(&["a"])[0]).unwrap();
+        queue.commit_select(pending).unwrap();
+        assert_eq!(
+            queue.apply_load(stale, vec![source.resolve(&ids(&["b"])[0]).unwrap()]),
+            Err(QueueError::Cancelled)
+        );
+    }
+
+    #[test]
+    fn a_fresh_load_guard_applies_and_resets_position() {
+        let mut source = FakeSource::with(&[("a", "A"), ("b", "B")]);
+        let mut queue = TrackQueue::new();
+        queue.load(&mut source, &ids(&["a"])).unwrap();
+        queue.seek(60_000).unwrap();
+        let guard = queue.begin_load();
+        let tracks = vec![source.resolve(&ids(&["b"])[0]).unwrap()];
+        queue.apply_load(guard, tracks).unwrap();
+        assert_eq!(queue.current().unwrap().id.as_str(), "b");
+        assert_eq!(queue.position_ms(), 0);
+        let guard = queue.begin_load();
+        assert!(matches!(
+            queue.apply_load(guard, vec![]),
+            Err(QueueError::Empty)
+        ));
     }
 
     #[test]
