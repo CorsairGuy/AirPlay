@@ -310,6 +310,7 @@
 ### C45 — Device profiles: согласованность TXT и `/info` (P1)
 
 Область: `crates/device/src/profile.rs`, отдельные тесты; discovery C12/C13 не менять. Референсы: v12 L-69/L-84 и [DEVICE-PROFILES](DEVICE-PROFILES-20261125.md). Проверить согласованность feature words, версии, identity и отсутствующих полей между профилем, DNS-SD и `/info`; при отсутствии доказательства конкретного устройства не вводить его профиль в ядро. Готово: тесты несогласованных и предельных plist, тестовый профиль без реальных ключей.
+Статус: **на проверке**. Добавлен crates/device/tests/profile_info_txt.rs (5 тестов): features в /info, featuresEx и TXT-запись совпадают с маской профиля; model/sourceVersion/psi/deviceID/accessoryType/statusFlags берутся из одних полей; геометрия displays совпадает с Display профиля; SCREEN без display и display без SCREEN отклоняются; отсутствие model/features и status_flags больше u32 отклоняются, граница name 64/65 байт. Команда: cargo test --offline -p device — все прошли. Ограничения: discovery C12/C13 не менялись, реальные профили устройств не проверялись.
 
 ### C46 — mDNS: жизненный цикл объявлений при нескольких экземплярах (P1)
 
