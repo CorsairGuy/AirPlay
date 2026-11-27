@@ -90,6 +90,7 @@ pub struct PcmPacketizer {
     mapping_lead_frames: u32,
     first_index: Option<u64>,
     next_min_index: Option<u64>,
+    marker_pending: bool,
     cache: Vec<Option<(u16, Vec<u8>)>>,
 }
 
@@ -104,6 +105,7 @@ impl PcmPacketizer {
             mapping_lead_frames: latency_frames,
             first_index: None,
             next_min_index: None,
+            marker_pending: false,
             cache: (0..RETRANSMIT_CACHE_PACKETS).map(|_| None).collect(),
         }
     }
@@ -144,6 +146,11 @@ impl PcmPacketizer {
         self.cache.fill(None);
     }
 
+    /// Mark the first packet and synchronization anchor after a discontinuity.
+    pub fn restart_spurt(&mut self) {
+        self.marker_pending = true;
+    }
+
     pub fn packetize(
         &mut self,
         pcm: &[u8],
@@ -163,7 +170,7 @@ impl PcmPacketizer {
             .checked_add((pcm.len() / PCM_FRAME_BYTES) as u64)
             .ok_or(PacketizeError::FrameIndexOverflow)?;
         let nonce = self.next_nonce.ok_or(PacketizeError::NonceExhausted)?;
-        let first = self.first_index.is_none();
+        let first = self.first_index.is_none() || self.marker_pending;
         let origin = self.first_index.unwrap_or(frame_index);
         let timestamp = self
             .latency_frames
@@ -181,6 +188,7 @@ impl PcmPacketizer {
             Some((self.sequence, audio.clone()));
         self.first_index = Some(origin);
         self.next_min_index = Some(next_index);
+        self.marker_pending = false;
         self.sequence = self.sequence.wrapping_add(1);
         self.next_nonce = nonce.checked_add(1);
         Ok(Packetized {
@@ -265,6 +273,21 @@ mod tests {
             &sender.retransmit(&request(0, 1))[0][4..],
             next.audio.as_slice()
         );
+    }
+    #[test]
+    fn seek_marks_one_packet_and_restarts_sync_without_reusing_nonce() {
+        let mut sender = sender(7);
+        let first = sender.packetize(&[1; 1408], 1000, 1).unwrap();
+        sender.clear_retransmit_cache();
+        sender.restart_spurt();
+        assert!(sender.packetize(&[2; 1408], 1000, 2).is_err());
+        let seek = sender.packetize(&[3; 1408], 1352, 3).unwrap();
+        let next = sender.packetize(&[4; 1408], 1704, 4).unwrap();
+        assert!(first.header.marker && seek.header.marker && !next.header.marker);
+        assert_eq!(seek.sync[0], 0x90);
+        assert_eq!(next.sync[0], 0x80);
+        assert_eq!(seek.header.seq, first.header.seq.wrapping_add(1));
+        assert_eq!(&seek.audio[seek.audio.len() - 8..], &1u64.to_le_bytes());
     }
     #[test]
     fn pcm_encrypts_once_with_first_marker_and_shared_producer_epoch() {
