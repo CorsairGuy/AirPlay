@@ -141,7 +141,7 @@
 
 ### C05 — Mirroring TX: контроль жизненного цикла event channel (P1)
 
-Статус: открыта. Область: `services/media/src/tx/mirror.rs`, тесты `services/media/tests/mirror_tx.rs`; не менять RX mirroring. Референсы: v12 фаза 5, [doubletake `5e2f1cbe`, event channel](https://github.com/omarroth/doubletake/blob/5e2f1cbe/internal/airplay/event_channel.go) и `mirror.go` той же ревизии. Сверить фреймирование, закрытие, обрывы и повторное подключение; исправить подтверждённые ошибки. Готово: тесты частичного SETUP, отказов и cleanup; поддержка конкретного телевизора остаётся неподтверждённой.
+Статус: **на проверке** (Buffy, `feat/c05-mirror-event-lifecycle`). Добавлены тесты event-канала: порты вне u16 отклоняются, запрос без CSeq завершает обслуживание и закрывает сокет, обрыв со стороны приёмника не паникует; прежние тесты частичного SETUP и reconnect в `mirror_tx.rs` не менялись. `cargo test --offline -p media --lib event_tests` — 7 passed. Реальный Apple TV не проверялся. Область: `services/media/src/tx/mirror.rs`, тесты `services/media/tests/mirror_tx.rs`; не менять RX mirroring. Референсы: v12 фаза 5, [doubletake `5e2f1cbe`, event channel](https://github.com/omarroth/doubletake/blob/5e2f1cbe/internal/airplay/event_channel.go) и `mirror.go` той же ревизии. Сверить фреймирование, закрытие, обрывы и повторное подключение; исправить подтверждённые ошибки. Готово: тесты частичного SETUP, отказов и cleanup; поддержка конкретного телевизора остаётся неподтверждённой.
 
 ### C06 — Mirroring RX: устойчивость фрейминга (P1)
 

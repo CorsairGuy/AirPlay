@@ -845,8 +845,75 @@ mod event_tests {
         }
         drop(task);
     }
-}
 
+    /// Порт события/времени вне u16 — ошибка конфигурации, а не паника.
+    #[tokio::test]
+    async fn optional_ports_outside_u16_are_rejected() {
+        let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        let endpoint = socket.local_addr().unwrap();
+        let response = plist::Value::Dictionary(dictionary(vec![
+            ("eventPort", plist::Value::Integer(70_000u64.into())),
+            ("timingPort", plist::Value::Integer(70_000u64.into())),
+        ]));
+        assert!(
+            connect_event(&response, endpoint, Duration::from_secs(1), None)
+                .await
+                .is_err()
+        );
+        assert!(start_timing_probes(&response, endpoint, socket).is_err());
+    }
+
+    /// Запрос без CSeq завершает обслуживание event-канала и закрывает сокет,
+    /// а не оставляет висящую задачу.
+    #[tokio::test]
+    async fn event_channel_stops_on_a_request_without_cseq() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let response = plist::Value::Dictionary(dictionary(vec![(
+            "eventPort",
+            plist::Value::Integer((endpoint.port() as u64).into()),
+        )]));
+        let task = connect_event(&response, endpoint, Duration::from_secs(2), None)
+            .await
+            .unwrap()
+            .unwrap();
+        let (mut socket, _) = listener.accept().await.unwrap();
+
+        let request = rtsp::Request::new("POST", "/command", "RTSP/1.0");
+        let mut plain = Vec::new();
+        request.encode(&mut plain);
+        socket.write_all(&plain).await.unwrap();
+
+        let mut byte = [0u8; 1];
+        let read = tokio::time::timeout(Duration::from_secs(2), socket.read(&mut byte))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(read, 0, "event-канал должен закрыться");
+        drop(task);
+    }
+
+    /// Обрыв event-соединения со стороны приёмника не паникует и не мешает
+    /// освободить задачу.
+    #[tokio::test]
+    async fn event_channel_tolerates_the_peer_closing() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let response = plist::Value::Dictionary(dictionary(vec![(
+            "eventPort",
+            plist::Value::Integer((endpoint.port() as u64).into()),
+        )]));
+        let task = connect_event(&response, endpoint, Duration::from_secs(2), None)
+            .await
+            .unwrap()
+            .unwrap();
+        let (socket, _) = listener.accept().await.unwrap();
+        drop(socket);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        drop(task);
+    }
+
+}
 fn validate(config: &MirrorConfig) -> Result<()> {
     if config.endpoint.port() == 0 {
         bail!("mirror receiver port must not be zero");
