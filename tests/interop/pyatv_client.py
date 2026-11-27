@@ -3,13 +3,14 @@ MRP из pyatv.
 
 Запуск (нужны pyatv и srptools 1.0.1, на которую рассчитан pyatv):
 
-    pip install pyatv "srptools==1.0.1"
-    airplay --port 7123 --pin 1234 --no-mdns --mrp &
+    pip install "pyatv==0.14.5" "srptools==1.0.1"
+    cargo run -p runtime --example interop_receiver -- --port 7123 --pin 1234 &
     python tests/interop/pyatv_client.py 127.0.0.1 7123 1234
 """
 
 import asyncio
 import binascii
+import logging
 import plistlib
 import random
 import socket
@@ -26,6 +27,15 @@ from pyatv.protocols.mrp import messages, protobuf
 from pyatv.settings import InfoSettings
 
 HOST, PORT, PIN = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+
+
+class FrameErrors(logging.Handler):
+    def __init__(self):
+        super().__init__(level=logging.ERROR)
+        self.messages = []
+
+    def emit(self, record):
+        self.messages.append(self.format(record))
 
 
 class Conn:
@@ -151,6 +161,9 @@ class Listener:
 
 
 async def mrp_session(port, out_key, in_key):
+    frame_errors = FrameErrors()
+    channel_logger = logging.getLogger("pyatv.protocols.airplay.channels")
+    channel_logger.addHandler(frame_errors)
     channel = DataStreamChannel(out_key, in_key)
     listener = Listener()
     channel.listener = listener
@@ -166,14 +179,14 @@ async def mrp_session(port, out_key, in_key):
         request = messages.device_information(InfoSettings(), "pyatv")
         request.identifier = "info"
         channel.send_protobuf(request)
-        device = protobuf.extract_inner(await receive(protobuf.DEVICE_INFO_MESSAGE, "info"))
+        device = (await receive(protobuf.DEVICE_INFO_MESSAGE, "info")).inner()
         assert device.modelID and device.deviceUID, device
 
         channel.send_protobuf(messages.client_updates_config())
-        out = protobuf.extract_inner(await receive(protobuf.UPDATE_OUTPUT_DEVICE_MESSAGE))
+        out = (await receive(protobuf.UPDATE_OUTPUT_DEVICE_MESSAGE)).inner()
         output = out.clusterAwareOutputDevices[0]
         assert output.uniqueIdentifier == device.deviceUID and list(output.pickable) == [True], output
-        state = protobuf.extract_inner(await receive(protobuf.SET_STATE_MESSAGE))
+        state = (await receive(protobuf.SET_STATE_MESSAGE)).inner()
         await receive(protobuf.SET_NOW_PLAYING_PLAYER_MESSAGE)
 
         volume = messages.create(protobuf.GET_VOLUME_MESSAGE, identifier="volume")
@@ -181,27 +194,30 @@ async def mrp_session(port, out_key, in_key):
         await receive(protobuf.GET_VOLUME_RESULT_MESSAGE, "volume")
 
         bad = messages.create(protobuf.SET_VOLUME_MESSAGE, identifier="bad-volume")
-        protobuf.extract_inner(bad).volume = 1.5
+        bad.inner().volume = 1.5
         channel.send_protobuf(bad)
         assert (await receive(0, "bad-volume")).errorCode == 18
 
         queue = messages.playback_queue_request(0)
         queue.identifier = "queue"
-        body = protobuf.extract_inner(queue)
+        body = queue.inner()
         body.playerPath.CopyFrom(state.playerPath)
         body.requestID = "queue-id"
         channel.send_protobuf(queue)
-        reply = protobuf.extract_inner(await receive(protobuf.SET_STATE_MESSAGE, "queue"))
+        reply = (await receive(protobuf.SET_STATE_MESSAGE, "queue")).inner()
         assert reply.playbackQueue.requestId == "queue-id", reply
 
         unknown = messages.command(protobuf.CommandInfo_pb2.ChangeRepeatMode)
         unknown.identifier = "repeat"
         channel.send_protobuf(unknown)
-        result = protobuf.extract_inner(await receive(protobuf.SEND_COMMAND_RESULT_MESSAGE, "repeat"))
+        result = (await receive(protobuf.SEND_COMMAND_RESULT_MESSAGE, "repeat")).inner()
         assert result.sendError == protobuf.SendError.NotSupported, result
         return device.name
     finally:
         transport.close()
+        await asyncio.sleep(0.05)
+        channel_logger.removeHandler(frame_errors)
+        assert not frame_errors.messages, "\n".join(frame_errors.messages)
 
 
 def mrp():
