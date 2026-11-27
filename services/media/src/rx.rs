@@ -1781,6 +1781,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejected_sender_retries_after_the_owner_leaves() {
+        let mut player = Player::new(audio_stream::Config::default(), TimeSync::idle(1));
+        player.ownership = Ownership::Reject;
+        let one =
+            Stream::buffered(player.audio.clone(), &[1; 32], Arc::new(clock::NoTime)).unwrap();
+        assert!(player.replace(1, one));
+        let two =
+            Stream::buffered(player.audio.clone(), &[2; 32], Arc::new(clock::NoTime)).unwrap();
+        assert!(!player.replace(2, two), "второй отправитель отклонён");
+        assert_eq!(player.active_packets(), Some(0), "прежний поток не тронут");
+
+        // TEARDOWN от отклонённого отправителя не освобождает чужой поток.
+        player.release(2);
+        assert_eq!(player.active_packets(), Some(0));
+        player.release(1);
+        assert_eq!(player.active_packets(), None);
+
+        // Повторная попытка после ухода владельца принимается.
+        let retry =
+            Stream::buffered(player.audio.clone(), &[2; 32], Arc::new(clock::NoTime)).unwrap();
+        assert!(
+            player.replace(2, retry),
+            "после освобождения портов второй отправитель принимается"
+        );
+    }
+
+    #[tokio::test]
+    async fn parallel_teardowns_never_free_the_new_owner() {
+        let mut player = Player::new(audio_stream::Config::default(), TimeSync::idle(1));
+        player.ownership = Ownership::Takeover;
+        let player = Arc::new(player);
+        let one =
+            Stream::buffered(player.audio.clone(), &[1; 32], Arc::new(clock::NoTime)).unwrap();
+        assert!(player.replace(1, one));
+        let two =
+            Stream::buffered(player.audio.clone(), &[2; 32], Arc::new(clock::NoTime)).unwrap();
+        assert!(player.replace(2, two));
+
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        std::thread::scope(|scope| {
+            let a = player.clone();
+            let b = player.clone();
+            let first_gate = barrier.clone();
+            let second_gate = barrier.clone();
+            scope.spawn(move || {
+                first_gate.wait();
+                a.release(1);
+            });
+            scope.spawn(move || {
+                second_gate.wait();
+                b.release(1);
+            });
+        });
+        assert_eq!(
+            player.active_packets(),
+            Some(0),
+            "параллельные TEARDOWN старой сессии не должны остановить новую"
+        );
+        player.release(2);
+        assert_eq!(player.active_packets(), None);
+    }
+
+    #[tokio::test]
     async fn reject_policy_is_atomic_for_simultaneous_senders() {
         let mut player = Player::new(audio_stream::Config::default(), TimeSync::idle(1));
         player.ownership = Ownership::Reject;
