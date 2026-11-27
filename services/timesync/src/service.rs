@@ -546,6 +546,22 @@ mod peer_update_tests {
         assert_eq!(inbound.owner_count(), 1);
         assert_eq!(outbound.owner_count(), 0);
     }
+
+    #[tokio::test]
+    async fn cancelled_peer_update_must_be_reconciled_by_its_owner() {
+        let source = Peer { ip: "127.0.0.2".parse().unwrap(), ports: Ports { event: 319, general: 320 } };
+        let receiver = Peer { ip: "127.0.0.3".parse().unwrap(), ports: Ports { event: 319, general: 320 } };
+        let service = Service::bind_dual(config(source, Policy::FollowOnly(source.ip)), Arc::new(TestClock)).await.unwrap();
+        let (reply, wait) = oneshot::channel();
+        assert!(service.peers.send(PeerRequest { owner: 3, peers: vec![receiver], inbound: false, deadline: None, reply }).await.is_ok());
+        drop(wait);
+        // Queue order guarantees the update has been applied before this
+        // conflict is evaluated, even though its caller stopped waiting.
+        assert!(service.set_session_peers(4, vec![receiver]).await.is_err());
+        service.set_group_peers(3, vec![]).await.unwrap();
+        service.set_session_peers(4, vec![receiver]).await.unwrap();
+        service.shutdown().await.unwrap();
+    }
     #[tokio::test]
     async fn live_peer_changes_reuse_sockets_source_and_master_epoch() {
         let event = UdpSocket::bind("127.0.0.1:0").await.unwrap();
