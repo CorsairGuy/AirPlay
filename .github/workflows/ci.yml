@@ -39,6 +39,24 @@ jobs:
       - run: cargo test --workspace
       - run: cargo test -p runtime --features mirroring
 
+  # Библиотечный API без CLI: runtime собирается и тестируется как библиотека,
+  # а в workspace не должно появиться бинарников вместо неё.
+  library-api:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test -p runtime --lib
+      - run: cargo test -p runtime --tests
+      - name: Workspace has no CLI binaries
+        shell: bash
+        run: |
+          bins=$(cargo metadata --no-deps --format-version 1             | python3 -c 'import json,sys; m=json.load(sys.stdin); print(" ".join(t["name"] for p in m["packages"] for t in p["targets"] if "bin" in t["kind"]))')
+          if [ -n "$bins" ]; then
+            echo "Unexpected CLI binaries: $bins"
+            exit 1
+          fi
+
   # Минимальный аудиопрофиль без зависимостей видео.
   audio-only:
     runs-on: ubuntu-latest
