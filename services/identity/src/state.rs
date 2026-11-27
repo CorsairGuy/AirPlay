@@ -199,6 +199,29 @@ mod tests {
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
         fs::remove_dir_all(dir).unwrap();
     }
+
+    #[test]
+    fn concurrent_revokes_on_shared_store_persist_every_removal() {
+        let dir = test_dir();
+        let store = std::sync::Arc::new(FileStore::open(&dir).unwrap());
+        for i in 0..16u8 {
+            store.add(format!("ctl-{i}").as_bytes(), [i; 32]);
+        }
+        let threads: Vec<_> = (0..16u8)
+            .map(|i| {
+                let store = store.clone();
+                std::thread::spawn(move || {
+                    assert!(store.remove(format!("ctl-{i}").as_bytes()).unwrap())
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert!(store.is_empty());
+        assert!(FileStore::open(&dir).unwrap().is_empty());
+        fs::remove_dir_all(dir).unwrap();
+    }
 }
 
 impl PairingStore for FileStore {
