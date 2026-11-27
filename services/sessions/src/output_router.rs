@@ -1,6 +1,6 @@
 //! Persistent Card queue routed to the current short-lived source session.
 //! Intent is never confirmed topology, audible readiness or pairing approval.
-use crate::coordinator::output_control::{OutputControl, OutputRequest};
+use remote::output_control::{OutputControl, OutputRequest};
 use ::discovery::catalog::OutputCatalog;
 use ::remote::output_selection;
 use anyhow::{Context, Result};

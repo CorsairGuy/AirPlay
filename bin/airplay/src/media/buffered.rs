@@ -15,20 +15,11 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use media::tx::{AAC_FRAMES_PER_PACKET, BufferedConfig, BufferedSession, adts_frames};
-use tokio::io::AsyncReadExt;
-use tokio::net::{TcpListener, TcpStream};
-use tokio::time::{Instant, sleep_until};
-
-/// Длительность одного AAC-кадра 44,1 кГц, 1024 сэмпла.
-pub fn frame_duration() -> Duration {
-    Duration::from_secs_f64(AAC_FRAMES_PER_PACKET as f64 / 44_100.0)
-}
-
-/// Момент отправки кадра `index` от начала воспроизведения.
-pub fn frame_deadline(start: Instant, index: u64) -> Instant {
-    start + frame_duration() * index as u32
-}
+use media::tx::adts_frames;
+#[cfg(test)]
+use sessions::buffered_sender::{frame_deadline, frame_duration};
+#[cfg(test)]
+use tokio::time::Instant;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Options {
@@ -124,77 +115,20 @@ pub fn read_frames(path: &std::path::Path) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// Принимает и сразу закрывает управляющее соединение приёмника: этот
-/// фронтенд не реализует управляющий канал, но обязан держать порт открытым,
-/// иначе приёмник не сможет его установить.
-async fn hold_control(listener: TcpListener) {
-    loop {
-        let Ok((mut socket, _)) = listener.accept().await else {
-            return;
-        };
-        tokio::spawn(async move {
-            let mut sink = [0u8; 256];
-            while matches!(socket.read(&mut sink).await, Ok(n) if n > 0) {}
-        });
-    }
-}
-
+/// Read a local ADTS file and pass its bytes to the buffered sender.
 pub async fn run(options: Options) -> Result<()> {
     let bytes = read_frames(&options.aac)?;
-    let frames = adts_frames(&bytes).map_err(|e| anyhow!("ADTS: {e:?}"))?;
     let (host, port) = endpoint(&options.target)?;
     let address = tokio::net::lookup_host((host.as_str(), port))
         .await?
         .next()
         .ok_or_else(|| anyhow!("не найден адрес {}", options.target))?;
-
-    let stream = TcpStream::connect(address)
-        .await
-        .with_context(|| format!("подключение {}", options.target))?;
-    let local = stream.local_addr()?.ip();
-    let listener = TcpListener::bind((local, options.control_port))
-        .await
-        .with_context(|| format!("управляющий порт на {local}"))?;
-    let control_port = listener.local_addr()?.port();
-    tokio::spawn(hold_control(listener));
-
-    let mut shk = [0u8; 32];
-    for byte in &mut shk {
-        *byte = rand::random();
-    }
-    let mut id = [0u8; 8];
-    for byte in &mut id {
-        *byte = rand::random();
-    }
-    let stream_connection_id = u64::from_be_bytes(id);
-    let device_id = format!(
-        "02:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
-        rand::random::<u8>(),
-        rand::random::<u8>(),
-        rand::random::<u8>(),
-        rand::random::<u8>(),
-        rand::random::<u8>()
-    );
-    let uri = format!("rtsp://{local}/{stream_connection_id:016X}");
-    let config = BufferedConfig::aac_44100(address, control_port, shk, stream_connection_id);
-    let mut config = config;
-    config.request_timeout = options.timeout;
-    let mut session = BufferedSession::pair_transient(stream, uri, &device_id, config).await?;
-    if let Some(size) = session.reply().audio_buffer_size {
-        tracing::info!(
-            bytes = size,
-            "audioBufferSize приёмника (не используется как pacing)"
-        );
-    }
-    let start = Instant::now();
-    for (index, frame) in frames.iter().enumerate() {
-        sleep_until(frame_deadline(start, index as u64)).await;
-        session.send_frame(frame).await?;
-    }
-    let sent = session.finish().await?;
+    let sent =
+        sessions::buffered_sender::send(&bytes, address, options.control_port, options.timeout)
+            .await?;
     println!(
         "buffered: {sent} кадров, {:.1} с",
-        (frames.len() as f64) * frame_duration().as_secs_f64()
+        sent as f64 * sessions::buffered_sender::frame_duration().as_secs_f64()
     );
     Ok(())
 }

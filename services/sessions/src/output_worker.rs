@@ -21,6 +21,49 @@ pub use ::coordinator::runtime::Snapshot;
 pub type AppliedSelection =
     ApplyResult<::media::tx::pool::SessionHandle, Result<::media::tx::StreamStats>>;
 
+#[cfg(test)]
+mod selection_safety {
+    use super::*;
+    use mrp::wire::Node;
+
+    #[tokio::test]
+    async fn invalid_request_does_not_modify_pool() {
+        let (_source, audio) = tokio::sync::broadcast::channel(4);
+        let pool = SessionPool::new(audio);
+        let catalog = OutputCatalog::new(vec![::discovery::catalog::OutputRoute {
+            uid: "row".into(),
+            name: "speaker".into(),
+            model: String::new(),
+            aliases: vec!["group".into()],
+            receivers: vec![::discovery::catalog::ReceiverEndpoint {
+                uid: "physical".into(),
+                address: ([127, 0, 0, 1], 7000).into(),
+            }],
+        }])
+        .unwrap();
+        let invalid = Node::default().text(5, "group").clone();
+        let desired = output_selection::selection(&invalid, &catalog, &[], &[]).unwrap();
+        let mut runtime = Runtime::default();
+        let plan = plan_selection(&pool, &runtime, &catalog, &desired).unwrap();
+        let mut pool = pool;
+        assert!(
+            apply_selection(&mut runtime, &mut pool, plan, vec![])
+                .await
+                .is_err()
+        );
+        assert!(pool.is_empty());
+        let local = Node::default().text(4, "local").clone();
+        let desired =
+            output_selection::selection(&local, &catalog, &["local".into()], &[]).unwrap();
+        let mut runtime = Runtime::default();
+        let plan = plan_selection(&pool, &runtime, &catalog, &desired).unwrap();
+        let result = apply_selection(&mut runtime, &mut pool, plan, vec![])
+            .await
+            .unwrap();
+        assert!(result.requested.is_empty() && result.started.is_empty());
+    }
+}
+
 async fn stopped(stop: &mut watch::Receiver<bool>) {
     loop {
         if *stop.borrow_and_update() || stop.changed().await.is_err() {

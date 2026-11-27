@@ -9,12 +9,12 @@ use media::control::MrpService;
 #[cfg(feature = "hls")]
 pub use media::hls::HlsOptions;
 use media::rx::Player;
-use sessions::session::Context;
+use crate::session::Context;
 use tokio::net::TcpListener;
 use tracing::info;
 
-use crate::card::Card;
-use crate::identity::state;
+use remote::card::Card;
+use identity::state;
 
 pub struct Options {
     pub name: String,
@@ -46,7 +46,7 @@ pub struct Options {
     /// Что приёмник сообщает наружу (громкость, метаданные, позиция).
     pub events: Arc<dyn ::media::events::Events>,
     /// Куда отдавать принятые фотографии; `None` — профиль выключен.
-    pub photo: Option<Arc<dyn sessions::photo::Sink>>,
+    pub photo: Option<Arc<dyn crate::photo::Sink>>,
     /// Шкала громкости, дБ (по умолчанию 30, как ползунок iPhone).
     pub volume_range_db: f32,
     /// `false` — громкость не применять, только сообщать в `events`.
@@ -288,7 +288,7 @@ pub async fn start(opts: Options) -> Result<Receiver> {
         mrp,
         session_group: Default::default(),
         session_group_owner: Default::default(),
-        photo: opts.photo.map(sessions::photo::Service::new),
+        photo: opts.photo.map(crate::photo::Service::new),
     });
     if opts.mdns {
         let host = format!("airplay-{}", device_id.replace(':', "").to_lowercase());
@@ -300,7 +300,7 @@ pub async fn start(opts: Options) -> Result<Receiver> {
     let (shutdown, shutdown_rx) = tokio::sync::watch::channel(false);
     let mut accepts = Vec::new();
     for listener in listeners {
-        accepts.push(tokio::spawn(::sessions::transport::accept_loop(
+        accepts.push(tokio::spawn(crate::transport::accept_loop(
             listener,
             ctx.clone(),
             shutdown_rx.clone(),

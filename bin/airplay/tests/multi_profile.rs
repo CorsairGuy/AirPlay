@@ -8,8 +8,8 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use airplay::sessions::serve;
-use airplay::{audio_stream, device, events, timesync};
+use sessions::serve;
+use media::events;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -19,7 +19,7 @@ async fn airplay1_sender_and_receiver_exchange_pcm() {
     use std::sync::{Arc, Mutex};
 
     struct Capture(Arc<Mutex<Vec<i16>>>);
-    impl airplay::audio::Sink for Capture {
+    impl audio::Sink for Capture {
         fn sample_rate(&self) -> u32 {
             44_100
         }
@@ -47,8 +47,8 @@ async fn airplay1_sender_and_receiver_exchange_pcm() {
         "AirPlay",
         timesync::TimeSync::idle(1),
     );
-    opts.audio.sink = Some(airplay::audio::SinkFactory::new(move |_, _| {
-        Ok(Box::new(Capture(output.clone())) as Box<dyn airplay::audio::Sink>)
+    opts.audio.sink = Some(audio::SinkFactory::new(move |_, _| {
+        Ok(Box::new(Capture(output.clone())) as Box<dyn audio::Sink>)
     }));
     let receiver = serve::start(opts).await.unwrap();
     let target = Receiver {

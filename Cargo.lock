@@ -102,22 +102,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
-name = "ap_mrp"
-version = "0.1.0"
-dependencies = [
- "mrp",
-]
-
-[[package]]
-name = "ap_sender"
-version = "0.1.0"
-dependencies = [
- "coordinator",
- "discovery",
- "media",
-]
-
-[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2179,12 +2163,14 @@ dependencies = [
  "mrp",
  "pair",
  "plist",
+ "rand 0.8.8",
  "remote",
  "rtp",
  "rtsp",
  "timesync",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 
