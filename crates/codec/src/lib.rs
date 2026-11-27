@@ -429,9 +429,27 @@ mod tests {
 
     #[test]
     fn downmix_saturates_instead_of_wrapping() {
-        let max = [i16::MAX, i16::MAX, i16::MAX, 0, i16::MAX, i16::MAX, i16::MAX, i16::MAX];
+        let max = [
+            i16::MAX,
+            i16::MAX,
+            i16::MAX,
+            0,
+            i16::MAX,
+            i16::MAX,
+            i16::MAX,
+            i16::MAX,
+        ];
         assert_eq!(downmix(&max), (i16::MAX, i16::MAX));
-        let min = [i16::MIN, i16::MIN, i16::MIN, 0, i16::MIN, i16::MIN, i16::MIN, i16::MIN];
+        let min = [
+            i16::MIN,
+            i16::MIN,
+            i16::MIN,
+            0,
+            i16::MIN,
+            i16::MIN,
+            i16::MIN,
+            i16::MIN,
+        ];
         assert_eq!(downmix(&min), (i16::MIN, i16::MIN));
     }
 

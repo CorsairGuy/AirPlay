@@ -637,22 +637,32 @@ mod s13_tests {
     #[test]
     fn classic_flush_keeps_boundary_and_rejects_delayed_earlier_packets() {
         let p = playout();
-        for ts in [1000, 2000, 3000] { p.push(ts, 0x1600_0000, vec![1]); }
+        for ts in [1000, 2000, 3000] {
+            p.push(ts, 0x1600_0000, vec![1]);
+        }
         p.flush_classic(2000);
         p.push(1000, 0x1600_0000, vec![2]);
         let state = p.lock();
-        assert_eq!(state.packets.keys().copied().collect::<Vec<_>>(), vec![2000, 3000]);
+        assert_eq!(
+            state.packets.keys().copied().collect::<Vec<_>>(),
+            vec![2000, 3000]
+        );
         assert_eq!(state.played_through, Some(1999));
     }
 
     #[test]
     fn classic_flush_boundary_unwraps_across_rtp_rollover() {
         let p = playout();
-        for ts in [u32::MAX - 10, 5, 20] { p.push(ts, 0x1600_0000, vec![1]); }
+        for ts in [u32::MAX - 10, 5, 20] {
+            p.push(ts, 0x1600_0000, vec![1]);
+        }
         p.flush_classic(5);
         p.push(u32::MAX - 10, 0x1600_0000, vec![2]);
         let state = p.lock();
-        assert_eq!(state.packets.keys().copied().collect::<Vec<_>>(), vec![u32::MAX as i64 + 6, u32::MAX as i64 + 21]);
+        assert_eq!(
+            state.packets.keys().copied().collect::<Vec<_>>(),
+            vec![u32::MAX as i64 + 6, u32::MAX as i64 + 21]
+        );
     }
 
     #[test]

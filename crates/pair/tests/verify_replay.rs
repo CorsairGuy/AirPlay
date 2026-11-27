@@ -84,10 +84,7 @@ fn replaying_m3_after_success_fails_closed() {
         panic!();
     };
     let m3 = client.m3(&m2).unwrap();
-    let VerifyOutcome::Verified {
-        keys, shared, ..
-    } = server.handle(&m3, &store).unwrap()
-    else {
+    let VerifyOutcome::Verified { keys, shared, .. } = server.handle(&m3, &store).unwrap() else {
         panic!("первая проверка должна пройти");
     };
     // Ключи канала выводятся из общего секрета; направление read/write разное.

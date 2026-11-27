@@ -129,15 +129,26 @@ impl Node {
         self.validate_inner(message, false, 0)
     }
 
-    fn validate_inner(&self, message: &str, allow_unknown: bool, depth: usize) -> Result<(), Error> {
-        if depth > 64 { return Err(Error::Protobuf("слишком глубокая вложенность")); }
+    fn validate_inner(
+        &self,
+        message: &str,
+        allow_unknown: bool,
+        depth: usize,
+    ) -> Result<(), Error> {
+        if depth > 64 {
+            return Err(Error::Protobuf("слишком глубокая вложенность"));
+        }
         for (id, value) in &self.0 {
             let Some((expected, nested)) = crate::schema::wire_type(message, *id) else {
-                if allow_unknown { continue; }
+                if allow_unknown {
+                    continue;
+                }
                 return Err(Error::Schema(format!("нет поля {message}.{id}")));
             };
             if value.wire_type() != expected {
-                if allow_unknown { continue; }
+                if allow_unknown {
+                    continue;
+                }
                 return Err(Error::Schema(format!(
                     "{message}.{id}: тип {} вместо {expected}",
                     value.wire_type()
@@ -331,9 +342,15 @@ mod tests {
     #[test]
     fn unknown_fields_are_preserved_and_tolerated_inbound() {
         let mut node = Node::default();
-        node.int(1, 1).int(2, 0).int(9_999, 7).bytes(10_000, b"future");
+        node.int(1, 1)
+            .int(2, 0)
+            .int(9_999, 7)
+            .bytes(10_000, b"future");
         let parsed = Node::parse(&node.encode()).unwrap();
-        assert_eq!(parsed, node, "порядок и неизвестные поля должны сохраниться");
+        assert_eq!(
+            parsed, node,
+            "порядок и неизвестные поля должны сохраниться"
+        );
         assert!(parsed.validate_known("SetDiscoveryModeMessage").is_ok());
         assert!(
             parsed.validate("SetDiscoveryModeMessage").is_err(),
@@ -383,7 +400,10 @@ mod tests {
         let packet = encode_packet(&vec![message.clone(); MAX_MESSAGES]);
         assert_eq!(decode_packet(&packet).unwrap().len(), MAX_MESSAGES);
         let packet = encode_packet(&vec![message; MAX_MESSAGES + 1]);
-        assert!(decode_packet(&packet).is_err(), "MAX_MESSAGES + 1 сообщение");
+        assert!(
+            decode_packet(&packet).is_err(),
+            "MAX_MESSAGES + 1 сообщение"
+        );
     }
 
     #[test]
@@ -392,5 +412,4 @@ mod tests {
         assert!(decode_packet(&[0x02, 0x08]).is_err(), "длина больше данных");
         assert!(decode_packet(&[0x01, 0x08, 0x08]).is_err());
     }
-
 }

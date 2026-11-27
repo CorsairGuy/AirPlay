@@ -145,5 +145,8 @@ fn several_complete_frames_in_one_call_are_all_or_nothing() {
     let mut channel = acc;
     let mut out = Vec::new();
     assert!(channel.open(&mut wire, &mut out).is_err());
-    assert!(out.is_empty(), "ни один кадр не выдаётся при ошибке в пачке");
+    assert!(
+        out.is_empty(),
+        "ни один кадр не выдаётся при ошибке в пачке"
+    );
 }

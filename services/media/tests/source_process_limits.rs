@@ -15,15 +15,27 @@ fn invalid_commands_are_rejected_before_spawn() {
             args: vec![],
         },
         Options {
-            program: std::path::PathBuf::from(if cfg!(windows) { "C:\\tool.exe" } else { "/tool" }),
+            program: std::path::PathBuf::from(if cfg!(windows) {
+                "C:\\tool.exe"
+            } else {
+                "/tool"
+            }),
             args: (0..65).map(|i| i.to_string()).collect(),
         },
         Options {
-            program: std::path::PathBuf::from(if cfg!(windows) { "C:\\tool.exe" } else { "/tool" }),
+            program: std::path::PathBuf::from(if cfg!(windows) {
+                "C:\\tool.exe"
+            } else {
+                "/tool"
+            }),
             args: vec!["a".repeat(4097)],
         },
         Options {
-            program: std::path::PathBuf::from(if cfg!(windows) { "C:\\tool.exe" } else { "/tool" }),
+            program: std::path::PathBuf::from(if cfg!(windows) {
+                "C:\\tool.exe"
+            } else {
+                "/tool"
+            }),
             args: vec!["zero\0byte".into()],
         },
     ];
@@ -31,7 +43,11 @@ fn invalid_commands_are_rejected_before_spawn() {
         assert!(options.validate().is_err(), "{options:?}");
     }
     let good = Options {
-        program: std::path::PathBuf::from(if cfg!(windows) { "C:\\tool.exe" } else { "/tool" }),
+        program: std::path::PathBuf::from(if cfg!(windows) {
+            "C:\\tool.exe"
+        } else {
+            "/tool"
+        }),
         args: vec!["-f".into(), "raw".into()],
     };
     assert!(good.validate().is_ok());
@@ -87,7 +103,10 @@ async fn nonzero_exit_is_a_source_error_not_silence() {
     let mut bytes = Vec::new();
     capture.read_to_end(&mut bytes).await.unwrap();
     assert!(bytes.is_empty());
-    assert!(capture.finish().await.is_err(), "ненулевой код выхода — ошибка");
+    assert!(
+        capture.finish().await.is_err(),
+        "ненулевой код выхода — ошибка"
+    );
 }
 
 #[tokio::test]
@@ -95,17 +114,11 @@ async fn selected_capture_does_not_restart_a_running_source() {
     use media::tx::source_process::SelectedCapture;
     let mut selected = SelectedCapture::default();
     assert!(
-        selected
-            .select(sleeper(60))
-            .await
-            .expect("первый выбор"),
+        selected.select(sleeper(60)).await.expect("первый выбор"),
         "первый выбор запускает процесс"
     );
     assert!(
-        !selected
-            .select(sleeper(60))
-            .await
-            .expect("повторный выбор"),
+        !selected.select(sleeper(60)).await.expect("повторный выбор"),
         "тот же живой источник не перезапускается"
     );
     // Ошибочный вариант отклоняется до остановки рабочего источника.
@@ -118,7 +131,10 @@ async fn selected_capture_does_not_restart_a_running_source() {
             .await
             .is_err()
     );
-    assert!(selected.reader().is_ok(), "рабочий источник остался выбранным");
+    assert!(
+        selected.reader().is_ok(),
+        "рабочий источник остался выбранным"
+    );
     selected.stop().await.unwrap();
     assert!(selected.reader().is_err());
 }

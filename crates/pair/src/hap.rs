@@ -171,11 +171,14 @@ impl PairSetup {
         if verify_signature(ltpk, &info, signature).is_err() {
             return Ok(SetupOutcome::Rejected(error_reply(6)));
         }
-        if store.try_add(
-            id,
-            ltpk.try_into()
-                .expect("длина проверена при проверке подписи"),
-        ).is_err() {
+        if store
+            .try_add(
+                id,
+                ltpk.try_into()
+                    .expect("длина проверена при проверке подписи"),
+            )
+            .is_err()
+        {
             return Ok(SetupOutcome::Rejected(error_reply(6)));
         }
 

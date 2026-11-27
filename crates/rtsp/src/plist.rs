@@ -350,8 +350,7 @@ mod tests {
                     .unwrap();
                 body
             },
-            b"<plist><dict><key>a</key><array><integer>1</integer></array></dict></plist>"
-                .to_vec(),
+            b"<plist><dict><key>a</key><array><integer>1</integer></array></dict></plist>".to_vec(),
         ];
         for body in bodies {
             for cut in 0..=body.len() {
@@ -370,7 +369,10 @@ mod tests {
         for (offset, value) in [(6usize, 0u8), (6, 9), (7, 0), (7, 9)] {
             let mut broken = body.clone();
             broken[len - 32 + offset] = value;
-            assert!(!nesting_within(&broken, MAX_DEPTH), "trailer byte {offset}={value}");
+            assert!(
+                !nesting_within(&broken, MAX_DEPTH),
+                "trailer byte {offset}={value}"
+            );
             assert!(parse(&broken).is_none());
         }
 
@@ -399,7 +401,10 @@ mod tests {
             b"<plist><!-- <array><dict> --><dict/></plist>",
             0
         ));
-        assert!(nesting_within(b"<?xml version=\"1.0\"?><plist><string>x</string></plist>", 0));
+        assert!(nesting_within(
+            b"<?xml version=\"1.0\"?><plist><string>x</string></plist>",
+            0
+        ));
         assert!(nesting_within(b"<plist><array>", MAX_DEPTH));
         assert!(nesting_within(b"<", MAX_DEPTH));
         assert!(nesting_within(b"<!--", MAX_DEPTH));
@@ -431,5 +436,4 @@ mod tests {
             let _ = parse(&buffer);
         }
     }
-
 }

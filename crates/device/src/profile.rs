@@ -32,14 +32,13 @@ pub struct Profile {
 impl Profile {
     /// Читает XML- или binary-plist профиля.
     pub fn load(path: &Path) -> Result<Self, String> {
-        let value =
-            Value::from_file(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let value = Value::from_file(path).map_err(|e| format!("{}: {e}", path.display()))?;
         Self::from_value(&value)
     }
 
     pub fn parse(text: &str) -> Result<Self, String> {
-        let value = plist::from_bytes::<Value>(text.as_bytes())
-            .map_err(|e| format!("профиль: {e}"))?;
+        let value =
+            plist::from_bytes::<Value>(text.as_bytes()).map_err(|e| format!("профиль: {e}"))?;
         Self::from_value(&value)
     }
 
@@ -120,7 +119,9 @@ impl Profile {
         }
         if self.source_version.is_empty()
             || self.source_version.len() > 32
-            || !self.source_version.starts_with(|c: char| c.is_ascii_digit())
+            || !self
+                .source_version
+                .starts_with(|c: char| c.is_ascii_digit())
             || !self
                 .source_version
                 .chars()
@@ -138,9 +139,7 @@ impl Profile {
                     || !(1..=7680).contains(&display.height)
                     || !(1..=120).contains(&display.fps)
                 {
-                    return Err(
-                        "профиль: display — ширина/высота 1..7680, fps 1..120".into(),
-                    );
+                    return Err("профиль: display — ширина/высота 1..7680, fps 1..120".into());
                 }
             }
             (Some(_), false) => {
@@ -164,9 +163,8 @@ fn parse_display(value: &Value) -> Result<Display, String> {
             return Err(format!("профиль: неизвестный ключ display.{key}"));
         }
     }
-    let get = |key: &str| {
-        number(d, key)?.ok_or_else(|| format!("профиль: display.{key} обязателен"))
-    };
+    let get =
+        |key: &str| number(d, key)?.ok_or_else(|| format!("профиль: display.{key} обязателен"));
     Ok(Display {
         width: u32::try_from(get("width")?).map_err(|_| "профиль: display.width")?,
         height: u32::try_from(get("height")?).map_err(|_| "профиль: display.height")?,
@@ -219,8 +217,8 @@ mod tests {
             Some(Display {
                 width: 1920,
                 height: 1080,
-                fps: 60
-                , ..Display::default()
+                fps: 60,
+                ..Display::default()
             })
         );
 
@@ -243,10 +241,12 @@ mod tests {
         assert!(bad("<key>magic</key><true/>").is_err());
         assert!(bad("<key>source_version</key><string>1.x</string>").is_err());
         assert!(
-            bad("<key>display</key><dict><key>width</key><integer>1920</integer>\
+            bad(
+                "<key>display</key><dict><key>width</key><integer>1920</integer>\
                  <key>height</key><integer>1080</integer>\
-                 <key>fps</key><integer>60</integer></dict>")
-                .is_err(),
+                 <key>fps</key><integer>60</integer></dict>"
+            )
+            .is_err(),
             "display без бита SCREEN"
         );
         assert!(bad("<key>features</key><integer>0</integer>").is_err());

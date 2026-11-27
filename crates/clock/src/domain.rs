@@ -290,8 +290,14 @@ mod tests {
         let to = ClockMap::new(local.at(100), outgoing.reading(300), -100, 50).unwrap();
         let converted = translate(incoming.reading(220), &from, &to, local.at(120)).unwrap();
         assert_eq!(converted.domain(), outgoing);
-        assert_eq!(translate(converted, &from, &to, local.at(120)), Err(Error::WrongDomain));
-        assert_eq!(translate(incoming.reading(220), &from, &to, local.at(151)), Err(Error::Stale));
+        assert_eq!(
+            translate(converted, &from, &to, local.at(120)),
+            Err(Error::WrongDomain)
+        );
+        assert_eq!(
+            translate(incoming.reading(220), &from, &to, local.at(151)),
+            Err(Error::Stale)
+        );
     }
     #[test]
     fn negative_offsets_and_u64_limits_never_wrap() {

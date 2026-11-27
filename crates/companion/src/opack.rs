@@ -201,7 +201,9 @@ fn write_int(v: i64, out: &mut Vec<u8>) -> Result<(), Error> {
 
 /// Разбирает одно значение и возвращает его вместе с числом прочитанных байт.
 pub fn decode(data: &[u8]) -> Result<(Value, usize), Error> {
-    if data.len() > MAX_INPUT { return Err(Error::Opack("слишком большой OPACK")); }
+    if data.len() > MAX_INPUT {
+        return Err(Error::Opack("слишком большой OPACK"));
+    }
     let mut decoder = Decoder {
         data,
         pos: 0,
@@ -368,14 +370,26 @@ impl Decoder<'_> {
     }
 
     fn charge(&mut self, amount: usize) -> Result<(), Error> {
-        self.expanded = self.expanded.checked_add(amount).ok_or(Error::Opack("OPACK слишком велик"))?;
-        if self.expanded > MAX_EXPANDED { return Err(Error::Opack("OPACK слишком велик")); }
+        self.expanded = self
+            .expanded
+            .checked_add(amount)
+            .ok_or(Error::Opack("OPACK слишком велик"))?;
+        if self.expanded > MAX_EXPANDED {
+            return Err(Error::Opack("OPACK слишком велик"));
+        }
         Ok(())
     }
 
     fn reference(&mut self, index: usize) -> Result<Value, Error> {
-        let value = self.objects.get(index).ok_or(Error::Opack("ссылка на неизвестное значение"))?;
-        let bytes = match value { Value::Str(v) => v.len(), Value::Data(v) => v.len(), _ => 0 };
+        let value = self
+            .objects
+            .get(index)
+            .ok_or(Error::Opack("ссылка на неизвестное значение"))?;
+        let bytes = match value {
+            Value::Str(v) => v.len(),
+            Value::Data(v) => v.len(),
+            _ => 0,
+        };
         self.charge(bytes)?;
         Ok(self.objects[index].clone())
     }
@@ -546,14 +560,23 @@ mod tests {
         ];
         for (value, wire) in cases {
             assert_eq!(hex::encode(encode(&Value::Int(*value)).unwrap()), *wire);
-            assert_eq!(unpack(&hex::decode(wire).unwrap()).unwrap(), Value::Int(*value));
+            assert_eq!(
+                unpack(&hex::decode(wire).unwrap()).unwrap(),
+                Value::Int(*value)
+            );
         }
     }
 
     /// 32/33 и 255/256 — границы, где меняется тег длины строки и данных.
     #[test]
     fn string_and_data_length_boundaries() {
-        for (len, tag) in [(0usize, 0x40), (32, 0x60), (33, 0x61), (255, 0x61), (256, 0x62)] {
+        for (len, tag) in [
+            (0usize, 0x40),
+            (32, 0x60),
+            (33, 0x61),
+            (255, 0x61),
+            (256, 0x62),
+        ] {
             let text = "x".repeat(len);
             let bytes = encode(&Value::Str(text.clone())).unwrap();
             assert_eq!(bytes[0], tag, "строка длиной {len}");
@@ -563,14 +586,24 @@ mod tests {
         let bytes = encode(&Value::Str("y".repeat(0x1_0000))).unwrap();
         assert_eq!(&bytes[..4], &[0x63, 0, 0, 1], "0x63 — три байта длины");
 
-        for (len, tag) in [(0usize, 0x70), (32, 0x90), (33, 0x91), (255, 0x91), (256, 0x92)] {
+        for (len, tag) in [
+            (0usize, 0x70),
+            (32, 0x90),
+            (33, 0x91),
+            (255, 0x91),
+            (256, 0x92),
+        ] {
             let data = vec![0xA5; len];
             let bytes = encode(&Value::Data(data.clone())).unwrap();
             assert_eq!(bytes[0], tag, "данные длиной {len}");
             assert_eq!(unpack(&bytes).unwrap(), Value::Data(data));
         }
         let bytes = encode(&Value::Data(vec![0; 0x1_0000])).unwrap();
-        assert_eq!(&bytes[..5], &[0x93, 0, 0, 1, 0], "0x93 — четыре байта длины");
+        assert_eq!(
+            &bytes[..5],
+            &[0x93, 0, 0, 1, 0],
+            "0x93 — четыре байта длины"
+        );
     }
 
     /// Длина строки считается в байтах UTF-8, а не в символах.
@@ -620,7 +653,10 @@ mod tests {
         let value = Value::object(vec![
             ("_i", Value::Str("_hidC".into())),
             ("_t", Value::Int(2)),
-            ("_c", Value::Array(vec![Value::Int(0), Value::Data(vec![7; 40])])),
+            (
+                "_c",
+                Value::Array(vec![Value::Int(0), Value::Data(vec![7; 40])]),
+            ),
         ]);
         let bytes = encode(&value).unwrap();
         for cut in 0..bytes.len() {
@@ -628,5 +664,4 @@ mod tests {
         }
         assert_eq!(unpack(&bytes).unwrap(), value);
     }
-
 }

@@ -128,12 +128,16 @@ async fn two_instances_start_answer_and_stop_independently() {
 
     // Остановка A: порт закрыт, B продолжает отвечать.
     a.stop().await;
-    assert!(TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], pa)))
-        .await
-        .is_err());
-    assert!(status(SocketAddr::from(([127, 0, 0, 1], pb)))
-        .await
-        .starts_with("RTSP/1.0 200"));
+    assert!(
+        TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], pa)))
+            .await
+            .is_err()
+    );
+    assert!(
+        status(SocketAddr::from(([127, 0, 0, 1], pb)))
+            .await
+            .starts_with("RTSP/1.0 200")
+    );
     b.stop().await;
 }
 
@@ -145,9 +149,11 @@ async fn dropping_an_instance_releases_its_port() {
         let instance = runtime::AirPlay::start(options("Drop", dir.path(), port, "AppleTV3,2"))
             .await
             .expect("старт");
-        assert!(status(SocketAddr::from(([127, 0, 0, 1], port)))
-            .await
-            .starts_with("RTSP/1.0 200"));
+        assert!(
+            status(SocketAddr::from(([127, 0, 0, 1], port)))
+                .await
+                .starts_with("RTSP/1.0 200")
+        );
         drop(instance);
     }
     // Drop не обязан быть асинхронным, но порт должен освободиться.
@@ -155,7 +161,9 @@ async fn dropping_an_instance_releases_its_port() {
     loop {
         match TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], port))).await {
             Err(_) => break,
-            Ok(_) if std::time::Instant::now() > deadline => panic!("порт не освобождён после drop"),
+            Ok(_) if std::time::Instant::now() > deadline => {
+                panic!("порт не освобождён после drop")
+            }
             Ok(_) => tokio::time::sleep(Duration::from_millis(20)).await,
         }
     }
@@ -174,10 +182,15 @@ async fn a_busy_port_is_reported_as_a_start_error() {
         .await
         .expect("первый старт");
     let second = runtime::AirPlay::start(options("Second", dir.path(), port, "AppleTV3,2")).await;
-    assert!(second.is_err(), "занятый порт должен возвращать ошибку, а не панику");
+    assert!(
+        second.is_err(),
+        "занятый порт должен возвращать ошибку, а не панику"
+    );
     // Первый экземпляр не пострадал.
-    assert!(status(SocketAddr::from(([127, 0, 0, 1], port)))
-        .await
-        .starts_with("RTSP/1.0 200"));
+    assert!(
+        status(SocketAddr::from(([127, 0, 0, 1], port)))
+            .await
+            .starts_with("RTSP/1.0 200")
+    );
     first.stop().await;
 }

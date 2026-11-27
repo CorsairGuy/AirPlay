@@ -156,6 +156,55 @@ impl FileStore {
     }
 }
 
+impl PairingStore for FileStore {
+    fn get(&self, id: &[u8]) -> Option<[u8; 32]> {
+        let _guard = self.write.lock().unwrap();
+        self.mem.get(id)
+    }
+
+    fn len(&self) -> usize {
+        let _guard = self.write.lock().unwrap();
+        self.mem.len()
+    }
+
+    fn remove(&self, id: &[u8]) -> std::io::Result<bool> {
+        let _guard = self.write.lock().unwrap();
+        let entries = self.mem.entries();
+        if !entries.iter().any(|(key, _)| key.as_slice() == id) {
+            return Ok(false);
+        }
+        let remaining: Vec<_> = entries
+            .into_iter()
+            .filter(|(key, _)| key.as_slice() != id)
+            .collect();
+        self.persist(&remaining)?;
+        self.mem.remove(id)?;
+        Ok(true)
+    }
+
+    fn add(&self, id: &[u8], public_key: [u8; 32]) {
+        if let Err(e) = self.try_add(id, public_key) {
+            tracing::error!("не удалось сохранить сопряжение: {e}");
+        }
+    }
+
+    fn try_add(&self, id: &[u8], public_key: [u8; 32]) -> std::io::Result<()> {
+        if id.is_empty() {
+            return Err(std::io::Error::new(
+                ErrorKind::InvalidInput,
+                "empty pairing identifier",
+            ));
+        }
+        let _guard = self.write.lock().unwrap();
+        let mut entries = self.mem.entries();
+        entries.retain(|(key, _)| key.as_slice() != id);
+        entries.push((id.to_vec(), public_key));
+        self.persist(&entries)?;
+        self.mem.add(id, public_key);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,54 +317,5 @@ mod tests {
         assert!(store.is_empty());
         assert!(FileStore::open(&dir).unwrap().is_empty());
         fs::remove_dir_all(dir).unwrap();
-    }
-}
-
-impl PairingStore for FileStore {
-    fn get(&self, id: &[u8]) -> Option<[u8; 32]> {
-        let _guard = self.write.lock().unwrap();
-        self.mem.get(id)
-    }
-
-    fn len(&self) -> usize {
-        let _guard = self.write.lock().unwrap();
-        self.mem.len()
-    }
-
-    fn remove(&self, id: &[u8]) -> std::io::Result<bool> {
-        let _guard = self.write.lock().unwrap();
-        let entries = self.mem.entries();
-        if !entries.iter().any(|(key, _)| key.as_slice() == id) {
-            return Ok(false);
-        }
-        let remaining: Vec<_> = entries
-            .into_iter()
-            .filter(|(key, _)| key.as_slice() != id)
-            .collect();
-        self.persist(&remaining)?;
-        self.mem.remove(id)?;
-        Ok(true)
-    }
-
-    fn add(&self, id: &[u8], public_key: [u8; 32]) {
-        if let Err(e) = self.try_add(id, public_key) {
-            tracing::error!("не удалось сохранить сопряжение: {e}");
-        }
-    }
-
-    fn try_add(&self, id: &[u8], public_key: [u8; 32]) -> std::io::Result<()> {
-        if id.is_empty() {
-            return Err(std::io::Error::new(
-                ErrorKind::InvalidInput,
-                "empty pairing identifier",
-            ));
-        }
-        let _guard = self.write.lock().unwrap();
-        let mut entries = self.mem.entries();
-        entries.retain(|(key, _)| key.as_slice() != id);
-        entries.push((id.to_vec(), public_key));
-        self.persist(&entries)?;
-        self.mem.add(id, public_key);
-        Ok(())
     }
 }

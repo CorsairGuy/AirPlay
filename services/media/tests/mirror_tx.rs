@@ -531,6 +531,269 @@ async fn mirror_sender_pairs_sets_up_streams_and_reconnects() {
     assert_eq!(rounds[0].video_latency, 50);
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum Cancel {
+    AfterPairVerify,
+    AfterAudioSetup,
+    None,
+}
+
+struct EarlyRound {
+    session_uuid: Option<String>,
+    shk: Option<[u8; 32]>,
+    timing_peer: Option<u16>,
+}
+
+/// Раунд с отменой на выбранном этапе: pair-verify, затем (если этап позже)
+/// аудио-SETUP с event/timing-портами и разрыв соединения без TEARDOWN.
+async fn early_round(
+    fixture: &Fixture,
+    control: TcpStream,
+    accessory: PairIdentity,
+    cancel: Cancel,
+) -> Result<EarlyRound> {
+    let mut conn = Conn::new(control);
+    let mut verify = PairVerify::new(accessory);
+    let mut round = EarlyRound {
+        session_uuid: None,
+        shk: None,
+        timing_peer: None,
+    };
+    loop {
+        let request = conn.request().await?;
+        match (request.method.as_str(), request.uri.as_str()) {
+            ("POST", "/pair-verify") => match verify.handle(&request.body, &fixture.store)? {
+                VerifyOutcome::Continue(body) => conn.reply(&request, body).await?,
+                VerifyOutcome::Verified { reply, keys, .. } => {
+                    conn.reply(&request, reply).await?;
+                    conn.channel = Some(Channel::new(keys));
+                    break;
+                }
+                VerifyOutcome::Rejected(_) => bail!("pair-verify rejected"),
+            },
+            (method, uri) => bail!("unexpected {method} {uri}"),
+        }
+    }
+    if cancel == Cancel::AfterPairVerify {
+        return Ok(round);
+    }
+
+    let request = conn.request().await?;
+    assert_eq!(request.method, "SETUP");
+    let body = plist(&request.body)?;
+    let stream = streams(&body)?;
+    assert_eq!(
+        stream.get("type").and_then(|v| v.as_unsigned_integer()),
+        Some(96)
+    );
+    round.session_uuid = body
+        .get("sessionUUID")
+        .and_then(|v| v.as_string())
+        .map(str::to_owned);
+    let mut shk = [0u8; 32];
+    shk.copy_from_slice(stream.get("shk").and_then(|v| v.as_data()).unwrap());
+    round.shk = Some(shk);
+    let reply = dictionary(vec![
+        (
+            "timingPort",
+            plist::Value::Integer((fixture.timing_socket.local_addr()?.port() as u64).into()),
+        ),
+        (
+            "eventPort",
+            plist::Value::Integer((fixture.event_listener.local_addr()?.port() as u64).into()),
+        ),
+        (
+            "streams",
+            plist::Value::Array(vec![plist::Value::Dictionary(dictionary(vec![
+                ("type", plist::Value::Integer(96u64.into())),
+                (
+                    "dataPort",
+                    plist::Value::Integer(
+                        (fixture.audio_socket.local_addr()?.port() as u64).into(),
+                    ),
+                ),
+                (
+                    "controlPort",
+                    plist::Value::Integer(
+                        (fixture.audio_control_socket.local_addr()?.port() as u64).into(),
+                    ),
+                ),
+            ]))]),
+        ),
+    ]);
+    conn.reply(&request, binary(reply)).await?;
+
+    let expected_port = body["timingPort"].as_unsigned_integer().unwrap();
+    let mut timing_packet = [0u8; 64];
+    let (n, peer) = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let (n, peer) = fixture.timing_socket.recv_from(&mut timing_packet).await?;
+            if peer.port() as u64 == expected_port {
+                break Ok::<_, std::io::Error>((n, peer));
+            }
+        }
+    })
+    .await??;
+    assert_eq!((n, timing_packet[1]), (32, 0xd2));
+    round.timing_peer = Some(peer.port());
+    let (mut event, _) =
+        tokio::time::timeout(Duration::from_secs(2), fixture.event_listener.accept()).await??;
+
+    if cancel == Cancel::AfterAudioSetup {
+        drop(conn);
+        // Клиент обязан закрыть канал событий после отмены.
+        let mut probe = [0u8; 64];
+        let closed = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                match event.read(&mut probe).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => continue,
+                }
+            }
+        })
+        .await;
+        assert!(closed.is_ok(), "event-канал не закрыт после отмены");
+        return Ok(round);
+    }
+
+    let request = conn.request().await?;
+    assert_eq!(request.method, "SETUP");
+    let body = plist(&request.body)?;
+    let stream = streams(&body)?;
+    assert_eq!(
+        stream.get("type").and_then(|v| v.as_unsigned_integer()),
+        Some(110)
+    );
+    let reply = dictionary(vec![(
+        "streams",
+        plist::Value::Array(vec![plist::Value::Dictionary(dictionary(vec![
+            ("type", plist::Value::Integer(110u64.into())),
+            (
+                "dataPort",
+                plist::Value::Integer((fixture.video_listener.local_addr()?.port() as u64).into()),
+            ),
+        ]))]),
+    )]);
+    conn.reply(&request, binary(reply)).await?;
+
+    let request = conn.request().await?;
+    assert_eq!(request.method, "RECORD");
+    conn.reply(&request, Vec::new()).await?;
+    let request = conn.request().await?;
+    assert_eq!(request.method, "TEARDOWN");
+    conn.reply(&request, Vec::new()).await?;
+    let _ = event;
+    Ok(round)
+}
+
+#[tokio::test]
+async fn cancelled_setup_stages_leave_no_sockets_and_retry_gets_new_parameters() {
+    let accessory = PairIdentity::from_seed("accessory:mirror-cancel", &[31u8; 32]);
+    let controller = PairIdentity::from_seed("controller:mirror-cancel", &[33u8; 32]);
+    let fixture = Fixture {
+        store: MemoryStore::default(),
+        audio_socket: UdpSocket::bind("127.0.0.1:0").await.unwrap(),
+        audio_control_socket: UdpSocket::bind("127.0.0.1:0").await.unwrap(),
+        video_listener: TcpListener::bind("127.0.0.1:0").await.unwrap(),
+        event_listener: TcpListener::bind("127.0.0.1:0").await.unwrap(),
+        timing_socket: UdpSocket::bind("127.0.0.1:0").await.unwrap(),
+    };
+    fixture
+        .store
+        .add(controller.pairing_id.as_bytes(), controller.public_key());
+    let credentials = PairingCredentials::new(
+        controller.clone(),
+        accessory.pairing_id.as_bytes().to_vec(),
+        accessory.public_key(),
+    )
+    .unwrap();
+    let control = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = control.local_addr().unwrap();
+
+    let receiver = tokio::spawn({
+        let accessory = accessory.clone();
+        async move {
+            let mut rounds = Vec::new();
+            for (index, cancel) in [
+                Cancel::AfterPairVerify,
+                Cancel::AfterAudioSetup,
+                Cancel::None,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let (stream, _) = control.accept().await?;
+                stream.set_nodelay(true)?;
+                rounds.push(early_round(&fixture, stream, accessory.clone(), cancel).await?);
+                if index == 0 {
+                    assert!(
+                        tokio::time::timeout(
+                            Duration::from_millis(300),
+                            fixture.event_listener.accept()
+                        )
+                        .await
+                        .is_err(),
+                        "после отмены канал событий не открыт"
+                    );
+                }
+                if index == 1 {
+                    let mut probe = [0u8; 64];
+                    assert!(
+                        tokio::time::timeout(
+                            Duration::from_millis(400),
+                            fixture.timing_socket.recv_from(&mut probe)
+                        )
+                        .await
+                        .is_err(),
+                        "после отмены timing-сокет клиента молчит"
+                    );
+                }
+            }
+            Ok::<_, anyhow::Error>(rounds)
+        }
+    });
+
+    let mut identity = Identity::new("controller:mirror-cancel", "Mirror TX");
+    identity.model = "iPhone".into();
+    let config = || {
+        let mut config = MirrorConfig::new(
+            endpoint,
+            identity.clone(),
+            MirrorAuth::Paired(Box::new(credentials.clone())),
+        );
+        config.audio = AudioFormat::AAC_ELD;
+        config
+    };
+
+    assert!(
+        MirrorSession::connect(config()).await.is_err(),
+        "отмена сразу после pair-verify"
+    );
+    assert!(
+        MirrorSession::connect(config()).await.is_err(),
+        "отмена после аудио-SETUP"
+    );
+    let session = MirrorSession::connect(config())
+        .await
+        .expect("третья попытка устанавливает сессию");
+    session.stop().await.expect("mirror stop");
+
+    let rounds = tokio::time::timeout(Duration::from_secs(10), receiver)
+        .await
+        .expect("receiver timeout")
+        .expect("receiver task")
+        .expect("protocol");
+    assert!(rounds[0].session_uuid.is_none(), "до SETUP не дошло");
+    let second = rounds[1].shk.expect("shk отменённого раунда");
+    let third = rounds[2].shk.expect("shk успешного раунда");
+    assert_ne!(second, third, "новая попытка — новые ключи потока");
+    assert_ne!(rounds[1].session_uuid, rounds[2].session_uuid);
+    assert_ne!(
+        rounds[1].timing_peer, rounds[2].timing_peer,
+        "timing-сокет создаётся заново на каждую попытку"
+    );
+}
+
 /// Отказ видео-SETUP после удачного аудио-SETUP не оставляет сессию: уходит
 /// TEARDOWN с тем же Session, а RECORD не отправляется.
 #[tokio::test]

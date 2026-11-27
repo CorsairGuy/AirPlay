@@ -201,6 +201,162 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    /// Циклический master playlist ограничен глубиной, а не бесконечной загрузкой.
+    #[tokio::test]
+    async fn a_cyclic_master_playlist_is_bounded() {
+        let master = "#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=1000
+self.m3u8
+";
+        let responses = (0..MAX_MASTER_DEPTH)
+            .map(|_| {
+                format!(
+                    "HTTP/1.1 200 OK
+Content-Length: {}
+Connection: close
+
+{}",
+                    master.len(),
+                    master
+                )
+            })
+            .collect();
+        let (port, server) = serve(responses).await;
+        let url = Url::parse(&format!("http://localhost:{port}/self.m3u8")).unwrap();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            Fetcher::for_tests().media_playlist(&url, u64::MAX),
+        )
+        .await
+        .expect("глубина должна ограничить цикл");
+        assert_eq!(result.unwrap_err(), Error::Limit);
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), server)
+                .await
+                .unwrap()
+                .unwrap(),
+            MAX_MASTER_DEPTH,
+            "ни одного лишнего запроса"
+        );
+    }
+
+    /// Сервер медленно отдаёт тело без Content-Length, пока клиент не откажется.
+    async fn serve_slow(
+        chunks: usize,
+        delay: std::time::Duration,
+    ) -> (u16, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            let _ = stream.read(&mut request).await;
+            let _ = stream
+                .write_all(
+                    b"HTTP/1.1 200 OK
+Connection: close
+
+",
+                )
+                .await;
+            for _ in 0..chunks {
+                if stream.write_all(b"#EXTM3U more and more").await.is_err() {
+                    break;
+                }
+                tokio::time::sleep(delay).await;
+            }
+        });
+        (port, handle)
+    }
+
+    /// Медленное тело без длины ограничено по памяти, а не ожиданием таймаута.
+    #[tokio::test]
+    async fn a_slow_body_without_length_is_cut_by_the_byte_limit() {
+        let (port, server) = serve_slow(64, std::time::Duration::from_millis(20)).await;
+        let url = Url::parse(&format!("http://localhost:{port}/slow.m3u8")).unwrap();
+        let started = std::time::Instant::now();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            Fetcher::for_tests().fetch_limited(&url, 32),
+        )
+        .await
+        .expect("предел должен сработать раньше таймаута");
+        assert_eq!(result.unwrap_err(), Error::Limit);
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+        server.abort();
+    }
+
+    /// Обрыв посреди тела — ошибка, а не «пустой плейлист».
+    #[tokio::test]
+    async fn a_connection_closed_mid_body_is_an_error() {
+        let (port, server) = serve(vec![
+            "HTTP/1.1 200 OK
+Content-Length: 100
+Connection: close
+
+#EXTM3U"
+                .to_owned(),
+        ])
+        .await;
+        let url = Url::parse(&format!("http://localhost:{port}/cut.m3u8")).unwrap();
+        let result = Fetcher::for_tests().fetch_playlist(&url).await;
+        assert!(matches!(result, Err(Error::Fetch)), "{result:?}");
+        tokio::time::timeout(std::time::Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    /// Пустое тело без длины не становится валидным плейлистом.
+    #[tokio::test]
+    async fn an_empty_body_is_not_a_playlist() {
+        let (port, server) = serve(vec![
+            "HTTP/1.1 200 OK
+Connection: close
+
+"
+            .to_owned(),
+        ])
+        .await;
+        let url = Url::parse(&format!("http://localhost:{port}/empty.m3u8")).unwrap();
+        let result = Fetcher::for_tests().playlist(&url).await;
+        assert!(result.is_err(), "{result:?}");
+        tokio::time::timeout(std::time::Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    /// Отмена запроса немедленно освобождает слот параллельных загрузок и не
+    /// оставляет фоновой задачи: сервер видит закрытие соединения.
+    #[tokio::test]
+    async fn a_cancelled_fetch_releases_its_permit() {
+        let (port, server) = serve_slow(200, std::time::Duration::from_millis(10)).await;
+        let slots = Arc::new(tokio::sync::Semaphore::new(4));
+        let fetcher = Fetcher {
+            client: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .no_proxy()
+                .build()
+                .unwrap(),
+            in_flight: slots.clone(),
+        };
+        assert_eq!(slots.available_permits(), 4);
+        let url = Url::parse(&format!("http://localhost:{port}/cancel.m3u8")).unwrap();
+        let task = tokio::spawn(async move { fetcher.fetch_playlist(&url).await });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(slots.available_permits(), 3, "загрузка занимает слот");
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(
+            slots.available_permits(),
+            4,
+            "отмена возвращает слот, фоновой задачи не осталось"
+        );
+        // Сервер видит закрытие соединения и завершает поток.
+        server.abort();
+    }
+
     #[tokio::test]
     async fn redirected_playlist_resolves_segments_against_final_url() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -292,9 +448,7 @@ mod tests {
 
     /// Сервер отвечает заранее заданными HTTP-ответами на последовательные
     /// подключения; последний ответ закрывает соединение.
-    async fn serve(
-        responses: Vec<String>,
-    ) -> (u16, tokio::task::JoinHandle<usize>) {
+    async fn serve(responses: Vec<String>) -> (u16, tokio::task::JoinHandle<usize>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let handle = tokio::spawn(async move {
@@ -321,7 +475,13 @@ mod tests {
         let url = Url::parse(&format!("http://localhost:{port}/a.m3u8")).unwrap();
         let result = Fetcher::for_tests().fetch_limited(&url, 16).await;
         assert_eq!(result.unwrap_err(), Error::Limit);
-        assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(2), server).await.unwrap().unwrap(), 1);
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), server)
+                .await
+                .unwrap()
+                .unwrap(),
+            1
+        );
     }
 
     /// Тело без Content-Length тоже ограничено: лишний байт в потоке — отказ.
@@ -335,7 +495,10 @@ mod tests {
         let url = Url::parse(&format!("http://localhost:{port}/a.m3u8")).unwrap();
         let result = Fetcher::for_tests().fetch_limited(&url, 16).await;
         assert_eq!(result.unwrap_err(), Error::Limit);
-        tokio::time::timeout(std::time::Duration::from_secs(2), server).await.unwrap().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     /// Не-2xx не превращается в пустой плейлист.
@@ -348,7 +511,10 @@ mod tests {
         let url = Url::parse(&format!("http://localhost:{port}/missing.m3u8")).unwrap();
         let result = Fetcher::for_tests().fetch_playlist(&url).await;
         assert_eq!(result.unwrap_err(), Error::HttpStatus(404));
-        tokio::time::timeout(std::time::Duration::from_secs(2), server).await.unwrap().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     /// Цепочка редиректов ограничена MAX_REDIRECTS запросами, а не циклом.
@@ -360,7 +526,12 @@ mod tests {
         let url = Url::parse(&format!("http://localhost:{port}/loop.m3u8")).unwrap();
         let result = Fetcher::for_tests().fetch_playlist(&url).await;
         assert_eq!(result.unwrap_err(), Error::UnsafeRedirect);
-        assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(2), server).await.unwrap().unwrap(), MAX_REDIRECTS + 1);
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), server)
+                .await
+                .unwrap()
+                .unwrap(),
+            MAX_REDIRECTS + 1
+        );
     }
-
 }

@@ -280,8 +280,11 @@ mod tests {
     #[test]
     fn local_uuid_is_excluded_case_insensitively() {
         let upper = "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE";
-        let catalog = build(vec![ad(&upper.to_lowercase(), 7000, "", false)], &[upper.into()])
-            .unwrap();
+        let catalog = build(
+            vec![ad(&upper.to_lowercase(), 7000, "", false)],
+            &[upper.into()],
+        )
+        .unwrap();
         assert!(catalog.routes().is_empty());
     }
 
@@ -308,9 +311,14 @@ mod tests {
     fn deviceid_fallback_and_invalid_features() {
         let mut no_psi = ad("ignored", 7000, "", false);
         no_psi.txt.remove("psi");
-        no_psi.txt.insert("deviceid".into(), "AA:BB:CC:DD:EE:FF".into());
+        no_psi
+            .txt
+            .insert("deviceid".into(), "AA:BB:CC:DD:EE:FF".into());
         let catalog = build(vec![no_psi], &[]).unwrap();
-        assert_eq!(catalog.resolve("AA:BB:CC:DD:EE:FF").unwrap().uid, "AA:BB:CC:DD:EE:FF");
+        assert_eq!(
+            catalog.resolve("AA:BB:CC:DD:EE:FF").unwrap().uid,
+            "AA:BB:CC:DD:EE:FF"
+        );
 
         for features in ["", "zzz", "0x0", "0x100,0x200"] {
             let mut media = ad("media", 7000, "", false);
@@ -341,5 +349,4 @@ mod tests {
             .collect();
         assert!(build(ads, &[]).is_err());
     }
-
 }

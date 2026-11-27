@@ -5,9 +5,8 @@
 //! определяется наличием обёрнутого ключа (`a=rsaaeskey`/`a=fpaeskey`/
 //! `a=aesiv`), а не списком `et`: `et:0,1` без ключа — открытый поток
 //! (так же считает shairport-sync 5.6.3, `rtsp.c`, `handle_announce`).
-//! Обёрнутый ключ требует RSA-операции приватным ключом приёмника; у
-//! shairport-sync такой ключ есть (`pk` в TXT — его публичная половина),
-//! у нас его нет, поэтому такой `ANNOUNCE` отклоняется, а не подтверждается
+//! Обработка ключей для защищённого RX не реализована: RSA- и FairPlay-пути
+//! требуют отдельной проверки. Такой `ANNOUNCE` отклоняется, а не подтверждается
 //! молча. Совместимость с реальными отправителями не проверена без устройства.
 
 use audio_stream::{Stream, StreamKey};
@@ -422,8 +421,9 @@ a=rtpmap:96 AppleLossless\r\na=fmtp:96 352 0 16 40 10 14 2 255 0 0 44100\r\n";
     #[tokio::test]
     async fn setup_sends_timing_probe_to_advertised_sender_port() {
         let sender = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let mut raop = Raop::default();
-        raop.format = Some(parse_sdp(ALAC.as_bytes()).unwrap());
+        let mut raop = Raop {
+            format: Some(parse_sdp(ALAC.as_bytes()).unwrap()),
+        };
         let mut setup = Request::new("SETUP", "rtsp://test/1", "RTSP/1.0");
         setup.headers.insert(
             "Transport",
@@ -543,5 +543,4 @@ a=rtpmap:96 AppleLossless\n";
         let l16 = "m=audio 0 RTP/AVP 96\na=rtpmap:96 L16/44100/2\n";
         assert_eq!(parse_sdp(l16.as_bytes()).unwrap().frames_per_packet(), 352);
     }
-
 }

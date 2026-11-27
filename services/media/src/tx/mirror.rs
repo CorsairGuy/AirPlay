@@ -727,6 +727,171 @@ fn start_timing_probes(
     }))))
 }
 
+fn validate(config: &MirrorConfig) -> Result<()> {
+    if config.endpoint.port() == 0 {
+        bail!("mirror receiver port must not be zero");
+    }
+    if config.identity.device_id.is_empty()
+        || config.identity.name.is_empty()
+        || config.identity.model.is_empty()
+        || config.identity.source_version.is_empty()
+    {
+        bail!("mirror identity fields must not be empty");
+    }
+    if config.request_timeout.is_zero() || config.request_timeout > Duration::from_secs(30) {
+        bail!("mirror request timeout must be between 0 and 30 seconds");
+    }
+    if config.audio.spf == 0 || config.audio.spf > 4096 {
+        bail!("audio samples per frame must be 1..4096");
+    }
+    Ok(())
+}
+
+fn video_header(len: usize, ntp: u64, timeline: u64, keyframe: bool) -> [u8; VIDEO_HEADER_LEN] {
+    let mut header = [0u8; VIDEO_HEADER_LEN];
+    header[..4].copy_from_slice(&(len as u32).to_le_bytes());
+    header[4] = 0x00;
+    header[5] = if keyframe { 0x10 } else { 0x00 };
+    header[8..16].copy_from_slice(&ntp.to_le_bytes());
+    header[40..48].copy_from_slice(&timeline.to_le_bytes());
+    header
+}
+
+fn audio_descriptor(
+    format: &AudioFormat,
+    stream_id: u64,
+    key: &[u8; 32],
+    control_port: u16,
+) -> Result<plist::Dictionary> {
+    Ok(dictionary(vec![
+        ("type", plist::Value::Integer(96u64.into())),
+        (
+            "streamConnectionID",
+            plist::Value::Integer(stream_id.into()),
+        ),
+        ("ct", plist::Value::Integer((format.ct as u64).into())),
+        ("spf", plist::Value::Integer((format.spf as u64).into())),
+        (
+            "sr",
+            plist::Value::Integer((AUDIO_SAMPLE_RATE as u64).into()),
+        ),
+        ("audioFormat", plist::Value::Integer(format.format.into())),
+        ("audioMode", plist::Value::String("default".into())),
+        ("usingScreen", plist::Value::Boolean(true)),
+        ("isMedia", plist::Value::Boolean(false)),
+        ("supportsDynamicStreamID", plist::Value::Boolean(true)),
+        ("latencyMin", plist::Value::Integer(0u64.into())),
+        (
+            "latencyMax",
+            plist::Value::Integer((format.latency_samples as u64).into()),
+        ),
+        ("shk", plist::Value::Data(key.to_vec())),
+        (
+            "streamConnections",
+            plist::Value::Dictionary(dictionary(vec![
+                (
+                    "streamConnectionTypeRTP",
+                    plist::Value::Dictionary(dictionary(vec![(
+                        "streamConnectionKeyUseStreamEncryptionKey",
+                        plist::Value::Boolean(true),
+                    )])),
+                ),
+                (
+                    "streamConnectionTypeRTCP",
+                    plist::Value::Dictionary(dictionary(vec![(
+                        "streamConnectionKeyPort",
+                        plist::Value::Integer((control_port as u64).into()),
+                    )])),
+                ),
+            ])),
+        ),
+    ]))
+}
+
+fn stream_port(stream: &plist::Value, legacy: &str, connection: &str) -> Result<Option<u16>> {
+    let Some(d) = stream.as_dictionary() else {
+        return Ok(None);
+    };
+    if let Some(port) = d.get(legacy).and_then(|v| v.as_unsigned_integer()) {
+        return Ok(Some(u16::try_from(port).context("port out of range")?));
+    }
+    let Some(port) = d
+        .get("streamConnections")
+        .and_then(|v| v.as_dictionary())
+        .and_then(|v| v.get(connection))
+        .and_then(|v| v.as_dictionary())
+        .and_then(|v| v.get("streamConnectionKeyPort"))
+        .and_then(|v| v.as_unsigned_integer())
+    else {
+        return Ok(None);
+    };
+    Ok(Some(u16::try_from(port).context("port out of range")?))
+}
+
+fn dictionary(items: Vec<(&str, plist::Value)>) -> plist::Dictionary {
+    items
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value))
+        .collect()
+}
+
+fn binary_plist(value: plist::Dictionary) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    plist::Value::Dictionary(value).to_writer_binary(&mut bytes)?;
+    Ok(bytes)
+}
+
+fn random_u64() -> u64 {
+    rand::random()
+}
+
+fn uuid_v4() -> String {
+    let mut b = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut b);
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let h: Vec<String> = b.iter().map(|byte| format!("{byte:02x}")).collect();
+    let h = h.concat();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &h[..8],
+        &h[8..12],
+        &h[12..16],
+        &h[16..20],
+        &h[20..]
+    )
+}
+
+/// Минимальный NTP-ответчик на `timingPort`: приёмник проверяет по нему
+/// доступность часов отправителя. Движок NTP не изменяется.
+async fn ntp_responder(socket: Arc<UdpSocket>) {
+    let mut buf = [0u8; 128];
+    loop {
+        let (n, peer) = match socket.recv_from(&mut buf).await {
+            Ok(value) => value,
+            Err(_) => return,
+        };
+        if let Some(reply) = timesync::ntp::reply(&buf[..n]) {
+            let _ = socket.send_to(&reply, peer).await;
+            continue;
+        }
+        if n < 48 || buf[0] & 0x07 != 3 {
+            continue;
+        }
+        let now = timesync::ntp::now();
+        let mut reply = [0u8; 48];
+        reply[0] = 0x24;
+        reply[1] = 1;
+        reply[2] = buf[2];
+        reply[12..16].copy_from_slice(b"APL\0");
+        reply[16..24].copy_from_slice(&now.to_be_bytes());
+        reply[24..32].copy_from_slice(&buf[40..48]);
+        reply[32..40].copy_from_slice(&now.to_be_bytes());
+        reply[40..48].copy_from_slice(&now.to_be_bytes());
+        let _ = socket.send_to(&reply, peer).await;
+    }
+}
+
 #[cfg(test)]
 mod event_tests {
     use super::*;
@@ -911,170 +1076,5 @@ mod event_tests {
         drop(socket);
         tokio::time::sleep(Duration::from_millis(50)).await;
         drop(task);
-    }
-
-}
-fn validate(config: &MirrorConfig) -> Result<()> {
-    if config.endpoint.port() == 0 {
-        bail!("mirror receiver port must not be zero");
-    }
-    if config.identity.device_id.is_empty()
-        || config.identity.name.is_empty()
-        || config.identity.model.is_empty()
-        || config.identity.source_version.is_empty()
-    {
-        bail!("mirror identity fields must not be empty");
-    }
-    if config.request_timeout.is_zero() || config.request_timeout > Duration::from_secs(30) {
-        bail!("mirror request timeout must be between 0 and 30 seconds");
-    }
-    if config.audio.spf == 0 || config.audio.spf > 4096 {
-        bail!("audio samples per frame must be 1..4096");
-    }
-    Ok(())
-}
-
-fn video_header(len: usize, ntp: u64, timeline: u64, keyframe: bool) -> [u8; VIDEO_HEADER_LEN] {
-    let mut header = [0u8; VIDEO_HEADER_LEN];
-    header[..4].copy_from_slice(&(len as u32).to_le_bytes());
-    header[4] = 0x00;
-    header[5] = if keyframe { 0x10 } else { 0x00 };
-    header[8..16].copy_from_slice(&ntp.to_le_bytes());
-    header[40..48].copy_from_slice(&timeline.to_le_bytes());
-    header
-}
-
-fn audio_descriptor(
-    format: &AudioFormat,
-    stream_id: u64,
-    key: &[u8; 32],
-    control_port: u16,
-) -> Result<plist::Dictionary> {
-    Ok(dictionary(vec![
-        ("type", plist::Value::Integer(96u64.into())),
-        (
-            "streamConnectionID",
-            plist::Value::Integer(stream_id.into()),
-        ),
-        ("ct", plist::Value::Integer((format.ct as u64).into())),
-        ("spf", plist::Value::Integer((format.spf as u64).into())),
-        (
-            "sr",
-            plist::Value::Integer((AUDIO_SAMPLE_RATE as u64).into()),
-        ),
-        ("audioFormat", plist::Value::Integer(format.format.into())),
-        ("audioMode", plist::Value::String("default".into())),
-        ("usingScreen", plist::Value::Boolean(true)),
-        ("isMedia", plist::Value::Boolean(false)),
-        ("supportsDynamicStreamID", plist::Value::Boolean(true)),
-        ("latencyMin", plist::Value::Integer(0u64.into())),
-        (
-            "latencyMax",
-            plist::Value::Integer((format.latency_samples as u64).into()),
-        ),
-        ("shk", plist::Value::Data(key.to_vec())),
-        (
-            "streamConnections",
-            plist::Value::Dictionary(dictionary(vec![
-                (
-                    "streamConnectionTypeRTP",
-                    plist::Value::Dictionary(dictionary(vec![(
-                        "streamConnectionKeyUseStreamEncryptionKey",
-                        plist::Value::Boolean(true),
-                    )])),
-                ),
-                (
-                    "streamConnectionTypeRTCP",
-                    plist::Value::Dictionary(dictionary(vec![(
-                        "streamConnectionKeyPort",
-                        plist::Value::Integer((control_port as u64).into()),
-                    )])),
-                ),
-            ])),
-        ),
-    ]))
-}
-
-fn stream_port(stream: &plist::Value, legacy: &str, connection: &str) -> Result<Option<u16>> {
-    let Some(d) = stream.as_dictionary() else {
-        return Ok(None);
-    };
-    if let Some(port) = d.get(legacy).and_then(|v| v.as_unsigned_integer()) {
-        return Ok(Some(u16::try_from(port).context("port out of range")?));
-    }
-    let Some(port) = d
-        .get("streamConnections")
-        .and_then(|v| v.as_dictionary())
-        .and_then(|v| v.get(connection))
-        .and_then(|v| v.as_dictionary())
-        .and_then(|v| v.get("streamConnectionKeyPort"))
-        .and_then(|v| v.as_unsigned_integer())
-    else {
-        return Ok(None);
-    };
-    Ok(Some(u16::try_from(port).context("port out of range")?))
-}
-
-fn dictionary(items: Vec<(&str, plist::Value)>) -> plist::Dictionary {
-    items
-        .into_iter()
-        .map(|(key, value)| (key.to_string(), value))
-        .collect()
-}
-
-fn binary_plist(value: plist::Dictionary) -> Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    plist::Value::Dictionary(value).to_writer_binary(&mut bytes)?;
-    Ok(bytes)
-}
-
-fn random_u64() -> u64 {
-    rand::random()
-}
-
-fn uuid_v4() -> String {
-    let mut b = [0u8; 16];
-    rand::rngs::OsRng.fill_bytes(&mut b);
-    b[6] = (b[6] & 0x0f) | 0x40;
-    b[8] = (b[8] & 0x3f) | 0x80;
-    let h: Vec<String> = b.iter().map(|byte| format!("{byte:02x}")).collect();
-    let h = h.concat();
-    format!(
-        "{}-{}-{}-{}-{}",
-        &h[..8],
-        &h[8..12],
-        &h[12..16],
-        &h[16..20],
-        &h[20..]
-    )
-}
-
-/// Минимальный NTP-ответчик на `timingPort`: приёмник проверяет по нему
-/// доступность часов отправителя. Движок NTP не изменяется.
-async fn ntp_responder(socket: Arc<UdpSocket>) {
-    let mut buf = [0u8; 128];
-    loop {
-        let (n, peer) = match socket.recv_from(&mut buf).await {
-            Ok(value) => value,
-            Err(_) => return,
-        };
-        if let Some(reply) = timesync::ntp::reply(&buf[..n]) {
-            let _ = socket.send_to(&reply, peer).await;
-            continue;
-        }
-        if n < 48 || buf[0] & 0x07 != 3 {
-            continue;
-        }
-        let now = timesync::ntp::now();
-        let mut reply = [0u8; 48];
-        reply[0] = 0x24;
-        reply[1] = 1;
-        reply[2] = buf[2];
-        reply[12..16].copy_from_slice(b"APL\0");
-        reply[16..24].copy_from_slice(&now.to_be_bytes());
-        reply[24..32].copy_from_slice(&buf[40..48]);
-        reply[32..40].copy_from_slice(&now.to_be_bytes());
-        reply[40..48].copy_from_slice(&now.to_be_bytes());
-        let _ = socket.send_to(&reply, peer).await;
     }
 }
