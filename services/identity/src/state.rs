@@ -1,6 +1,7 @@
 //! Постоянное состояние приёмника: ключ устройства и сопряжённые контроллеры.
 
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -46,26 +47,32 @@ fn new_uuid() -> String {
 /// Загружает ключ устройства или создаёт новый при первом запуске.
 pub fn load_identity(dir: &Path) -> Result<Identity> {
     let path = dir.join("identity");
-    if let Ok(text) = fs::read_to_string(&path) {
-        let mut lines = text.lines();
-        let (Some(seed), Some(id)) = (lines.next(), lines.next()) else {
-            bail!("повреждён файл {}", path.display());
-        };
-        let seed: [u8; 32] = hex::decode(seed.trim())
-            .ok()
-            .and_then(|s| s.try_into().ok())
-            .with_context(|| format!("повреждён ключ в {}", path.display()))?;
-        return Ok(Identity::from_seed(id.trim(), &seed));
+    match fs::read_to_string(&path) {
+        Ok(text) => {
+            let mut lines = text.lines();
+            let (Some(seed), Some(id)) = (lines.next(), lines.next()) else {
+                bail!("повреждён файл {}", path.display());
+            };
+            let seed: [u8; 32] = hex::decode(seed.trim())
+                .ok()
+                .and_then(|s| s.try_into().ok())
+                .with_context(|| format!("повреждён ключ в {}", path.display()))?;
+            return Ok(Identity::from_seed(id.trim(), &seed));
+        }
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => return Err(e).with_context(|| format!("не прочитать {}", path.display())),
     }
     let mut seed = [0u8; 32];
     OsRng.fill_bytes(&mut seed);
     let identity = Identity::from_seed(new_uuid(), &seed);
     fs::create_dir_all(dir).with_context(|| format!("не создать каталог {}", dir.display()))?;
-    fs::write(
-        &path,
-        format!("{}\n{}\n", hex::encode(seed), identity.pairing_id),
-    )
-    .with_context(|| format!("не записать {}", path.display()))?;
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .with_context(|| format!("не создать {}", path.display()))?;
+    write!(file, "{}\n{}\n", hex::encode(seed), identity.pairing_id)
+        .with_context(|| format!("не записать {}", path.display()))?;
     Ok(identity)
 }
 
@@ -92,7 +99,12 @@ impl FileStore {
     pub fn open(dir: &Path) -> Result<Self> {
         let path = dir.join("pairings");
         let mem = MemoryStore::default();
-        if let Ok(text) = fs::read_to_string(&path) {
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(e).with_context(|| format!("не прочитать {}", path.display())),
+        };
+        {
             for line in text.lines() {
                 let Some((id, pk)) = line.split_once(' ') else {
                     continue;
@@ -110,6 +122,45 @@ impl FileStore {
             mem,
             write: Mutex::new(()),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_dir() -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("airplay-identity-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn identity_is_stable_across_reopen() {
+        let dir = test_dir();
+        let first = load_identity(&dir).unwrap();
+        let second = load_identity(&dir).unwrap();
+        assert_eq!(first.pairing_id, second.pairing_id);
+        assert_eq!(first.seed(), second.seed());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn unreadable_identity_does_not_get_replaced() {
+        let dir = test_dir();
+        fs::create_dir(dir.join("identity")).unwrap();
+        assert!(load_identity(&dir).is_err());
+        assert!(dir.join("identity").is_dir());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn unreadable_pairings_are_not_treated_as_empty() {
+        let dir = test_dir();
+        fs::create_dir(dir.join("pairings")).unwrap();
+        assert!(FileStore::open(&dir).is_err());
+        fs::remove_dir_all(dir).unwrap();
     }
 }
 
