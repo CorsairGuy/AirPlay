@@ -63,7 +63,7 @@ impl Node {
         let mut at = 0;
         let mut fields = Vec::new();
         while at < data.len() {
-            if fields.len() > MAX_FIELDS {
+            if fields.len() >= MAX_FIELDS {
                 return Err(Error::Protobuf("слишком много полей"));
             }
             let tag = varint(data, &mut at)?;
@@ -263,7 +263,7 @@ pub fn encode_packet(messages: &[Node]) -> Vec<u8> {
 pub fn decode_packet(mut data: &[u8]) -> Result<Vec<Node>, Error> {
     let mut out = Vec::new();
     while !data.is_empty() {
-        if out.len() > MAX_MESSAGES {
+        if out.len() >= MAX_MESSAGES {
             return Err(Error::Protobuf("слишком много сообщений"));
         }
         // Байт 0x08 — тег поля `type`: одно сообщение без длины впереди,
@@ -325,4 +325,72 @@ mod tests {
         assert!(Node::parse(&[0x80; 12]).is_err());
         assert!(decode_packet(&[0x05, 0x08]).is_err());
     }
+
+    /// Неизвестные поля сохраняются при разборе и перекодировании, но
+    /// строгая исходящая проверка их не пропускает; входящая — пропускает.
+    #[test]
+    fn unknown_fields_are_preserved_and_tolerated_inbound() {
+        let mut node = Node::default();
+        node.int(1, 1).int(2, 0).int(9_999, 7).bytes(10_000, b"future");
+        let parsed = Node::parse(&node.encode()).unwrap();
+        assert_eq!(parsed, node, "порядок и неизвестные поля должны сохраниться");
+        assert!(parsed.validate_known("SetDiscoveryModeMessage").is_ok());
+        assert!(
+            parsed.validate("SetDiscoveryModeMessage").is_err(),
+            "исходящее сообщение с полем вне схемы"
+        );
+
+        let mut wrong = Node::default();
+        wrong.text(1, "not a varint");
+        assert!(wrong.validate_known("SetDiscoveryModeMessage").is_ok());
+        assert!(wrong.validate("SetDiscoveryModeMessage").is_err());
+    }
+
+    /// Порядок полей, повторяющиеся значения и fixed32/fixed64 переживают
+    /// разбор без перестановки.
+    #[test]
+    fn field_order_and_wire_types_roundtrip() {
+        let mut node = Node::default();
+        node.int(5, 1)
+            .int(3, 2)
+            .int(5, 3)
+            .text(7, "a")
+            .text(7, "b")
+            .float(8, 0.5)
+            .double(9, -12.25);
+        let parsed = Node::parse(&node.encode()).unwrap();
+        assert_eq!(parsed, node);
+        assert_eq!(parsed.number(5), Some(3), "последнее значение поля");
+        assert_eq!(parsed.strings(7).collect::<Vec<_>>(), ["a", "b"]);
+        assert_eq!(parsed.real(8), Some(0.5));
+        assert_eq!(parsed.real(9), Some(-12.25));
+    }
+
+    /// Пределы полей и сообщений включают ровно объявленный максимум.
+    #[test]
+    fn field_and_message_limits_are_exact() {
+        let field = [0x08, 0x00];
+        let mut at_limit = Vec::with_capacity(MAX_FIELDS * 2);
+        for _ in 0..MAX_FIELDS {
+            at_limit.extend_from_slice(&field);
+        }
+        assert_eq!(Node::parse(&at_limit).unwrap().0.len(), MAX_FIELDS);
+        at_limit.extend_from_slice(&field);
+        assert!(Node::parse(&at_limit).is_err(), "MAX_FIELDS + 1 поле");
+
+        let mut message = Node::default();
+        message.int(1, 0);
+        let packet = encode_packet(&vec![message.clone(); MAX_MESSAGES]);
+        assert_eq!(decode_packet(&packet).unwrap().len(), MAX_MESSAGES);
+        let packet = encode_packet(&vec![message; MAX_MESSAGES + 1]);
+        assert!(decode_packet(&packet).is_err(), "MAX_MESSAGES + 1 сообщение");
+    }
+
+    #[test]
+    fn empty_and_overlong_packets_are_rejected() {
+        assert!(decode_packet(&[0x00]).is_err(), "нулевая длина сообщения");
+        assert!(decode_packet(&[0x02, 0x08]).is_err(), "длина больше данных");
+        assert!(decode_packet(&[0x01, 0x08, 0x08]).is_err());
+    }
+
 }
