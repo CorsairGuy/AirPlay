@@ -5,7 +5,7 @@ use crate::{
 };
 use ::discovery::catalog::{OutputCatalog, ReceiverEndpoint};
 use ::media::tx::{AudioPacket, MediaClock, Session, pool::SessionPool};
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use std::sync::{Arc, Weak};
 use timesync::media::{MasterLease, MasterTimeline};
 use tokio::sync::{mpsc, watch};
@@ -147,6 +147,24 @@ impl ClockPeers {
     }
 }
 impl PtpGroup {
+    /// Bind an outgoing group to the live inbound epoch of the same dual
+    /// timing service. Losing that epoch cancels the group instead of silently
+    /// continuing on the still-running outbound clock.
+    pub fn new_relay(
+        timing: &timesync::TimeSync,
+        group: u128,
+        owner: u128,
+        ports: timesync::sender::Ports,
+        upstream: watch::Receiver<bool>,
+    ) -> Result<Self> {
+        let source = timing.dual_clock_source().context("dual timing source is not running")?;
+        let service = timing.shared_service().context("timing service is not running")?;
+        let timeline = Arc::new(MasterTimeline::new_relay(
+            source, service.subscribe(), std::time::Duration::from_millis(100),
+        )?);
+        Self::new(timeline, group, upstream)?.with_clock_service(&service, owner, ports)
+    }
+
     pub fn new(
         timeline: Arc<MasterTimeline>,
         group: u128,
@@ -652,6 +670,33 @@ mod tests {
         );
         updates.send_replace(initial);
         drop(group);
+        assert!(producer.packet(0, &pcm).is_err());
+    }
+    #[tokio::test]
+    async fn relay_group_stops_producer_when_inbound_mapping_is_lost() {
+        let origin = Instant::now();
+        let own = Domain::new(7, 1).unwrap();
+        let inbound = Domain::new(50, 2).unwrap();
+        let local = LocalClock::new(1).unwrap();
+        let source = Arc::new(InstantSource::new(origin, local, own, 1_000_000_000));
+        let snapshot = Snapshot {
+            selection: Selection { role: Role::Follower("192.0.2.1".parse().unwrap()), domain: Some(inbound) },
+            mapping: Some(ClockMap::new(local.at(0), inbound.reading(2_000_000_000), 0, 5_000_000_000).unwrap()),
+            quality: Some(Quality::OneWay),
+            link: None,
+            outbound: Some(ClockMap::new(local.at(0), own.reading(1_000_000_000), 0, 5_000_000_000).unwrap()),
+        };
+        let (updates, status) = watch::channel(snapshot);
+        let timeline = Arc::new(MasterTimeline::new_relay(source, status, Duration::from_millis(100)).unwrap());
+        let (_user, upstream) = watch::channel(false);
+        let group = PtpGroup::new(timeline, 42, upstream).unwrap();
+        let producer = group.producer(MediaClock::at(origin, 0));
+        let pcm = [0; ::media::tx::PACKET_BYTES];
+        assert_eq!(producer.packet(0, &pcm).unwrap().ptp_reading().unwrap().domain(), own);
+        let mut lost = snapshot;
+        lost.mapping = None;
+        lost.quality = None;
+        updates.send_replace(lost);
         assert!(producer.packet(0, &pcm).is_err());
     }
     struct Blocked {
