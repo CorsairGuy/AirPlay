@@ -6,7 +6,7 @@
 
 use std::time::Duration;
 
-use media::tx::continuous_source::{bounded_reader, End, State};
+use media::tx::continuous_source::{End, State, bounded_reader};
 use media::tx::{FRAME_BYTES, PACKET_BYTES};
 use tokio::sync::watch;
 

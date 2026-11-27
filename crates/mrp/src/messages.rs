@@ -396,7 +396,10 @@ const MAX_CARD_ARTWORK_BYTES: usize = 2 * 1024 * 1024;
 
 fn content_item(now: &NowPlaying, request: Option<&Node>) -> Node {
     use f::ContentItemMetadata as m;
-    let artwork = now.artwork.as_ref().filter(|art| !art.data.is_empty() && art.data.len() <= MAX_CARD_ARTWORK_BYTES);
+    let artwork = now
+        .artwork
+        .as_ref()
+        .filter(|art| !art.data.is_empty() && art.data.len() <= MAX_CARD_ARTWORK_BYTES);
     let mut md = Node::default();
     md.text(m::title, &now.title)
         .text(m::trackArtistName, &now.artist)
@@ -688,16 +691,25 @@ mod tests {
         let d = device();
         let now = playing();
         for (location, length, expected) in [
-            (0, 1, true), (0, 0, false), (1, 1, false),
-            (u64::MAX, 1, false), (0, u64::MAX, false),
+            (0, 1, true),
+            (0, 0, false),
+            (1, 1, false),
+            (u64::MAX, 1, false),
+            (0, u64::MAX, false),
         ] {
             let mut request = Node::default();
-            request.int(q::location, location).int(q::length, length).text(q::requestID, "range-id");
+            request
+                .int(q::location, location)
+                .int(q::length, length)
+                .text(q::requestID, "range-id");
             let answer = state(&d, &now, Some(&request), None);
             let body = answer.nested(f::ProtocolMessage::setStateMessage).unwrap();
             let queue = body.nested(f::SetStateMessage::playbackQueue).unwrap();
             assert_eq!(queue.string(f::PlaybackQueue::requestId), Some("range-id"));
-            assert_eq!(queue.raw(f::PlaybackQueue::contentItems).is_some(), expected);
+            assert_eq!(
+                queue.raw(f::PlaybackQueue::contentItems).is_some(),
+                expected
+            );
         }
     }
 
@@ -709,13 +721,21 @@ mod tests {
         let mut request = Node::default();
         request.double(f::PlaybackQueueRequestMessage::artworkWidth, 600.0);
         let response = state(&d, &now, Some(&request), None);
-        let body = response.nested(f::ProtocolMessage::setStateMessage).unwrap();
+        let body = response
+            .nested(f::ProtocolMessage::setStateMessage)
+            .unwrap();
         let queue = body.nested(f::SetStateMessage::playbackQueue).unwrap();
         let item = queue.nested(f::PlaybackQueue::contentItems).unwrap();
         assert!(item.raw(f::ContentItem::artworkData).is_none());
         let metadata = item.nested(f::ContentItem::metadata).unwrap();
-        assert_eq!(metadata.number(f::ContentItemMetadata::artworkAvailable), Some(0));
-        assert_eq!(metadata.string(f::ContentItemMetadata::title), Some("Песня"));
+        assert_eq!(
+            metadata.number(f::ContentItemMetadata::artworkAvailable),
+            Some(0)
+        );
+        assert_eq!(
+            metadata.string(f::ContentItemMetadata::title),
+            Some("Песня")
+        );
     }
 
     #[test]

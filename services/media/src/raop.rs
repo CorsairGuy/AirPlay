@@ -543,5 +543,4 @@ a=rtpmap:96 AppleLossless\n";
         let l16 = "m=audio 0 RTP/AVP 96\na=rtpmap:96 L16/44100/2\n";
         assert_eq!(parse_sdp(l16.as_bytes()).unwrap().frames_per_packet(), 352);
     }
-
 }

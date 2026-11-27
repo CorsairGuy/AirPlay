@@ -486,9 +486,7 @@ pub async fn connection(
     // обрабатываем: если писатель уже умер, цикл ниже обнаружит это сам.
     let _ = tx
         .send(Output::Messages(vec![model::device_info(
-            &identity,
-            &previous,
-            None,
+            &identity, &previous, None,
         )]))
         .await;
     let opened = std::time::Instant::now();
@@ -547,21 +545,37 @@ mod tests {
     use super::*;
     #[tokio::test]
     async fn announces_device_info_when_tunnel_opens() {
-        let identity = Identity { device: "local".into(), group: "group".into() };
+        let identity = Identity {
+            device: "local".into(),
+            group: "group".into(),
+        };
         let (feed, updates) = watch::channel(Feed::default());
         let control = Control::new(feed, media::control::Remote::new());
         let (server, mut client) = tokio::io::duplex(65536);
         let task = tokio::spawn(connection(server, identity, updates, control));
         let mut header = [0u8; 32];
-        tokio::time::timeout(tokio::time::Duration::from_secs(2), client.read_exact(&mut header)).await.unwrap().unwrap();
+        tokio::time::timeout(
+            tokio::time::Duration::from_secs(2),
+            client.read_exact(&mut header),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert_eq!(&header[4..8], b"sync");
         let len = u32::from_be_bytes(header[..4].try_into().unwrap()) as usize;
         let mut body = vec![0; len - 32];
         client.read_exact(&mut body).await.unwrap();
         let plist = plist::Value::from_reader(std::io::Cursor::new(body)).unwrap();
-        let bytes = plist.as_dictionary().unwrap()["params"].as_dictionary().unwrap()["data"].as_data().unwrap();
+        let bytes = plist.as_dictionary().unwrap()["params"]
+            .as_dictionary()
+            .unwrap()["data"]
+            .as_data()
+            .unwrap();
         let messages = wire::decode_packet(bytes).unwrap();
-        assert_eq!(messages[0].number(f("ProtocolMessage", "type")), Some(kind("DEVICE_INFO_MESSAGE") as u64));
+        assert_eq!(
+            messages[0].number(f("ProtocolMessage", "type")),
+            Some(kind("DEVICE_INFO_MESSAGE") as u64)
+        );
         drop(client);
         task.await.unwrap().unwrap();
     }

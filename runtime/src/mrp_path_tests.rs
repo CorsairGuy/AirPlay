@@ -31,7 +31,9 @@ async fn probe(service: MrpService, fragmented: bool) -> Node {
         .text(2, "same-request")
         .node(20, &Node::default());
     let mut wire = Vec::new();
-    channel.seal(&mrp::frame::sync(9, &[request]), &mut wire).unwrap();
+    channel
+        .seal(&mrp::frame::sync(9, &[request]), &mut wire)
+        .unwrap();
     if fragmented {
         for part in wire.chunks(3) {
             stream.write_all(part).await.unwrap();

@@ -85,9 +85,14 @@ fn ipv6_scope_is_preserved_and_not_collapsed_to_ipv4() {
 #[test]
 fn local_receiver_is_excluded_by_any_of_its_identifiers() {
     let mut txt_ad = ad("self", "192.0.2.10:7000", "psi-self", "g");
-    txt_ad.txt.insert("deviceid".into(), "AA:BB:CC:DD:EE:FF".into());
+    txt_ad
+        .txt
+        .insert("deviceid".into(), "AA:BB:CC:DD:EE:FF".into());
     let catalog = build(vec![txt_ad], &["AA:BB:CC:DD:EE:FF".into()]).unwrap();
-    assert!(catalog.routes().is_empty(), "собственный приёмник не должен попадать в выдачу");
+    assert!(
+        catalog.routes().is_empty(),
+        "собственный приёмник не должен попадать в выдачу"
+    );
 }
 
 #[test]

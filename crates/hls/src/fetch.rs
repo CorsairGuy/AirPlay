@@ -292,9 +292,7 @@ mod tests {
 
     /// Сервер отвечает заранее заданными HTTP-ответами на последовательные
     /// подключения; последний ответ закрывает соединение.
-    async fn serve(
-        responses: Vec<String>,
-    ) -> (u16, tokio::task::JoinHandle<usize>) {
+    async fn serve(responses: Vec<String>) -> (u16, tokio::task::JoinHandle<usize>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let handle = tokio::spawn(async move {
@@ -321,7 +319,13 @@ mod tests {
         let url = Url::parse(&format!("http://localhost:{port}/a.m3u8")).unwrap();
         let result = Fetcher::for_tests().fetch_limited(&url, 16).await;
         assert_eq!(result.unwrap_err(), Error::Limit);
-        assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(2), server).await.unwrap().unwrap(), 1);
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), server)
+                .await
+                .unwrap()
+                .unwrap(),
+            1
+        );
     }
 
     /// Тело без Content-Length тоже ограничено: лишний байт в потоке — отказ.
@@ -335,7 +339,10 @@ mod tests {
         let url = Url::parse(&format!("http://localhost:{port}/a.m3u8")).unwrap();
         let result = Fetcher::for_tests().fetch_limited(&url, 16).await;
         assert_eq!(result.unwrap_err(), Error::Limit);
-        tokio::time::timeout(std::time::Duration::from_secs(2), server).await.unwrap().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     /// Не-2xx не превращается в пустой плейлист.
@@ -348,7 +355,10 @@ mod tests {
         let url = Url::parse(&format!("http://localhost:{port}/missing.m3u8")).unwrap();
         let result = Fetcher::for_tests().fetch_playlist(&url).await;
         assert_eq!(result.unwrap_err(), Error::HttpStatus(404));
-        tokio::time::timeout(std::time::Duration::from_secs(2), server).await.unwrap().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     /// Цепочка редиректов ограничена MAX_REDIRECTS запросами, а не циклом.
@@ -360,7 +370,12 @@ mod tests {
         let url = Url::parse(&format!("http://localhost:{port}/loop.m3u8")).unwrap();
         let result = Fetcher::for_tests().fetch_playlist(&url).await;
         assert_eq!(result.unwrap_err(), Error::UnsafeRedirect);
-        assert_eq!(tokio::time::timeout(std::time::Duration::from_secs(2), server).await.unwrap().unwrap(), MAX_REDIRECTS + 1);
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), server)
+                .await
+                .unwrap()
+                .unwrap(),
+            MAX_REDIRECTS + 1
+        );
     }
-
 }

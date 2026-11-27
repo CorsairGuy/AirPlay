@@ -454,25 +454,48 @@ mod peer_update_tests {
     async fn expired_owner_stops_receiving_without_stopping_other_owners() {
         let base_event = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let base_general = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let base = Peer { ip: base_event.local_addr().unwrap().ip(), ports: Ports {
-            event: base_event.local_addr().unwrap().port(), general: base_general.local_addr().unwrap().port()
-        }};
+        let base = Peer {
+            ip: base_event.local_addr().unwrap().ip(),
+            ports: Ports {
+                event: base_event.local_addr().unwrap().port(),
+                general: base_general.local_addr().unwrap().port(),
+            },
+        };
         let event = UdpSocket::bind("127.0.0.3:0").await.unwrap();
         let general = UdpSocket::bind("127.0.0.3:0").await.unwrap();
-        let leased = Peer { ip: event.local_addr().unwrap().ip(), ports: Ports {
-            event: event.local_addr().unwrap().port(), general: general.local_addr().unwrap().port()
-        }};
-        let service = Service::bind(config(base, Policy::Elect), Arc::new(TestClock)).await.unwrap();
+        let leased = Peer {
+            ip: event.local_addr().unwrap().ip(),
+            ports: Ports {
+                event: event.local_addr().unwrap().port(),
+                general: general.local_addr().unwrap().port(),
+            },
+        };
+        let service = Service::bind(config(base, Policy::Elect), Arc::new(TestClock))
+            .await
+            .unwrap();
         let mut status = service.subscribe();
         wait_for(&mut status, |s| s.selection.role == Role::Master).await;
-        service.set_group_peers_for(1, vec![leased], Some(Duration::from_millis(300))).await.unwrap();
+        service
+            .set_group_peers_for(1, vec![leased], Some(Duration::from_millis(300)))
+            .await
+            .unwrap();
         let mut buffer = [0; 1024];
-        timeout(Duration::from_secs(1), event.recv_from(&mut buffer)).await.unwrap().unwrap();
+        timeout(Duration::from_secs(1), event.recv_from(&mut buffer))
+            .await
+            .unwrap()
+            .unwrap();
         tokio::time::sleep(Duration::from_millis(450)).await;
         while event.try_recv(&mut buffer).is_ok() {}
-        assert!(timeout(Duration::from_millis(300), event.recv_from(&mut buffer)).await.is_err());
+        assert!(
+            timeout(Duration::from_millis(300), event.recv_from(&mut buffer))
+                .await
+                .is_err()
+        );
         while base_event.try_recv(&mut buffer).is_ok() {}
-        timeout(Duration::from_secs(1), base_event.recv_from(&mut buffer)).await.unwrap().unwrap();
+        timeout(Duration::from_secs(1), base_event.recv_from(&mut buffer))
+            .await
+            .unwrap()
+            .unwrap();
         service.shutdown().await.unwrap();
     }
 }

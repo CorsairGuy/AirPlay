@@ -69,7 +69,10 @@ fn info_model_and_versions_come_from_the_same_fields() {
     assert_eq!(get(&dict, "model").as_string(), Some("AirPort10,115"));
     assert_eq!(get(&dict, "sourceVersion").as_string(), Some("366.0"));
     assert_eq!(get(&dict, "psi").as_string(), Some("psi-1"));
-    assert_eq!(get(&dict, "deviceID").as_string(), Some("AA:BB:CC:DD:EE:01"));
+    assert_eq!(
+        get(&dict, "deviceID").as_string(),
+        Some("AA:BB:CC:DD:EE:01")
+    );
     assert_eq!(get(&dict, "accessoryType").as_unsigned_integer(), Some(5));
     assert_eq!(get(&dict, "statusFlags").as_unsigned_integer(), Some(0x404));
     let caps = get(&dict, "playbackCapabilities").as_dictionary().unwrap();
@@ -97,7 +100,10 @@ fn display_in_info_matches_the_profile_geometry() {
     let displays = get(&dict, "displays").as_array().unwrap();
     let display = displays[0].as_dictionary().unwrap();
     assert_eq!(get(display, "width").as_unsigned_integer(), Some(1920));
-    assert_eq!(get(display, "heightPixels").as_unsigned_integer(), Some(1080));
+    assert_eq!(
+        get(display, "heightPixels").as_unsigned_integer(),
+        Some(1080)
+    );
     assert_eq!(get(display, "maxFPS").as_unsigned_integer(), Some(60));
 }
 

@@ -87,7 +87,9 @@ impl PairVerify {
     /// Обрабатывает ответ приёмника и возвращает содержимое кадра
     /// `PairVerifyNext` с нашим доказательством.
     pub fn finish(&mut self, response: &Value) -> Result<Value, Error> {
-        if self.shared.is_some() { return Err(Error::Pair(pair::Error::Auth("pair-verify уже начат"))); }
+        if self.shared.is_some() {
+            return Err(Error::Pair(pair::Error::Auth("pair-verify уже начат")));
+        }
         let tlv_bytes = response
             .get(PAIRING_DATA)
             .and_then(Value::as_data)
@@ -148,18 +150,33 @@ impl PairVerify {
 
     /// Confirm the peer's final response before the encrypted channel is used.
     pub fn confirm(&mut self, response: &Value) -> Result<(), Error> {
-        if self.shared.is_none() || self.confirmed { return Err(Error::Pair(pair::Error::Auth("неверный порядок pair-verify"))); }
-        let bytes = response.get(PAIRING_DATA).and_then(Value::as_data).ok_or(Error::NoPairingData)?;
+        if self.shared.is_none() || self.confirmed {
+            return Err(Error::Pair(pair::Error::Auth(
+                "неверный порядок pair-verify",
+            )));
+        }
+        let bytes = response
+            .get(PAIRING_DATA)
+            .and_then(Value::as_data)
+            .ok_or(Error::NoPairingData)?;
         let tlv = Tlv8::decode(bytes)?;
-        if tlv.get(tlv8::ERROR).is_some() { return Err(Error::Pair(pair::Error::Auth("приёмник отклонил pair-verify"))); }
-        if tlv.state()? != 4 { return Err(Error::Pair(pair::Error::UnexpectedState(tlv.state()?))); }
+        if tlv.get(tlv8::ERROR).is_some() {
+            return Err(Error::Pair(pair::Error::Auth(
+                "приёмник отклонил pair-verify",
+            )));
+        }
+        if tlv.state()? != 4 {
+            return Err(Error::Pair(pair::Error::UnexpectedState(tlv.state()?)));
+        }
         self.confirmed = true;
         Ok(())
     }
 
     /// Ключи доступны после подтверждения приёмника: `(запись, чтение)`.
     pub fn keys(&self) -> Result<([u8; 32], [u8; 32]), Error> {
-        if !self.confirmed { return Err(Error::Pair(pair::Error::Auth("pair-verify не подтверждён"))); }
+        if !self.confirmed {
+            return Err(Error::Pair(pair::Error::Auth("pair-verify не подтверждён")));
+        }
         let shared = self
             .shared
             .ok_or(Error::Pair(pair::Error::Auth("pair-verify не завершён")))?;
@@ -266,10 +283,16 @@ mod tests {
         let proof = verify.finish(&reply).unwrap();
         assert!(verify.keys().is_err());
         assert!(verify.shared().is_none());
-        let rejected = Value::object(vec![(PAIRING_DATA, Value::Data(Tlv8::new().with(tlv8::STATE, [4]).with(ERROR, [2]).encode()))]);
+        let rejected = Value::object(vec![(
+            PAIRING_DATA,
+            Value::Data(Tlv8::new().with(tlv8::STATE, [4]).with(ERROR, [2]).encode()),
+        )]);
         assert!(verify.confirm(&rejected).is_err());
         assert!(verify.keys().is_err());
-        let confirmed = Value::object(vec![(PAIRING_DATA, Value::Data(Tlv8::new().with(tlv8::STATE, [4]).encode()))]);
+        let confirmed = Value::object(vec![(
+            PAIRING_DATA,
+            Value::Data(Tlv8::new().with(tlv8::STATE, [4]).encode()),
+        )]);
         verify.confirm(&confirmed).unwrap();
         let shared = verify.shared().unwrap();
         assert_eq!(shared, accessory_shared);

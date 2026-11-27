@@ -676,7 +676,10 @@ impl Media {
             return ok();
         }
         if kind == "updateMRNowPlayingInfo" {
-            let mut previous = self.now_playing_duration.lock().unwrap_or_else(|e| e.into_inner());
+            let mut previous = self
+                .now_playing_duration
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             let Some(now) = parse_now_playing(&command, *previous) else {
                 // Конверт `npi-text` обязателен: отправитель, который его не
                 // прислал, должен узнать об этом кодом 400, а не считать,
@@ -684,11 +687,15 @@ impl Media {
                 debug!("now-playing: конверт npi-text не разобран");
                 return Response::to(req, 400);
             };
-            if now.replace || now.metadata.duration.is_some() { *previous = now.metadata.duration; }
+            if now.replace || now.metadata.duration.is_some() {
+                *previous = now.metadata.duration;
+            }
             drop(previous);
             debug!(?now.metadata, "now-playing через POST /command");
             let events = &self.player.events;
-            if now.metadata != Metadata::default() { events.metadata(&now.metadata); }
+            if now.metadata != Metadata::default() {
+                events.metadata(&now.metadata);
+            }
             if let Some(progress) = now.progress {
                 events.progress(progress);
             }
@@ -1263,7 +1270,8 @@ fn realtime_format(s: &Dictionary) -> Result<Format, String> {
         uint(s, "sr"),
         uint(s, "spf"),
     );
-    let mut format = codec::matrix::format(advertisement).map_err(codec::matrix::Rejection::reason)?;
+    let mut format =
+        codec::matrix::format(advertisement).map_err(codec::matrix::Rejection::reason)?;
     let channels = uint(s, "ch").unwrap_or(2);
     if !matches!(channels, 1 | 2 | 6 | 8) || (matches!(format.codec, Codec::Aac) && channels > 2) {
         return Err(format!("неподдерживаемое число каналов ch={channels}"));
@@ -1300,7 +1308,10 @@ struct NowPlaying {
 /// без префикса. Источник: music-assistant/airplay-cli, DESIGN.md §8
 /// (Apache-2.0); код не копировался — только имена полей и их смысл.
 /// `update` can carry only elapsed time, so it may reuse the prior duration.
-fn parse_now_playing(command: &Dictionary, previous_duration: Option<Duration>) -> Option<NowPlaying> {
+fn parse_now_playing(
+    command: &Dictionary,
+    previous_duration: Option<Duration>,
+) -> Option<NowPlaying> {
     /// Сколько байт обложки принимаем: отправитель шлёт около 43 КБ, предел
     /// в 5 МиБ — из того же описания и защищает память.
     const MAX_ARTWORK: usize = 5 << 20;
@@ -1337,16 +1348,18 @@ fn parse_now_playing(command: &Dictionary, previous_duration: Option<Duration>) 
         genre: text("Genre"),
         duration,
     };
-    let progress = duration.or(if replace { None } else { previous_duration }).and_then(|duration| {
-        let elapsed = real("ElapsedTime").filter(|s| *s >= 0.0)?;
-        // Позиция не может быть дальше конца: отправитель считает её сам,
-        // а расхождение иначе уедет в карточку.
-        let position = elapsed.min(duration.as_secs_f64());
-        Some(Progress {
-            position: Duration::try_from_secs_f64(position).ok()?,
-            duration,
-        })
-    });
+    let progress = duration
+        .or(if replace { None } else { previous_duration })
+        .and_then(|duration| {
+            let elapsed = real("ElapsedTime").filter(|s| *s >= 0.0)?;
+            // Позиция не может быть дальше конца: отправитель считает её сам,
+            // а расхождение иначе уедет в карточку.
+            let position = elapsed.min(duration.as_secs_f64());
+            Some(Progress {
+                position: Duration::try_from_secs_f64(position).ok()?,
+                duration,
+            })
+        });
     let artwork = params
         .get("ArtworkData")
         .and_then(Value::as_data)
@@ -1440,7 +1453,8 @@ fn other_receivers(body: &[u8], sender: &[IpAddr]) -> usize {
 
 /// SETPEERS — массив адресов, SETPEERSX — массив словарей с `Addresses`.
 fn classic_flush_boundary(info: &str) -> Option<u32> {
-    info.split(';').find_map(|part| part.trim().strip_prefix("rtptime=")?.trim().parse().ok())
+    info.split(';')
+        .find_map(|part| part.trim().strip_prefix("rtptime=")?.trim().parse().ok())
 }
 
 fn parse_peers(body: &[u8]) -> Vec<IpAddr> {
@@ -1486,7 +1500,10 @@ mod tests {
     #[test]
     fn classic_flush_reads_the_rtp_boundary() {
         assert_eq!(classic_flush_boundary("seq=12;rtptime=4048"), Some(4048));
-        assert_eq!(classic_flush_boundary("seq=1; rtptime=4294967295"), Some(u32::MAX));
+        assert_eq!(
+            classic_flush_boundary("seq=1; rtptime=4294967295"),
+            Some(u32::MAX)
+        );
         assert_eq!(classic_flush_boundary("seq=1"), None);
         assert_eq!(classic_flush_boundary("rtptime=4294967296"), None);
         assert_eq!(classic_flush_boundary("rtptime=-1"), None);
@@ -1521,10 +1538,7 @@ mod tests {
         );
         let progress = now.progress.unwrap();
         assert_eq!(progress.position, std::time::Duration::from_secs(12));
-        assert_eq!(
-            progress.duration,
-            std::time::Duration::from_secs_f64(210.5)
-        );
+        assert_eq!(progress.duration, std::time::Duration::from_secs_f64(210.5));
         let (mime, data) = now.artwork.unwrap();
         assert_eq!(mime, "image/jpeg");
         assert_eq!(data, vec![0xff, 0xd8, 0xff]);

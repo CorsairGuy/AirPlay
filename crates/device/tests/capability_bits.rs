@@ -95,5 +95,9 @@ fn audio_receiver_mask_contains_its_documented_core_bits() {
     ] {
         assert_ne!(mask & bit, 0, "AUDIO_RECEIVER без бита {bit:#x}");
     }
-    assert_eq!(mask & Features::SCREEN, 0, "аудио-профиль не объявляет экран");
+    assert_eq!(
+        mask & Features::SCREEN,
+        0,
+        "аудио-профиль не объявляет экран"
+    );
 }

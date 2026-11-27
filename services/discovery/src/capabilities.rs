@@ -1169,5 +1169,4 @@ mod tests {
         assert_eq!(outcome(&no_features, Want::Audio), "CapabilitiesUnknown");
         assert_eq!(outcome(&no_features, Want::Screen), "CapabilitiesUnknown");
     }
-
 }

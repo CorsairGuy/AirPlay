@@ -326,7 +326,10 @@ mod tests {
         clock.on_reply(&slow, t1 + 500_000_000);
 
         let offset = clock.ntp_offset().unwrap();
-        assert!((offset - ahead as i64).abs() < 1000, "выбран медленный замер: {offset}");
+        assert!(
+            (offset - ahead as i64).abs() < 1000,
+            "выбран медленный замер: {offset}"
+        );
     }
 
     /// Нулевые, обратные и обрезанные метки не создают отображение.
@@ -370,8 +373,7 @@ mod tests {
         {
             let mut state = clock.0.lock().unwrap();
             state.recent.push((1, 42));
-            state.last_received =
-                Some(Instant::now() - MAX_SAMPLE_AGE - Duration::from_secs(1));
+            state.last_received = Some(Instant::now() - MAX_SAMPLE_AGE - Duration::from_secs(1));
         }
         assert!(clock.ntp_offset().is_none());
 
@@ -435,11 +437,13 @@ mod tests {
         // Срок давности истёк: формальное наличие значения не заменяет свежесть.
         {
             let mut state = clock.0.lock().unwrap();
-            state.last_received =
-                Some(Instant::now() - MAX_SAMPLE_AGE - Duration::from_millis(1));
+            state.last_received = Some(Instant::now() - MAX_SAMPLE_AGE - Duration::from_millis(1));
         }
         assert!(clock.ntp_offset().is_none());
-        assert!(clock.offset(NTP_TIMELINE).is_none(), "устаревший mapping не отдаётся плееру");
+        assert!(
+            clock.offset(NTP_TIMELINE).is_none(),
+            "устаревший mapping не отдаётся плееру"
+        );
 
         // Новый ответ очищает историю и снова даёт mapping.
         let t1 = local_ns();
@@ -447,7 +451,11 @@ mod tests {
         clock.on_reply(&resp, t1 + 200_000);
         let offset = clock.ntp_offset().unwrap();
         assert!((offset - 7_000_000_000).abs() < 1_000, "{offset}");
-        assert_eq!(clock.0.lock().unwrap().recent.len(), 1, "старые сэмплы сброшены");
+        assert_eq!(
+            clock.0.lock().unwrap().recent.len(),
+            1,
+            "старые сэмплы сброшены"
+        );
     }
 
     #[test]

@@ -912,7 +912,6 @@ mod event_tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
         drop(task);
     }
-
 }
 fn validate(config: &MirrorConfig) -> Result<()> {
     if config.endpoint.port() == 0 {

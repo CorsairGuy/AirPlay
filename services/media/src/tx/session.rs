@@ -1895,7 +1895,9 @@ mod tests {
     #[tokio::test]
     async fn source_change_flushes_before_sending_marked_packet() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let client = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
         let (server, _) = listener.accept().await.unwrap();
         let (noticed, observed_flush) = oneshot::channel();
         let (release, proceed) = oneshot::channel();
@@ -1906,30 +1908,58 @@ mod tests {
             loop {
                 let request = conn.event_request().await.unwrap();
                 if request.method == "FLUSH" {
-                    noticed.take().unwrap().send(request.headers.get("RTP-Info").unwrap().to_owned()).unwrap();
+                    noticed
+                        .take()
+                        .unwrap()
+                        .send(request.headers.get("RTP-Info").unwrap().to_owned())
+                        .unwrap();
                     proceed.take().unwrap().await.unwrap();
                 }
                 let done = request.method == "TEARDOWN";
                 let mut bytes = Vec::new();
                 rtsp::Response::to(&request, 200).encode(&mut bytes);
                 conn.send(&bytes).await.unwrap();
-                if done { break; }
+                if done {
+                    break;
+                }
             }
         });
         let receiving = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let audio = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        audio.connect(receiving.local_addr().unwrap()).await.unwrap();
+        audio
+            .connect(receiving.local_addr().unwrap())
+            .await
+            .unwrap();
         let control_peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let config = SessionConfig::new(listener.local_addr().unwrap(), Identity::new("test", "test"));
+        let config = SessionConfig::new(
+            listener.local_addr().unwrap(),
+            Identity::new("test", "test"),
+        );
         let (metadata, _keep_metadata) = watch::channel(None);
         let session = Session {
-            session_id: 1, metadata,
-            rtsp: Some(Rtsp::new(Connection::new(client), "rtsp://test/1".into(), "test".into(), 1, Duration::from_secs(1))),
-            packetizer: TargetPacketizer::Ntp(rtp::PcmPacketizer::new([7; 32], 1, 7, config.latency_frames)),
-            config, audio,
+            session_id: 1,
+            metadata,
+            rtsp: Some(Rtsp::new(
+                Connection::new(client),
+                "rtsp://test/1".into(),
+                "test".into(),
+                1,
+                Duration::from_secs(1),
+            )),
+            packetizer: TargetPacketizer::Ntp(rtp::PcmPacketizer::new(
+                [7; 32],
+                1,
+                7,
+                config.latency_frames,
+            )),
+            config,
+            audio,
             control: Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap()),
             control_destination: control_peer.local_addr().unwrap(),
-            _timing_task: None, _event_task: None, peers: None, peer_changes: None,
+            _timing_task: None,
+            _event_task: None,
+            peers: None,
+            peer_changes: None,
         };
         let (pcm, packets) = broadcast::channel(8);
         let (_volume, volumes) = watch::channel(Volume::db(-30.0).unwrap());
@@ -1937,17 +1967,42 @@ mod tests {
         let running = tokio::spawn(session.run(packets, volumes, stopped));
         let (source, revision) = watch::channel(crate::tx::continuous_source::State::default());
         let clock = crate::tx::MediaClock::now();
-        pcm.send(Arc::new(clock.packet(0, &[0; crate::tx::PACKET_BYTES]).unwrap().guard_source(revision))).unwrap();
+        pcm.send(Arc::new(
+            clock
+                .packet(0, &[0; crate::tx::PACKET_BYTES])
+                .unwrap()
+                .guard_source(revision),
+        ))
+        .unwrap();
         let mut bytes = [0; 2048];
-        timeout(Duration::from_secs(1), receiving.recv(&mut bytes)).await.unwrap().unwrap();
-        source.send_replace(crate::tx::continuous_source::State { generation: 1, paused: false });
-        let next = clock.packet(FRAMES_PER_PACKET as u64, &[1; crate::tx::PACKET_BYTES]).unwrap().guard_source(source.subscribe());
+        timeout(Duration::from_secs(1), receiving.recv(&mut bytes))
+            .await
+            .unwrap()
+            .unwrap();
+        source.send_replace(crate::tx::continuous_source::State {
+            generation: 1,
+            paused: false,
+        });
+        let next = clock
+            .packet(FRAMES_PER_PACKET as u64, &[1; crate::tx::PACKET_BYTES])
+            .unwrap()
+            .guard_source(source.subscribe());
         pcm.send(Arc::new(next)).unwrap();
-        let info = timeout(Duration::from_secs(1), observed_flush).await.unwrap().unwrap();
+        let info = timeout(Duration::from_secs(1), observed_flush)
+            .await
+            .unwrap()
+            .unwrap();
         assert!(info.starts_with("seq=8;rtptime="));
-        assert!(timeout(Duration::from_millis(30), receiving.recv(&mut bytes)).await.is_err());
+        assert!(
+            timeout(Duration::from_millis(30), receiving.recv(&mut bytes))
+                .await
+                .is_err()
+        );
         release.send(()).unwrap();
-        let size = timeout(Duration::from_secs(1), receiving.recv(&mut bytes)).await.unwrap().unwrap();
+        let size = timeout(Duration::from_secs(1), receiving.recv(&mut bytes))
+            .await
+            .unwrap()
+            .unwrap();
         assert!(size > 12);
         assert_eq!(bytes[1] & 0x80, 0x80);
         assert_eq!(u16::from_be_bytes([bytes[2], bytes[3]]), 8);

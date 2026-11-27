@@ -95,6 +95,9 @@ async fn closing_all_consumers_stops_the_source_with_an_error() {
         .await
         .expect("источник обязан завершиться")
         .unwrap();
-    assert!(result.is_err(), "без получателей источник не продолжает работу");
+    assert!(
+        result.is_err(),
+        "без получателей источник не продолжает работу"
+    );
     drop(input);
 }

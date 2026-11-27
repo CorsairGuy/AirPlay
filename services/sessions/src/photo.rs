@@ -484,5 +484,4 @@ mod tests {
         assert_eq!(image_info(&[0xff, 0xd8, 0xff, 0xe0, 0, 40]), None);
         assert_eq!(image_info(&[0xff, 0xd8, 0xff, 0xc0, 0, 11, 8]), None);
     }
-
 }

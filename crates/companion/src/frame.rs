@@ -128,7 +128,9 @@ impl Codec {
     /// Собирает кадр; счётчик записи увеличивается только для шифрованных
     /// непустых нагрузок (пустые кадры идут открытым текстом).
     pub fn encode(&mut self, frame_type: FrameType, payload: &[u8]) -> Result<Vec<u8>, Error> {
-        if self.failed { return Err(Error::Frame("канал закрыт после ошибки")); }
+        if self.failed {
+            return Err(Error::Frame("канал закрыт после ошибки"));
+        }
         if payload.len() > MAX_PAYLOAD {
             return Err(Error::Frame("слишком большой кадр"));
         }
@@ -144,7 +146,10 @@ impl Codec {
             (Some(key), true) => {
                 let mut nonce = [0u8; 8];
                 nonce.copy_from_slice(&self.write_counter.to_le_bytes());
-                self.write_counter = self.write_counter.checked_add(1).ok_or(Error::Frame("исчерпан счётчик записи"))?;
+                self.write_counter = self
+                    .write_counter
+                    .checked_add(1)
+                    .ok_or(Error::Frame("исчерпан счётчик записи"))?;
                 out.extend_from_slice(&aead::seal(key, &nonce, &header, payload));
             }
             _ => out.extend_from_slice(payload),
@@ -154,8 +159,12 @@ impl Codec {
 
     /// Добавляет принятые байты в буфер.
     pub fn feed(&mut self, data: &[u8]) -> Result<(), Error> {
-        if self.failed { return Err(Error::Frame("канал закрыт после ошибки")); }
-        if data.len() > MAX_PAYLOAD + TAG + HEADER || self.buffer.len().saturating_add(data.len()) > MAX_PAYLOAD + TAG + HEADER {
+        if self.failed {
+            return Err(Error::Frame("канал закрыт после ошибки"));
+        }
+        if data.len() > MAX_PAYLOAD + TAG + HEADER
+            || self.buffer.len().saturating_add(data.len()) > MAX_PAYLOAD + TAG + HEADER
+        {
             self.failed = true;
             return Err(Error::Frame("буфер кадров переполнен"));
         }
@@ -169,7 +178,9 @@ impl Codec {
 
     /// Следующий целый кадр. `Ok(None)` — нужно больше байт.
     pub fn next_frame(&mut self) -> Result<Option<Frame>, Error> {
-        if self.failed { return Err(Error::Frame("канал закрыт после ошибки")); }
+        if self.failed {
+            return Err(Error::Frame("канал закрыт после ошибки"));
+        }
         if self.buffer.len() < HEADER {
             return Ok(None);
         }
@@ -193,10 +204,19 @@ impl Codec {
                 }
                 let mut nonce = [0u8; 8];
                 nonce.copy_from_slice(&self.read_counter.to_le_bytes());
-                let next = self.read_counter.checked_add(1).ok_or(Error::Frame("исчерпан счётчик чтения"))?;
+                let next = self
+                    .read_counter
+                    .checked_add(1)
+                    .ok_or(Error::Frame("исчерпан счётчик чтения"))?;
                 match aead::open(key, &nonce, &header, &body) {
-                    Ok(payload) => { self.read_counter = next; payload }
-                    Err(error) => { self.failed = true; return Err(error.into()); }
+                    Ok(payload) => {
+                        self.read_counter = next;
+                        payload
+                    }
+                    Err(error) => {
+                        self.failed = true;
+                        return Err(error.into());
+                    }
                 }
             }
             _ => body,
@@ -296,7 +316,11 @@ mod tests {
         writer.write_counter = u64::MAX;
         assert!(writer.encode(FrameType::Encrypted, b"x").is_err());
         let mut reader = Codec::plain();
-        assert!(reader.feed(&vec![0; MAX_PAYLOAD + TAG + HEADER + 1]).is_err());
+        assert!(
+            reader
+                .feed(&vec![0; MAX_PAYLOAD + TAG + HEADER + 1])
+                .is_err()
+        );
         assert!(reader.next_frame().is_err());
     }
 

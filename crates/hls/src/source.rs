@@ -133,7 +133,11 @@ impl Fetcher {
         if playlist.live {
             return Err(Error::UnsupportedFeature("live playlist refresh"));
         }
-        if playlist.segments.iter().any(|segment| segment.discontinuity) {
+        if playlist
+            .segments
+            .iter()
+            .any(|segment| segment.discontinuity)
+        {
             return Err(Error::UnsupportedFeature("HLS discontinuity timeline"));
         }
 
@@ -355,7 +359,10 @@ mod tests {
             .await
             .err()
             .expect("unsupported timeline must not start");
-        assert!(matches!(error, Error::UnsupportedFeature("HLS discontinuity timeline")));
+        assert!(matches!(
+            error,
+            Error::UnsupportedFeature("HLS discontinuity timeline")
+        ));
     }
 
     /// Отмена во время медленной загрузки освобождает производителя: новый

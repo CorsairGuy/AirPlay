@@ -337,7 +337,10 @@ mod framing_tests {
         assert_eq!(parsed.kind, PacketKind::Plist);
         assert_eq!(parsed.pts_ns(), 1_500_000_000);
         assert_eq!(Header::parse(&header(0, 2)).kind, PacketKind::Heartbeat);
-        assert_eq!(Header::parse(&header(0, 0x7F)).kind, PacketKind::Other(0x7F));
+        assert_eq!(
+            Header::parse(&header(0, 0x7F)).kind,
+            PacketKind::Other(0x7F)
+        );
     }
 
     /// TCP может отдать заголовок и тело кусками; пустой Heartbeat и
@@ -375,7 +378,10 @@ mod framing_tests {
         client.write_all(&second).await.unwrap();
 
         drop(client);
-        tokio::time::timeout(std::time::Duration::from_secs(2), task).await.unwrap().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
         let seen = seen.lock().unwrap();
         assert_eq!(seen.frames, 2);
         assert_eq!(seen.ended, 1);
@@ -397,7 +403,10 @@ mod framing_tests {
         let mut client = TcpStream::connect(address).await.unwrap();
         let h = header(MAX_PAYLOAD as u32 + 1, 0);
         client.write_all(&h).await.unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(2), task).await.unwrap().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
         let seen = seen.lock().unwrap();
         assert_eq!(seen.frames, 0);
         assert_eq!(seen.ended, 1);
@@ -424,7 +433,10 @@ mod framing_tests {
                 client.write_all(&vec![0u8; body_bytes]).await.unwrap();
             }
             drop(client);
-            tokio::time::timeout(std::time::Duration::from_secs(2), task).await.unwrap().unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap();
             let seen = seen.lock().unwrap();
             assert_eq!(seen.frames, 0);
             assert_eq!(seen.ended, 1);

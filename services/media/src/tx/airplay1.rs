@@ -57,7 +57,10 @@ pub struct Receiver {
 /// OwnTone treats `et=4` as a possible auth-setup capability, not a
 /// requirement. This is observational and must not enable a pairing flow.
 pub fn may_support_auth_setup(receiver: &Receiver) -> bool {
-    receiver.encryption_types.as_ref().is_some_and(|types| types.contains(&4))
+    receiver
+        .encryption_types
+        .as_ref()
+        .is_some_and(|types| types.contains(&4))
 }
 
 fn announce_challenge() -> String {
@@ -315,10 +318,7 @@ impl Session {
         );
         // OPTIONS proves the peer is RAOP and exposes methods without changing state.
         session.request("OPTIONS", "*", &[], &[]).await?;
-        let challenge = session
-            .config
-            .audio_key
-            .map(|_| announce_challenge());
+        let challenge = session.config.audio_key.map(|_| announce_challenge());
         let mut announce_headers = vec![("Content-Type", "application/sdp")];
         if let Some(challenge) = &challenge {
             announce_headers.push(("Apple-Challenge", challenge));

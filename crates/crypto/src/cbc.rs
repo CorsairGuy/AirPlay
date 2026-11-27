@@ -107,5 +107,4 @@ mod tests {
         AudioCbc::new(&[0xFF; 16], &iv).decrypt(&mut wrong);
         assert_ne!(wrong, plain, "чужой ключ не даёт открытый текст");
     }
-
 }

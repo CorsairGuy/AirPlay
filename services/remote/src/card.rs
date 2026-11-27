@@ -743,9 +743,15 @@ mod phase6_tests {
     fn adjacent_tracks_can_share_the_same_album_artwork() {
         let card = card("same-album");
         let art = jpeg(100, 100);
-        card.metadata(&Metadata { title: Some("first".into()), ..Default::default() });
+        card.metadata(&Metadata {
+            title: Some("first".into()),
+            ..Default::default()
+        });
         card.artwork("image/jpeg", &art);
-        card.metadata(&Metadata { title: Some("second".into()), ..Default::default() });
+        card.metadata(&Metadata {
+            title: Some("second".into()),
+            ..Default::default()
+        });
         assert!(card.feed.borrow().cover.is_none());
         card.artwork("image/jpeg", &art);
         assert_eq!(card.feed.borrow().cover.as_ref().unwrap().id, hash(&art));

@@ -461,11 +461,15 @@ mod tests {
         let (client, _server) = tokio::io::duplex(4096);
         let mut sender = BufferedSender::new(client, &[3; 32], 1, 0, 0);
         assert!(sender.send_frame(b"").await.is_err());
-        assert!(sender.send_frame(&vec![0u8; u16::MAX as usize]).await.is_err());
+        assert!(
+            sender
+                .send_frame(&vec![0u8; u16::MAX as usize])
+                .await
+                .is_err()
+        );
         assert_eq!(sender.next_sequence(), 0);
         sender.send_frame(b"ok").await.unwrap();
         assert_eq!(sender.next_sequence(), 1);
         assert_eq!(sender.next_timestamp(), AAC_FRAMES_PER_PACKET);
     }
-
 }

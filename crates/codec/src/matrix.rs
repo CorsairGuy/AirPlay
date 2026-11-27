@@ -95,7 +95,10 @@ pub fn format(ad: Advertisement) -> Result<Format, Rejection> {
     if ad.frames_per_packet == 0 || ad.sample_rate == 0 {
         return Err(Rejection::EmptyStream);
     }
-    if !(8_000..=384_000).contains(&ad.sample_rate) || ad.frames_per_packet > 8192 || ad.sample_bits > 32 {
+    if !(8_000..=384_000).contains(&ad.sample_rate)
+        || ad.frames_per_packet > 8192
+        || ad.sample_bits > 32
+    {
         return Err(Rejection::InvalidParameter);
     }
     let codec = match ad.compression {
@@ -203,7 +206,12 @@ mod tests {
         assert_eq!(format(wrapped), Err(Rejection::UnknownCompression(258)));
         for ad in [
             Advertisement::from_fields(Some(2), Some(272), Some(44_100), Some(352)),
-            Advertisement::from_fields(Some(2), Some(16), Some(u32::MAX as u64 + 44_101), Some(352)),
+            Advertisement::from_fields(
+                Some(2),
+                Some(16),
+                Some(u32::MAX as u64 + 44_101),
+                Some(352),
+            ),
             Advertisement::from_fields(Some(2), Some(16), Some(44_100), Some(8193)),
         ] {
             assert_eq!(format(ad), Err(Rejection::InvalidParameter));

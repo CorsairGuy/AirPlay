@@ -719,7 +719,6 @@ mod tests {
             "подтверждённый источник отвергнут"
         );
     }
-
 }
 #[cfg(test)]
 mod resend_tests {

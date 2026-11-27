@@ -14,7 +14,10 @@ fn body_boundary_is_exact_for_two_pipelined_requests() {
     buf.extend_from_slice(b"TEARDOWN /stream RTSP/1.0\r\nCSeq: 3\r\n\r\n");
 
     let first = decode_request(&mut buf).unwrap().unwrap();
-    assert_eq!((first.method.as_str(), first.body.as_slice()), ("POST", &b"abc"[..]));
+    assert_eq!(
+        (first.method.as_str(), first.body.as_slice()),
+        ("POST", &b"abc"[..])
+    );
     let second = decode_request(&mut buf).unwrap().unwrap();
     assert_eq!(second.method, "SETUP");
     assert!(second.body.is_empty());
