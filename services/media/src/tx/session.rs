@@ -1744,7 +1744,9 @@ mod tests {
                 stream_id: None,
             };
             loop {
-                let request = connection.event_request().await.unwrap();
+                let Ok(request) = connection.event_request().await else {
+                    break;
+                };
                 attempt.methods.push(request.method.clone());
                 let mut code = 200;
                 let mut body = Vec::new();
@@ -1757,6 +1759,9 @@ mod tests {
                         if request_dict.get("streams").is_none() {
                             // Ответ на SETUP сессии — словарь без streams.
                             body = binary_plist(dictionary(vec![])).unwrap();
+                            if fail == "session_setup" {
+                                code = 500;
+                            }
                         }
                         if let Some(streams) = request_dict.get("streams").and_then(|v| v.as_array())
                         {
@@ -1826,6 +1831,35 @@ mod tests {
             .expect("приёмник не получил TEARDOWN")
             .unwrap();
         (result, attempt)
+    }
+
+    #[tokio::test]
+    async fn every_failure_stage_tears_down_and_a_later_attempt_can_succeed() {
+        let (result, first) = connect_against("session_setup").await;
+        assert!(result.is_err(), "SETUP сессии с 500 не создаёт сессию");
+        assert_eq!(first.methods, ["SETUP", "TEARDOWN"]);
+        assert!(first.shk.is_none(), "до SETUP потока дело не дошло");
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let receiver = receiver_with_failure(listener, "none").await;
+        let config = SessionConfig::new(endpoint, Identity::new("sender", "test"));
+        let session = Session::connect(config).await.expect("третья попытка успешна");
+        assert_eq!(session.endpoint(), endpoint);
+        drop(session);
+        let success = timeout(Duration::from_secs(3), receiver)
+            .await
+            .expect("приёмник не завершился после закрытия сессии")
+            .unwrap();
+        assert_eq!(&success.methods[..4], ["SETUP", "SETUP", "RECORD", "FLUSH"]);
+        assert!(
+            success.methods.len() == 4 || success.methods[4] == "SET_PARAMETER",
+            "после FLUSH допустим только SET_PARAMETER громкости: {:?}",
+            success.methods
+        );
+        let success_shk = success.shk.expect("SHK успешной сессии");
+        assert!(first.shk.is_none(), "первая попытка не дошла до SETUP потока");
+        assert!(!success_shk.is_empty(), "новая сессия несёт свой SHK");
     }
 
     #[tokio::test]
