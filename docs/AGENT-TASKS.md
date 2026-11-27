@@ -177,7 +177,7 @@
 
 ### C14 — HLS: переход discontinuity и временные шкалы (P1)
 
-Статус: открыта. Область: `crates/hls/src/player.rs`, `demux.rs`, `tests/fixtures/av`; согласовать, если нужен `source.rs`. Референсы: v12 D75/D88, [RFC 8216 §4.3.2.3](https://www.rfc-editor.org/rfc/rfc8216#section-4.3.2.3), [HLS segments](HLS-SEGMENTS-20261126.md). Сейчас discontinuity намеренно отклоняется: сначала подтвердить корректную смену PTS и декодера, затем реализовать без неверного продолжения. Готово: настоящие мини-сегменты с новой шкалой, seek/stop и отрицательные тесты; DRM не добавлять.
+Статус: открыта, **заблокирована окружением** (Buffy, `feat/c14-discontinuity-blocker`). Реализация требует запуска демаксера: `crates/hls` с `--features ffmpeg` не собирается из-за `ffmpeg-sys-next` и заголовков FFmpeg 8 (см. блокер C07), а без этой сборки настоящие мини-сегменты с новой шкалой не проверить. Текущее поведение — явный `UnsupportedFeature("HLS discontinuity timeline")` в `source.rs` — не менял, чтобы не заявлять непроверенную смену PTS/декодера. Область: `crates/hls/src/player.rs`, `demux.rs`, `tests/fixtures/av`; согласовать, если нужен `source.rs`. Референсы: v12 D75/D88, [RFC 8216 §4.3.2.3](https://www.rfc-editor.org/rfc/rfc8216#section-4.3.2.3), [HLS segments](HLS-SEGMENTS-20261126.md). Сейчас discontinuity намеренно отклоняется: сначала подтвердить корректную смену PTS и декодера, затем реализовать без неверного продолжения. Готово: настоящие мини-сегменты с новой шкалой, seek/stop и отрицательные тесты; DRM не добавлять.
 
 ### C15 — HLS: live playlist, отмена и лимиты ресурсов (P1)
 
