@@ -510,6 +510,42 @@ mod peer_update_tests {
         assert!(owners.is_empty());
         assert!(union.is_empty());
     }
+
+    #[test]
+    fn dual_peer_conflict_does_not_modify_the_committed_owners() {
+        let bind = "192.0.2.1".parse().unwrap();
+        let mut inbound = OwnerInterests::new(bind);
+        let mut outbound = OwnerInterests::new(bind);
+        let source = Peer { ip: "192.0.2.2".parse().unwrap(), ports: Ports { event: 319, general: 320 } };
+        let receiver = Peer { ip: "192.0.2.3".parse().unwrap(), ports: Ports { event: 319, general: 320 } };
+        inbound.set(1, vec![source], None).unwrap();
+        outbound.set(2, vec![receiver], None).unwrap();
+        let previous = dual_union(&inbound, &outbound).unwrap();
+        let mut candidate = outbound.clone();
+        candidate.set(2, vec![source], None).unwrap();
+        assert!(dual_union(&inbound, &candidate).is_err());
+        assert_eq!(dual_union(&inbound, &outbound).unwrap(), previous);
+    }
+
+    #[test]
+    fn dual_expiry_keeps_the_other_role_and_shared_owners() {
+        let bind = "192.0.2.1".parse().unwrap();
+        let mut inbound = OwnerInterests::new(bind);
+        let mut outbound = OwnerInterests::new(bind);
+        let source = Peer { ip: "192.0.2.2".parse().unwrap(), ports: Ports { event: 319, general: 320 } };
+        let receiver = Peer { ip: "192.0.2.3".parse().unwrap(), ports: Ports { event: 319, general: 320 } };
+        let now = std::time::Instant::now();
+        inbound.set(1, vec![source], Some(now)).unwrap();
+        inbound.set(2, vec![source], None).unwrap();
+        outbound.set(3, vec![receiver], Some(now)).unwrap();
+        inbound.expire(now);
+        outbound.expire(now);
+        let remaining = dual_union(&inbound, &outbound).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining.get(&source.ip), Some(&source.ports));
+        assert_eq!(inbound.owner_count(), 1);
+        assert_eq!(outbound.owner_count(), 0);
+    }
     #[tokio::test]
     async fn live_peer_changes_reuse_sockets_source_and_master_epoch() {
         let event = UdpSocket::bind("127.0.0.1:0").await.unwrap();
