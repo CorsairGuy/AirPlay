@@ -12,6 +12,7 @@ pub mod card;
 pub mod card_transport;
 pub mod continuous_control;
 pub mod model;
+pub mod output_card;
 pub mod mrp_service;
 pub mod output_control;
 pub mod output_selection;

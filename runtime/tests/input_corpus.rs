@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 const BUDGET: Duration = Duration::from_secs(2);
 
 fn corpus(directory: &str) -> Vec<(String, Vec<u8>)> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/corpus");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fuzz/corpus");
     let dir: PathBuf = root.join(directory);
     let mut files: Vec<_> = std::fs::read_dir(&dir)
         .unwrap_or_else(|e| panic!("нет каталога {}: {e}", dir.display()))

@@ -33,47 +33,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "airplay"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "audio",
- "audio_stream",
- "base",
- "clock",
- "codec",
- "coordinator",
- "crypto",
- "device",
- "discovery",
- "fairplay",
- "hex",
- "hls",
- "identity",
- "if-addrs",
- "ipc",
- "libc",
- "mdns",
- "media",
- "mirror",
- "mrp",
- "pair",
- "plist",
- "rand 0.8.8",
- "remote",
- "rtp",
- "rtsp",
- "sessions",
- "sha2",
- "timesync",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "video",
-]
-
-[[package]]
 name = "alsa"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2006,6 +1965,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "audio",
+ "audio_stream",
+ "clock",
+ "coordinator",
+ "crypto",
+ "device",
+ "discovery",
+ "hex",
+ "identity",
+ "mdns",
+ "media",
+ "mirror",
+ "mrp",
+ "pair",
+ "plist",
+ "rand 0.8.8",
+ "remote",
+ "rtp",
+ "rtsp",
+ "sessions",
+ "timesync",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "rustc-hash"
 version = "2.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2154,7 +2145,6 @@ dependencies = [
  "coordinator",
  "crypto",
  "device",
- "discovery",
  "hex",
  "identity",
  "mdns",
@@ -2163,14 +2153,12 @@ dependencies = [
  "mrp",
  "pair",
  "plist",
- "rand 0.8.8",
  "remote",
  "rtp",
  "rtsp",
  "timesync",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "uuid",
 ]
 

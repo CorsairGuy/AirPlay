@@ -54,7 +54,7 @@ a.stop().await;                                 // b продолжает раб
 - `services/sessions/src/transport.rs`: `accept_loop(..., shutdown:
   watch::Receiver<bool>)`; соединения экземпляра живут в его `JoinSet` и
   закрываются при остановке, не задевая чужие.
-- `services/sessions/src/serve.rs`: `Receiver`, `start()`, `stop()`,
+- `runtime/src/lifecycle/receiver.rs`: `Receiver`, `start()`, `stop()`,
   `Drop`; `run()` выражен через них; `Options::time`.
 - `bin/airplay/src/main.rs`: `time: None` в профиле CLI.
 - `bin/airplay/tests/multi_profile.rs`: интеграционный тест.

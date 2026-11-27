@@ -16,8 +16,8 @@ use remote::{
 use std::{collections::BTreeMap, sync::Arc};
 use tokio::sync::{mpsc, watch};
 
-pub use crate::SessionPreparer;
 pub use ::coordinator::runtime::Snapshot;
+use sessions::SessionPreparer;
 pub type AppliedSelection =
     ApplyResult<::media::tx::pool::SessionHandle, Result<::media::tx::StreamStats>>;
 

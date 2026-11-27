@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "services/*", "bin/*"]
+members = ["crates/*", "services/*", "runtime"]
 
 [workspace.package]
 version = "0.1.0"
@@ -37,6 +37,7 @@ capture = { path = "crates/capture" }
 ipc = { path = "crates/ipc" }
 timesync = { path = "services/timesync" }
 remote = { path = "services/remote" }
+runtime = { path = "runtime" }
 
 anyhow = "1"
 bytes = "1"

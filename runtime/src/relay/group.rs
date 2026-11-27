@@ -1,9 +1,10 @@
 //! Explicit outgoing local-master lifecycle; no clock/discovery/capture startup.
-use remote::output_control::OutputRequest;
-use crate::output_worker::{self, SessionPreparer};
+use crate::routing::worker as output_worker;
 use ::discovery::catalog::{OutputCatalog, ReceiverEndpoint};
 use ::media::tx::{AudioPacket, MediaClock, Session, pool::SessionPool};
 use anyhow::{Context, Result, bail};
+use remote::output_control::OutputRequest;
+use sessions::SessionPreparer;
 use std::sync::{Arc, Weak};
 use timesync::media::{MasterLease, MasterTimeline};
 use tokio::sync::{mpsc, watch};
@@ -850,8 +851,7 @@ mod tests {
         for malformed in [false, true] {
             let (_clock, _user, group, origin) = fixture();
             let card = pipeline_card(::media::control::Remote::new());
-            let (_control, requests) =
-                remote::output_control::OutputControl::channel(4);
+            let (_control, requests) = remote::output_control::OutputControl::channel(4);
             let (_catalog, discovery) =
                 watch::channel(Arc::new(OutputCatalog::new(vec![]).unwrap()));
             let (updates, state) = watch::channel(output_worker::Snapshot::default());
@@ -1130,8 +1130,7 @@ mod tests {
                 input,
                 controls,
             };
-            let (_control, requests) =
-                remote::output_control::OutputControl::channel(4);
+            let (_control, requests) = remote::output_control::OutputControl::channel(4);
             let (_catalog, discovery) =
                 watch::channel(Arc::new(OutputCatalog::new(vec![]).unwrap()));
             let (updates, final_state) = watch::channel(output_worker::Snapshot::default());
