@@ -431,4 +431,41 @@ mod tests {
         assert_eq!(sender.next_sequence(), 0);
         assert_eq!(sender.next_timestamp(), AAC_FRAMES_PER_PACKET - 11);
     }
+
+    /// Одинаковые кадры шифруются разными nonce; счётчик идёт 0,1,2, а
+    /// шифротекст не совпадает с открытым текстом.
+    #[tokio::test]
+    async fn nonce_increments_and_identical_frames_differ() {
+        let (wire, shk, _, _) = wire_frames(vec![b"same".to_vec(); 3]).await;
+        let cipher = AudioCipher::new(&shk);
+        let mut buf = wire;
+        let mut nonces = Vec::new();
+        let mut bodies = Vec::new();
+        while let Some(mut packet) = rtp::split_buffered(&mut buf) {
+            let nonce = u64::from_le_bytes(packet[packet.len() - 8..].try_into().unwrap());
+            nonces.push(nonce);
+            bodies.push(packet[12..packet.len() - 24].to_vec());
+            let (_, payload) = cipher.open(&mut packet).expect("пакет расшифрован");
+            assert_eq!(payload, b"same");
+        }
+        assert_eq!(nonces, [0, 1, 2]);
+        assert_ne!(bodies[0], bodies[1]);
+        assert_ne!(bodies[1], bodies[2]);
+        assert!(bodies.iter().all(|body| body != b"same"));
+    }
+
+    /// Отказ на пустом или слишком большом кадре не отравляет поток:
+    /// следующий корректный кадр уходит с прежними счётчиками.
+    #[tokio::test]
+    async fn rejected_frame_does_not_poison_the_stream() {
+        let (client, _server) = tokio::io::duplex(4096);
+        let mut sender = BufferedSender::new(client, &[3; 32], 1, 0, 0);
+        assert!(sender.send_frame(b"").await.is_err());
+        assert!(sender.send_frame(&vec![0u8; u16::MAX as usize]).await.is_err());
+        assert_eq!(sender.next_sequence(), 0);
+        sender.send_frame(b"ok").await.unwrap();
+        assert_eq!(sender.next_sequence(), 1);
+        assert_eq!(sender.next_timestamp(), AAC_FRAMES_PER_PACKET);
+    }
+
 }
