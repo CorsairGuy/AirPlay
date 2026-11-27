@@ -526,4 +526,107 @@ mod tests {
         let bytes = encode(&value).unwrap();
         assert_eq!(unpack(&bytes).unwrap(), value);
     }
+
+    /// Независимые векторы формата: младший байт тега, little-endian длины и
+    /// значения. Байты выведены из описания тегов в pyatv `support/opack.py`
+    /// (ревизия `b277a4c8`), код референса не копировался.
+    #[test]
+    fn integer_boundaries_use_the_shortest_tag() {
+        let cases: &[(i64, &str)] = &[
+            (38, "2e"),
+            (39, "2f"),
+            (40, "3028"),
+            (255, "30ff"),
+            (256, "310001"),
+            (65_535, "31ffff"),
+            (65_536, "3200000100"),
+            (u32::MAX as i64, "32ffffffff"),
+            (1 << 32, "330000000001000000"),
+            (i64::MAX, "33ffffffffffffff7f"),
+        ];
+        for (value, wire) in cases {
+            assert_eq!(hex::encode(encode(&Value::Int(*value)).unwrap()), *wire);
+            assert_eq!(unpack(&hex::decode(wire).unwrap()).unwrap(), Value::Int(*value));
+        }
+    }
+
+    /// 32/33 и 255/256 — границы, где меняется тег длины строки и данных.
+    #[test]
+    fn string_and_data_length_boundaries() {
+        for (len, tag) in [(0usize, 0x40), (32, 0x60), (33, 0x61), (255, 0x61), (256, 0x62)] {
+            let text = "x".repeat(len);
+            let bytes = encode(&Value::Str(text.clone())).unwrap();
+            assert_eq!(bytes[0], tag, "строка длиной {len}");
+            assert_eq!(&bytes[bytes.len() - len..], text.as_bytes());
+            assert_eq!(unpack(&bytes).unwrap(), Value::Str(text));
+        }
+        let bytes = encode(&Value::Str("y".repeat(0x1_0000))).unwrap();
+        assert_eq!(&bytes[..4], &[0x63, 0, 0, 1], "0x63 — три байта длины");
+
+        for (len, tag) in [(0usize, 0x70), (32, 0x90), (33, 0x91), (255, 0x91), (256, 0x92)] {
+            let data = vec![0xA5; len];
+            let bytes = encode(&Value::Data(data.clone())).unwrap();
+            assert_eq!(bytes[0], tag, "данные длиной {len}");
+            assert_eq!(unpack(&bytes).unwrap(), Value::Data(data));
+        }
+        let bytes = encode(&Value::Data(vec![0; 0x1_0000])).unwrap();
+        assert_eq!(&bytes[..5], &[0x93, 0, 0, 1, 0], "0x93 — четыре байта длины");
+    }
+
+    /// Длина строки считается в байтах UTF-8, а не в символах.
+    #[test]
+    fn unicode_uses_utf8_byte_length() {
+        let text = "привет, 世界";
+        let bytes = encode(&Value::Str(text.into())).unwrap();
+        assert_eq!(bytes[0], 0x40 + text.len() as u8);
+        assert_eq!(unpack(&bytes).unwrap(), Value::Str(text.into()));
+
+        assert!(unpack(&[0x41, 0xFF]).is_err(), "не UTF-8");
+    }
+
+    #[test]
+    fn floats_absolute_time_and_non_string_keys_roundtrip() {
+        let float = unpack(&[0x35, 0x00, 0x00, 0x80, 0x3E]).unwrap();
+        assert_eq!(float, Value::Double(0.25));
+
+        let time = unpack(&[0x06, 1, 0, 0, 0, 0, 0, 0, 0]).unwrap();
+        assert_eq!(time, Value::Int(1));
+
+        let value = Value::Dict(vec![
+            (Value::Int(1), Value::Str("one".into())),
+            (Value::Str("two".into()), Value::Int(2)),
+        ]);
+        assert_eq!(unpack(&encode(&value).unwrap()).unwrap(), value);
+    }
+
+    /// Ссылка допустима только на уже встреченное запоминаемое значение.
+    #[test]
+    fn references_to_unknown_or_untracked_values_are_rejected() {
+        for wire in [
+            vec![0xA0],
+            vec![0xC1, 0x00],
+            vec![0xC2, 0x00, 0x01],
+            vec![0xD2, 0x08, 0xA0],
+            vec![0xD2, 0xD0, 0xA0],
+            vec![0xD2, 0x01, 0xA0],
+        ] {
+            assert!(unpack(&wire).is_err(), "{wire:02x?}");
+        }
+    }
+
+    /// Любой обрез действительного кадра — ошибка или значение без паники.
+    #[test]
+    fn every_truncation_of_a_nested_frame_is_handled() {
+        let value = Value::object(vec![
+            ("_i", Value::Str("_hidC".into())),
+            ("_t", Value::Int(2)),
+            ("_c", Value::Array(vec![Value::Int(0), Value::Data(vec![7; 40])])),
+        ]);
+        let bytes = encode(&value).unwrap();
+        for cut in 0..bytes.len() {
+            let _ = unpack(&bytes[..cut]);
+        }
+        assert_eq!(unpack(&bytes).unwrap(), value);
+    }
+
 }

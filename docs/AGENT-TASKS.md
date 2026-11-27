@@ -161,7 +161,7 @@
 
 ### C10 — Companion: независимые OPACK-векторы (P1)
 
-Статус: открыта. Область: `crates/companion/src/opack.rs` и тесты; C11 не менять. Референсы: v12 D42/L-61/L-80, [pyatv `b277a4c8`](https://github.com/postlund/pyatv/tree/b277a4c8222ecdcbaab8a24e3e713ca44765adb4). Сгенерировать независимые векторы для вложенных значений, длины, Unicode, некорректных ссылок и усечений. Готово: byte-for-byte проверка и отрицательные тесты, ограничения и provenance; внешнюю реализацию не копировать.
+Статус: **на проверке** (Buffy, `feat/c10-opack-vectors`). Добавлены независимые векторы целых, границ длин строк/данных, UTF-8, float32, абсолютного времени и отказов ссылок; `cargo test --offline -p companion --lib opack` — 16 passed. Область: `crates/companion/src/opack.rs` и тесты; C11 не менять. Референсы: v12 D42/L-61/L-80, [pyatv `b277a4c8`](https://github.com/postlund/pyatv/tree/b277a4c8222ecdcbaab8a24e3e713ca44765adb4). Сгенерировать независимые векторы для вложенных значений, длины, Unicode, некорректных ссылок и усечений. Готово: byte-for-byte проверка и отрицательные тесты, ограничения и provenance; внешнюю реализацию не копировать.
 
 ### C11 — Companion: прерывание auth и управление сессией (P1)
 
