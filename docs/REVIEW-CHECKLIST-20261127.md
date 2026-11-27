@@ -4,9 +4,12 @@
 дублируются — они в `scripts/verify-today.sh` и
 [TEST-PLAN-IPHONE-WINDOWS-20261127.md](TEST-PLAN-IPHONE-WINDOWS-20261127.md).
 
-Ветка `review/today-20261127` = `2481fcf` (на `origin` тот же), база —
-`integration/all-new-20261127` (`ba584e7`), `main` не тронут (`08a2ff3`).
-Сверх базы три коммита: `3407b4e`, `671de98`, `2481fcf`.
+Ветка `review/today-20261127` собрана от `integration/all-new-20261127`
+(`ba584e7`); сверх базы: `3407b4e`, `671de98`, `2481fcf`, `4326dca` и этот
+файл. Верхний коммит печатает `git log --oneline -1`. `main` с момента
+ответвления ушёл на один коммит вперёд (`9369fc9`, «Restore strict workspace
+clippy checks»), но файлы не пересекаются: у него `runtime/tests`,
+`identity/state.rs`, `media/raop.rs`, `media/tx/*`.
 
 ## 1. Команды
 
@@ -74,7 +77,8 @@ cargo test --offline -p timesync --lib    # точечно: новый тест 
 
 ## 6. После приёмки
 
-Fast-forward `review/today-20261127` в `main` (конфликтов быть не должно —
-ветка от `integration/all-new-20261127`). Ветки `feat/c01…c87`,
+Fast-forward невозможен: в `main` есть `9369fc9`, которого нет в ветке.
+Нужен обычный merge (файлы не пересекаются, конфликтов быть не должно) или
+rebase ветки на `main` — решает координатор. Ветки `feat/c01…c87`,
 `wip/dual-clock-peer-roles-20261126`, `feat/long-session-recovery` не вливать:
 их работа уже в `main` в переписанном виде либо не завершена.
