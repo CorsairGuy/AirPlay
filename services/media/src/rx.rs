@@ -1047,6 +1047,10 @@ impl Media {
                 #[cfg(not(feature = "mirroring"))]
                 110 => return Err("mirroring is disabled in this build".into()),
                 96 | 103 => {
+                    let key_len = s.get("shk").and_then(Value::as_data).map(|key| key.len());
+                    if key_len != Some(32) {
+                        tracing::warn!(kind, fields = ?s.keys().collect::<Vec<_>>(), ?key_len, "audio SETUP with absent or invalid stream key");
+                    }
                     let shk: [u8; 32] = s
                         .get("shk")
                         .and_then(Value::as_data)
