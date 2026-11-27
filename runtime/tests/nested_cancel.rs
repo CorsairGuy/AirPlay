@@ -136,11 +136,10 @@ async fn stuck_pairing(port: u16) -> TcpStream {
 
 async fn closed(stream: &mut TcpStream) -> bool {
     let mut probe = [0u8; 64];
-    match timeout(Duration::from_secs(2), stream.read(&mut probe)).await {
-        Ok(Ok(0)) => true,
-        Ok(Err(_)) => true,
-        _ => false,
-    }
+    matches!(
+        timeout(Duration::from_secs(2), stream.read(&mut probe)).await,
+        Ok(Ok(0) | Err(_))
+    )
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

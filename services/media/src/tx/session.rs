@@ -1026,9 +1026,11 @@ impl Session {
             } else {
                 Some(self.config.volume)
             },
-            self.peer_changes.take(),
-            self.metadata.subscribe(),
-            flush_rx,
+            ControlOwnerChannels {
+                peers: self.peer_changes.take(),
+                metadata: self.metadata.subscribe(),
+                flush: flush_rx,
+            },
             self.session_id,
         )));
         let result = tokio::select! {
@@ -1170,16 +1172,25 @@ impl Session {
 
 // Own the control stream in one task. A slow peer cannot stall UDP audio or
 // retransmissions. Never reuse a connection after an incomplete failed request.
+struct ControlOwnerChannels {
+    peers: Option<PeerChanges>,
+    metadata: watch::Receiver<Option<TrackMetadata>>,
+    flush: mpsc::Receiver<FlushRequest>,
+}
+
 async fn control_owner(
     mut rtsp: Rtsp,
     mut volume: watch::Receiver<Volume>,
     mut stop: watch::Receiver<bool>,
     mut current: Option<Volume>,
-    mut peers: Option<PeerChanges>,
-    mut metadata: watch::Receiver<Option<TrackMetadata>>,
-    mut flush: mpsc::Receiver<FlushRequest>,
+    channels: ControlOwnerChannels,
     session_id: u32,
 ) -> Result<u64> {
+    let ControlOwnerChannels {
+        mut peers,
+        mut metadata,
+        mut flush,
+    } = channels;
     let mut updates = 0;
     let mut requested = false;
     let mut volume_open = true;
@@ -1928,9 +1939,11 @@ mod tests {
             changes,
             stopped,
             None,
-            None,
-            no_metadata,
-            flush_rx,
+            ControlOwnerChannels {
+                peers: None,
+                metadata: no_metadata,
+                flush: flush_rx,
+            },
             1,
         ));
         assert!(

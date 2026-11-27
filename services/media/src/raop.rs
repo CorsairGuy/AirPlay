@@ -421,8 +421,9 @@ a=rtpmap:96 AppleLossless\r\na=fmtp:96 352 0 16 40 10 14 2 255 0 0 44100\r\n";
     #[tokio::test]
     async fn setup_sends_timing_probe_to_advertised_sender_port() {
         let sender = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let mut raop = Raop::default();
-        raop.format = Some(parse_sdp(ALAC.as_bytes()).unwrap());
+        let mut raop = Raop {
+            format: Some(parse_sdp(ALAC.as_bytes()).unwrap()),
+        };
         let mut setup = Request::new("SETUP", "rtsp://test/1", "RTSP/1.0");
         setup.headers.insert(
             "Transport",
