@@ -292,3 +292,142 @@ mod passthrough_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod framing_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpStream;
+
+    #[derive(Default)]
+    struct Seen {
+        configs: usize,
+        frames: usize,
+        ended: usize,
+    }
+
+    struct Recorder(Arc<Mutex<Seen>>);
+
+    impl VideoSink for Recorder {
+        fn config(&mut self, _codec: Codec, _record: &[u8]) {
+            self.0.lock().unwrap().configs += 1;
+        }
+        fn frame(&mut self, _pts_ns: u64, _nals: &[u8]) {
+            self.0.lock().unwrap().frames += 1;
+        }
+        fn end(&mut self) {
+            self.0.lock().unwrap().ended += 1;
+        }
+    }
+
+    fn header(len: u32, kind: u8) -> [u8; HEADER_LEN] {
+        let mut h = [0u8; HEADER_LEN];
+        h[..4].copy_from_slice(&len.to_le_bytes());
+        h[4] = kind;
+        h[8..16].copy_from_slice(&0x0000_0001_8000_0000u64.to_le_bytes());
+        h
+    }
+
+    /// Заголовок: длина little-endian, тип в байте 4, NTP 32.32 в байтах 8..16.
+    #[test]
+    fn header_fields_and_pts_conversion() {
+        let parsed = Header::parse(&header(1234, 5));
+        assert_eq!(parsed.payload_len, 1234);
+        assert_eq!(parsed.kind, PacketKind::Plist);
+        assert_eq!(parsed.pts_ns(), 1_500_000_000);
+        assert_eq!(Header::parse(&header(0, 2)).kind, PacketKind::Heartbeat);
+        assert_eq!(Header::parse(&header(0, 0x7F)).kind, PacketKind::Other(0x7F));
+    }
+
+    /// TCP может отдать заголовок и тело кусками; пустой Heartbeat и
+    /// неизвестный тип не должны обрывать поток.
+    #[tokio::test]
+    async fn fragmented_frames_zero_payload_and_unknown_kind_continue() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let seen = Arc::new(Mutex::new(Seen::default()));
+        let task = tokio::spawn(receive(
+            listener,
+            [0; 16],
+            [0; 16],
+            Box::new(Recorder(seen.clone())),
+        ));
+        let mut client = TcpStream::connect(address).await.unwrap();
+
+        let mut frame_header = header(4, 0);
+        let mut cipher = ctr::aes128_ctr(&[0; 16], &[0; 16]);
+        let mut body = vec![9u8; 4];
+        ctr::apply(&mut cipher, &mut body);
+        frame_header[..4].copy_from_slice(&(4u32).to_le_bytes());
+        client.write_all(&frame_header[..7]).await.unwrap();
+        client.write_all(&frame_header[7..]).await.unwrap();
+        client.write_all(&body[..2]).await.unwrap();
+        client.write_all(&body[2..]).await.unwrap();
+
+        client.write_all(&header(0, 2)).await.unwrap();
+        client.write_all(&header(4, 0x7F)).await.unwrap();
+        client.write_all(&[1, 2, 3, 4]).await.unwrap();
+
+        client.write_all(&header(4, 0)).await.unwrap();
+        let mut second = vec![7u8; 4];
+        ctr::apply(&mut cipher, &mut second);
+        client.write_all(&second).await.unwrap();
+
+        drop(client);
+        tokio::time::timeout(std::time::Duration::from_secs(2), task).await.unwrap().unwrap();
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.frames, 2);
+        assert_eq!(seen.ended, 1);
+    }
+
+    /// Объявленная длина сверх предела отклоняется до чтения тела и
+    /// выделения памяти.
+    #[tokio::test]
+    async fn oversized_payload_is_rejected_without_reading_it() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let seen = Arc::new(Mutex::new(Seen::default()));
+        let task = tokio::spawn(receive(
+            listener,
+            [0; 16],
+            [0; 16],
+            Box::new(Recorder(seen.clone())),
+        ));
+        let mut client = TcpStream::connect(address).await.unwrap();
+        let h = header(MAX_PAYLOAD as u32 + 1, 0);
+        client.write_all(&h).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), task).await.unwrap().unwrap();
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.frames, 0);
+        assert_eq!(seen.ended, 1);
+    }
+
+    /// Обрыв посреди заголовка или тела завершает приём без паники и
+    /// освобождает sink.
+    #[tokio::test]
+    async fn truncated_header_and_payload_end_the_stream() {
+        for (header_bytes, body_bytes) in [(10usize, 0usize), (HEADER_LEN, 50usize)] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let seen = Arc::new(Mutex::new(Seen::default()));
+            let task = tokio::spawn(receive(
+                listener,
+                [0; 16],
+                [0; 16],
+                Box::new(Recorder(seen.clone())),
+            ));
+            let mut client = TcpStream::connect(address).await.unwrap();
+            let h = header(100, 0);
+            client.write_all(&h[..header_bytes]).await.unwrap();
+            if body_bytes > 0 {
+                client.write_all(&vec![0u8; body_bytes]).await.unwrap();
+            }
+            drop(client);
+            tokio::time::timeout(std::time::Duration::from_secs(2), task).await.unwrap().unwrap();
+            let seen = seen.lock().unwrap();
+            assert_eq!(seen.frames, 0);
+            assert_eq!(seen.ended, 1);
+        }
+    }
+}
