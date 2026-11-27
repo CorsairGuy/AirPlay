@@ -61,6 +61,86 @@ fn verify_once(store: &MemoryStore, ctl: Identity, acc: &pair::hap::Accessory) -
 }
 
 #[test]
+fn pair_setup_rejects_if_persistent_write_is_unsupported() {
+    struct FailingStore;
+    impl PairingStore for FailingStore {
+        fn get(&self, _: &[u8]) -> Option<[u8; 32]> {
+            None
+        }
+        fn add(&self, _: &[u8], _: [u8; 32]) {
+            panic!("fallible writes must not call legacy add")
+        }
+        fn len(&self) -> usize {
+            0
+        }
+    }
+    let store = FailingStore;
+    let mut server = PairSetup::new(accessory(), "1234");
+    let mut client = ControllerSetup::new(controller(31, "ctl-1"), "1234", false);
+    let m2 = reply(server.handle(&client.m1(), &store).unwrap());
+    let m4 = reply(server.handle(&client.m3(&m2).unwrap(), &store).unwrap());
+    assert!(client.check_m4(&m4).unwrap().is_none());
+    assert!(matches!(
+        server.handle(&client.m5().unwrap(), &store).unwrap(),
+        SetupOutcome::Rejected(_)
+    ));
+    assert!(store.is_empty());
+}
+
+#[test]
+fn verify_that_already_read_a_key_can_finish_after_revoke() {
+    use std::sync::Barrier;
+    struct PausedRead {
+        store: MemoryStore,
+        read: Barrier,
+        resume: Barrier,
+    }
+    impl PairingStore for PausedRead {
+        fn get(&self, id: &[u8]) -> Option<[u8; 32]> {
+            let key = self.store.get(id);
+            self.read.wait();
+            self.resume.wait();
+            key
+        }
+        fn add(&self, id: &[u8], key: [u8; 32]) {
+            self.store.add(id, key);
+        }
+        fn len(&self) -> usize {
+            self.store.len()
+        }
+    }
+    let ctl = controller(44, "ctl-race");
+    let temporary = MemoryStore::default();
+    let acc = pair_controller(&temporary, controller(44, "ctl-race"));
+    let store = Arc::new(PausedRead {
+        store: temporary,
+        read: Barrier::new(2),
+        resume: Barrier::new(2),
+    });
+    let mut server = PairVerify::new(accessory());
+    let mut client = ControllerVerify::new(ctl, acc);
+    let VerifyOutcome::Continue(m2) = server.handle(&client.m1(), store.as_ref()).unwrap() else {
+        panic!()
+    };
+    let m3 = client.m3(&m2).unwrap();
+    let worker_store = store.clone();
+    let worker = std::thread::spawn(move || {
+        matches!(
+            server.handle(&m3, worker_store.as_ref()).unwrap(),
+            VerifyOutcome::Verified { .. }
+        )
+    });
+    store.read.wait();
+    assert!(store.store.remove(b"ctl-race").unwrap());
+    store.resume.wait();
+    assert!(
+        worker.join().unwrap(),
+        "verify had already captured the old key"
+    );
+    assert!(store.store.get(b"ctl-race").is_none());
+}
+
+#[test]
 fn add_get_remove_roundtrip() {
     let store = MemoryStore::default();
     assert!(store.is_empty());
