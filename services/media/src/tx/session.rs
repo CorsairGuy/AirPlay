@@ -1690,6 +1690,165 @@ mod tests {
         assert_eq!(controller.write, keys.read);
         assert_eq!(controller.read, keys.write);
     }
+    struct Attempt {
+        methods: Vec<String>,
+        shk: Option<Vec<u8>>,
+        stream_id: Option<u64>,
+    }
+
+    /// Приёмник одного подключения: transient-сопряжение по PIN 3939, затем
+    /// зашифрованные SETUP/SETUP/RECORD/FLUSH/TEARDOWN. Отказ на выбранном
+    /// этапе возвращает 500, дальше ожидается TEARDOWN.
+    async fn receiver_with_failure(
+        listener: tokio::net::TcpListener,
+        fail: &'static str,
+    ) -> tokio::task::JoinHandle<Attempt> {
+        use pair::hap::{PairSetup, SetupOutcome};
+        tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let accessory = PairIdentity::from_seed("receiver", &[13; 32]);
+            let mut setup = PairSetup::new(accessory, "3939");
+            let store = pair::MemoryStore::default();
+            let mut connection = Connection::new(socket);
+            let mut keys = None;
+            let mut step = 0;
+            while keys.is_none() {
+                let request = connection.event_request().await.unwrap();
+                assert_eq!(request.method, "POST");
+                let mut response = rtsp::Response::to(&request, 200);
+                if step == 0 {
+                    assert_eq!(request.uri, "/pair-pin-start");
+                } else {
+                    assert_eq!(request.uri, "/pair-setup");
+                    response.body = match setup.handle(&request.body, &store).unwrap() {
+                        SetupOutcome::Continue(reply) => reply,
+                        SetupOutcome::Transient { reply, keys: k, .. } => {
+                            keys = Some(k);
+                            reply
+                        }
+                        _ => panic!("unexpected pairing outcome"),
+                    };
+                }
+                let mut bytes = Vec::new();
+                response.encode(&mut bytes);
+                connection.send(&bytes).await.unwrap();
+                step += 1;
+            }
+            connection.encrypt(keys.unwrap());
+
+            let data = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let control = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let mut attempt = Attempt {
+                methods: Vec::new(),
+                shk: None,
+                stream_id: None,
+            };
+            loop {
+                let request = connection.event_request().await.unwrap();
+                attempt.methods.push(request.method.clone());
+                let mut code = 200;
+                let mut body = Vec::new();
+                match request.method.as_str() {
+                    "SETUP" => {
+                        let value =
+                            plist::Value::from_reader(std::io::Cursor::new(request.body.clone()))
+                                .unwrap();
+                        let request_dict = value.as_dictionary().unwrap().clone();
+                        if request_dict.get("streams").is_none() {
+                            // Ответ на SETUP сессии — словарь без streams.
+                            body = binary_plist(dictionary(vec![])).unwrap();
+                        }
+                        if let Some(streams) = request_dict.get("streams").and_then(|v| v.as_array())
+                        {
+                            let stream = streams[0].as_dictionary().unwrap();
+                            attempt.shk = stream
+                                .get("shk")
+                                .and_then(|v| v.as_data())
+                                .map(<[u8]>::to_vec);
+                            attempt.stream_id = stream
+                                .get("streamConnectionID")
+                                .and_then(|v| v.as_unsigned_integer());
+                            if fail == "stream_setup" {
+                                code = 500;
+                            } else {
+                                body = binary_plist(dictionary(vec![(
+                                    "streams",
+                                    plist::Value::Array(vec![dictionary(vec![
+                                        (
+                                            "dataPort",
+                                            plist::Value::Integer(
+                                                (data.local_addr().unwrap().port() as u64).into(),
+                                            ),
+                                        ),
+                                        (
+                                            "controlPort",
+                                            plist::Value::Integer(
+                                                (control.local_addr().unwrap().port() as u64)
+                                                    .into(),
+                                            ),
+                                        ),
+                                        ("latencyMin", plist::Value::Integer(11025u64.into())),
+                                        ("latencyMax", plist::Value::Integer(231525u64.into())),
+                                    ])]),
+                                )]))
+                                .unwrap();
+                            }
+                        }
+                    }
+                    "RECORD" if fail == "record" => code = 500,
+                    "TEARDOWN" => {
+                        let mut response = rtsp::Response::to(&request, 200);
+                        let mut bytes = Vec::new();
+                        response.encode(&mut bytes);
+                        connection.send(&bytes).await.unwrap();
+                        break;
+                    }
+                    _ => {}
+                }
+                let mut response = rtsp::Response::to(&request, code);
+                response.body = body;
+                let mut bytes = Vec::new();
+                response.encode(&mut bytes);
+                connection.send(&bytes).await.unwrap();
+            }
+            attempt
+        })
+    }
+
+    async fn connect_against(fail: &'static str) -> (anyhow::Result<Session>, Attempt) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = listener.local_addr().unwrap();
+        let receiver = receiver_with_failure(listener, fail).await;
+        let config = SessionConfig::new(endpoint, Identity::new("sender", "test"));
+        let result = Session::connect(config).await;
+        let attempt = timeout(Duration::from_secs(3), receiver)
+            .await
+            .expect("приёмник не получил TEARDOWN")
+            .unwrap();
+        (result, attempt)
+    }
+
+    #[tokio::test]
+    async fn failed_setup_and_record_tear_down_and_new_attempt_uses_fresh_keys() {
+        let (result, first) = connect_against("stream_setup").await;
+        assert!(result.is_err(), "SETUP потока с 500 не создаёт сессию");
+        assert_eq!(first.methods, ["SETUP", "SETUP", "TEARDOWN"]);
+        let first_shk = first.shk.clone().expect("SHK из SETUP потока");
+        let first_id = first.stream_id.expect("streamConnectionID");
+
+        let (result, second) = connect_against("record").await;
+        assert!(result.is_err(), "RECORD с 500 не создаёт сессию");
+        assert_eq!(second.methods, ["SETUP", "SETUP", "RECORD", "TEARDOWN"]);
+        let second_shk = second.shk.clone().expect("SHK второго SETUP");
+        let second_id = second.stream_id.expect("streamConnectionID");
+
+        assert_ne!(first_shk, second_shk, "новая попытка — новые ключи потока");
+        assert_ne!(
+            first_id, second_id,
+            "новая попытка не возобновляет прежний streamConnectionID"
+        );
+    }
+
     #[tokio::test]
     async fn preserve_volume_ignores_placeholder_but_applies_explicit_same_value() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
