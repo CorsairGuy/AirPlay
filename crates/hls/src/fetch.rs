@@ -201,6 +201,45 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    /// Циклический master playlist ограничен глубиной, а не бесконечной загрузкой.
+    #[tokio::test]
+    async fn a_cyclic_master_playlist_is_bounded() {
+        let master = "#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=1000
+self.m3u8
+";
+        let responses = (0..MAX_MASTER_DEPTH)
+            .map(|_| {
+                format!(
+                    "HTTP/1.1 200 OK
+Content-Length: {}
+Connection: close
+
+{}",
+                    master.len(),
+                    master
+                )
+            })
+            .collect();
+        let (port, server) = serve(responses).await;
+        let url = Url::parse(&format!("http://localhost:{port}/self.m3u8")).unwrap();
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            Fetcher::for_tests().media_playlist(&url, u64::MAX),
+        )
+        .await
+        .expect("глубина должна ограничить цикл");
+        assert_eq!(result.unwrap_err(), Error::Limit);
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(2), server)
+                .await
+                .unwrap()
+                .unwrap(),
+            MAX_MASTER_DEPTH,
+            "ни одного лишнего запроса"
+        );
+    }
+
     /// Сервер медленно отдаёт тело без Content-Length, пока клиент не откажется.
     async fn serve_slow(chunks: usize, delay: std::time::Duration) -> (u16, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

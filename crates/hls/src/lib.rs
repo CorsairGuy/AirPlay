@@ -475,6 +475,81 @@ mod tests {
     }
 
     #[test]
+    fn relative_segments_resolve_against_the_playlist_url() {
+        let base = Url::parse("https://cdn.example/video/show/index.m3u8").unwrap();
+        let playlist = parse_playlist(
+            &base,
+            b"#EXTM3U
+#EXTINF:1,
+seg.ts
+#EXTINF:1,
+../shared/seg2.ts
+#EXTINF:1,
+/root/seg3.ts
+#EXTINF:1,
+sub/../seg4.ts?token=1
+#EXT-X-ENDLIST
+",
+        )
+        .unwrap();
+        let uris: Vec<_> = playlist
+            .segments
+            .iter()
+            .map(|segment| segment.uri.as_str())
+            .collect();
+        assert_eq!(
+            uris,
+            [
+                "https://cdn.example/video/show/seg.ts",
+                "https://cdn.example/video/shared/seg2.ts",
+                "https://cdn.example/root/seg3.ts",
+                "https://cdn.example/video/show/seg4.ts?token=1"
+            ]
+        );
+    }
+
+    #[test]
+    fn repeated_segments_are_not_silently_deduplicated() {
+        let base = Url::parse("https://cdn.example/a.m3u8").unwrap();
+        let playlist = parse_playlist(
+            &base,
+            b"#EXTM3U
+#EXTINF:1,
+loop.ts
+#EXTINF:1,
+loop.ts
+#EXT-X-ENDLIST
+",
+        )
+        .unwrap();
+        assert_eq!(playlist.segments.len(), 2, "повтор в плейлисте сохраняется");
+        assert_eq!(playlist.segments[0].uri, playlist.segments[1].uri);
+    }
+
+    #[test]
+    fn a_relative_playlist_cannot_escape_to_another_host() {
+        let base = Url::parse("https://cdn.example/video/index.m3u8").unwrap();
+        // Абсолютный URL остаётся абсолютным, но проверка хоста — на загрузке.
+        let playlist = parse_playlist(
+            &base,
+            b"#EXTM3U
+#EXTINF:1,
+https://other.example/seg.ts
+#EXT-X-ENDLIST
+",
+        )
+        .unwrap();
+        assert_eq!(
+            playlist.segments[0].uri.as_str(),
+            "https://other.example/seg.ts"
+        );
+        assert_eq!(
+            Url::parse("file:///etc/passwd").unwrap_err(),
+            Error::UnsupportedScheme
+        );
+    }
+
+    #[test]
     fn rejects_private_and_custom_urls() {
         assert_eq!(
             Url::parse("mlhls://opaque").unwrap_err(),
