@@ -336,4 +336,100 @@ mod tests {
         assert!(!nesting_within(&lying, MAX_DEPTH));
         assert!(parse(&lying).is_none());
     }
+
+    /// Любой обрез действительного plist вызывает только `None`, без паники
+    /// и без ухода в рекурсию: это вход из сети, а не доверенный файл.
+    #[test]
+    fn every_truncation_of_valid_plists_is_handled() {
+        let bodies = [
+            binary(3, false),
+            {
+                let mut body = Vec::new();
+                plist::Value::Dictionary(plist::Dictionary::new())
+                    .to_writer_binary(&mut body)
+                    .unwrap();
+                body
+            },
+            b"<plist><dict><key>a</key><array><integer>1</integer></array></dict></plist>"
+                .to_vec(),
+        ];
+        for body in bodies {
+            for cut in 0..=body.len() {
+                let _ = nesting_within(&body[..cut], MAX_DEPTH);
+                let _ = parse(&body[..cut]);
+            }
+        }
+    }
+
+    /// Недопустимые размеры и счётчики в хвосте `bplist00` отклоняются до
+    /// выделения памяти парсером.
+    #[test]
+    fn binary_trailer_limits_are_enforced() {
+        let body = binary(2, false);
+        let len = body.len();
+        for (offset, value) in [(6usize, 0u8), (6, 9), (7, 0), (7, 9)] {
+            let mut broken = body.clone();
+            broken[len - 32 + offset] = value;
+            assert!(!nesting_within(&broken, MAX_DEPTH), "trailer byte {offset}={value}");
+            assert!(parse(&broken).is_none());
+        }
+
+        // Таблица смещений начинается до заголовка или за концом файла.
+        for table in [0u64, 7, (len as u64) + 1] {
+            let mut broken = body.clone();
+            broken[len - 8..].copy_from_slice(&table.to_be_bytes());
+            assert!(!nesting_within(&broken, MAX_DEPTH), "table={table}");
+            assert!(parse(&broken).is_none());
+        }
+
+        // Ноль объектов и счётчик, не помещающийся в файл.
+        for objects in [0u64, 1u64 << 40] {
+            let mut broken = body.clone();
+            broken[len - 24..len - 16].copy_from_slice(&objects.to_be_bytes());
+            assert!(!nesting_within(&broken, MAX_DEPTH), "objects={objects}");
+            assert!(parse(&broken).is_none());
+        }
+    }
+
+    /// Комментарии и объявления не считаются вложенными контейнерами, а
+    /// незакрытые теги не зацикливают сканер.
+    #[test]
+    fn xml_comments_and_unclosed_tags_are_bounded() {
+        assert!(nesting_within(
+            b"<plist><!-- <array><dict> --><dict/></plist>",
+            0
+        ));
+        assert!(nesting_within(b"<?xml version=\"1.0\"?><plist><string>x</string></plist>", 0));
+        assert!(nesting_within(b"<plist><array>", MAX_DEPTH));
+        assert!(nesting_within(b"<", MAX_DEPTH));
+        assert!(nesting_within(b"<!--", MAX_DEPTH));
+        // Незакрытый массив на пределе отклоняется, хотя закрывающего тега нет.
+        let mut unclosed = String::from("<plist>");
+        for _ in 0..=MAX_DEPTH {
+            unclosed.push_str("<array>");
+        }
+        assert!(!nesting_within(unclosed.as_bytes(), MAX_DEPTH));
+    }
+
+    /// Детерминированный корпус повреждённых входов: ни одна функция не
+    /// паникует и не выходит за границы буфера.
+    #[test]
+    fn deterministic_corrupt_corpus_is_handled() {
+        let mut state = 0x5EED_1234u32;
+        for _ in 0..300 {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let len = (state as usize) % 256;
+            let mut buffer = Vec::with_capacity(len + 8);
+            if state & 1 == 0 {
+                buffer.extend_from_slice(b"bplist00");
+            }
+            for _ in 0..len {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                buffer.push((state >> 16) as u8);
+            }
+            let _ = nesting_within(&buffer, MAX_DEPTH);
+            let _ = parse(&buffer);
+        }
+    }
+
 }
