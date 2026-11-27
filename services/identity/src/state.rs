@@ -104,18 +104,17 @@ impl FileStore {
             Err(e) if e.kind() == ErrorKind::NotFound => String::new(),
             Err(e) => return Err(e).with_context(|| format!("не прочитать {}", path.display())),
         };
-        {
-            for line in text.lines() {
-                let Some((id, pk)) = line.split_once(' ') else {
-                    continue;
-                };
-                if let (Ok(id), Ok(Ok(pk))) = (
-                    hex::decode(id),
-                    hex::decode(pk.trim()).map(<[u8; 32]>::try_from),
-                ) {
-                    mem.add(&id, pk);
-                }
+        for line in text.lines() {
+            let (id, pk) = line.split_once(' ').context("invalid pairing record")?;
+            let id = hex::decode(id).context("invalid pairing identifier")?;
+            let key: [u8; 32] = hex::decode(pk.trim())
+                .context("invalid pairing key")?
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("invalid pairing key length"))?;
+            if id.is_empty() || mem.get(&id).is_some() {
+                bail!("empty or duplicate pairing identifier");
             }
+            mem.add(&id, key);
         }
         Ok(Self {
             path,
@@ -162,15 +161,92 @@ mod tests {
         assert!(FileStore::open(&dir).is_err());
         fs::remove_dir_all(dir).unwrap();
     }
+
+    #[test]
+    fn malformed_pairings_are_not_silently_discarded() {
+        let dir = test_dir();
+        fs::write(dir.join("pairings"), "damaged record\n").unwrap();
+        assert!(FileStore::open(&dir).is_err());
+        assert_eq!(
+            fs::read_to_string(dir.join("pairings")).unwrap(),
+            "damaged record\n"
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn revoked_pairing_stays_removed_after_restart() {
+        let dir = test_dir();
+        let store = FileStore::open(&dir).unwrap();
+        store.add(b"one", [1; 32]);
+        store.add(b"two", [2; 32]);
+        assert!(store.remove(b"one").unwrap());
+        assert!(!store.remove(b"one").unwrap());
+        let reopened = FileStore::open(&dir).unwrap();
+        assert_eq!(reopened.get(b"one"), None);
+        assert_eq!(reopened.get(b"two"), Some([2; 32]));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn failed_revoke_preserves_in_memory_pairing() {
+        let dir = test_dir();
+        let store = FileStore::open(&dir).unwrap();
+        store.mem.add(b"one", [1; 32]);
+        fs::create_dir(dir.join("pairings")).unwrap();
+        assert!(store.remove(b"one").is_err());
+        assert_eq!(store.get(b"one"), Some([1; 32]));
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
 }
 
 impl PairingStore for FileStore {
     fn get(&self, id: &[u8]) -> Option<[u8; 32]> {
+        let _guard = self.write.lock().unwrap();
         self.mem.get(id)
     }
 
     fn len(&self) -> usize {
+        let _guard = self.write.lock().unwrap();
         self.mem.len()
+    }
+
+    fn remove(&self, id: &[u8]) -> std::io::Result<bool> {
+        let _guard = self.write.lock().unwrap();
+        let entries = self.mem.entries();
+        if !entries.iter().any(|(key, _)| key.as_slice() == id) {
+            return Ok(false);
+        }
+        let text: String = entries
+            .iter()
+            .filter(|(key, _)| key.as_slice() != id)
+            .map(|(key, pk)| format!("{} {}\n", hex::encode(key), hex::encode(pk)))
+            .collect();
+        let temporary = self
+            .path
+            .with_file_name(format!(".pairings-{}.tmp", uuid::Uuid::new_v4()));
+        let result: std::io::Result<()> = (|| {
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options.open(&temporary)?;
+            file.write_all(text.as_bytes())?;
+            file.sync_all()?;
+            drop(file);
+            fs::rename(&temporary, &self.path)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result?;
+        self.mem.remove(id)?;
+        Ok(true)
     }
 
     fn add(&self, id: &[u8], public_key: [u8; 32]) {
