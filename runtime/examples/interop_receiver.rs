@@ -16,6 +16,10 @@ struct Args {
     port: u16,
     pin: String,
     state_dir: PathBuf,
+    /// Advertise over Bonjour so a picker (iPhone) can find the receiver.
+    mdns: bool,
+    /// `null`, `default` or a device name; `default` uses WASAPI on Windows.
+    device: String,
 }
 
 impl Args {
@@ -25,6 +29,8 @@ impl Args {
         let mut pin = "1234".to_string();
         let mut state_dir =
             std::env::temp_dir().join(format!("airplay-interop-{}", std::process::id()));
+        let mut mdns = false;
+        let mut device = "null".to_string();
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -32,6 +38,8 @@ impl Args {
                 "--port" => port = args.next().unwrap_or_default().parse()?,
                 "--pin" => pin = args.next().unwrap_or_default(),
                 "--state-dir" => state_dir = PathBuf::from(args.next().unwrap_or_default()),
+                "--mdns" => mdns = true,
+                "--device" => device = args.next().unwrap_or_default(),
                 other => anyhow::bail!("unknown argument {other}"),
             }
         }
@@ -39,8 +47,11 @@ impl Args {
             || name.is_empty()
             || pin.len() != 4
             || !pin.bytes().all(|b| b.is_ascii_digit())
+            || device.is_empty()
         {
-            anyhow::bail!("--port must be nonzero, --pin must be 4 digits, --name nonempty");
+            anyhow::bail!(
+                "--port must be nonzero, --pin must be 4 digits, --name and --device nonempty"
+            );
         }
         std::fs::create_dir_all(&state_dir)?;
         Ok(Self {
@@ -48,6 +59,8 @@ impl Args {
             port,
             pin,
             state_dir,
+            mdns,
+            device,
         })
     }
 }
@@ -59,7 +72,7 @@ fn options(args: &Args) -> serve::Options {
         ptp_bind: None,
         pin: Some(args.pin.clone()),
         state_dir: args.state_dir.clone(),
-        mdns: false,
+        mdns: args.mdns,
         model: "AppleTV3,2".into(),
         features: Some(device::Features(
             device::Features::AUDIO_RECEIVER.0 & !device::Features::PTP,
@@ -67,7 +80,7 @@ fn options(args: &Args) -> serve::Options {
         status_flags: None,
         accessory_type: None,
         audio: audio_stream::Config {
-            device: "null".into(),
+            device: args.device.clone(),
             ..audio_stream::Config::default()
         },
         require_pin: false,
