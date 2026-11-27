@@ -393,4 +393,96 @@ mod tests {
         assert!(service.remove("shown"));
         assert_eq!(*log.0.lock().unwrap(), ["display shown 10x10", "clear"]);
     }
+
+    fn png(width: u32, height: u32) -> Vec<u8> {
+        let mut body = b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR".to_vec();
+        body.extend(width.to_be_bytes());
+        body.extend(height.to_be_bytes());
+        body
+    }
+
+    /// Ключ ассета и стороны ограничены: пустой, слишком длинный, с
+    /// управляющим символом или нулевой/чрезмерной стороной не принимаются.
+    #[test]
+    fn asset_key_and_image_dimensions_are_bounded() {
+        let log = Arc::new(Log::default());
+        let service = Service::new(log.clone());
+        let photo = jpeg(10, 10);
+        for asset in ["", "   ", "a\u{1}b", &"x".repeat(129)] {
+            assert_eq!(
+                service.put(asset, None, &photo, false),
+                Err(PhotoError::MissingAssetKey),
+                "asset={asset:?}"
+            );
+        }
+        assert_eq!(
+            service.put("zero", None, &jpeg(0, 480), false),
+            Err(PhotoError::InvalidImage)
+        );
+        assert_eq!(
+            service.put("wide", None, &jpeg(8193, 1), false),
+            Err(PhotoError::InvalidImage)
+        );
+        assert_eq!(
+            service.put("png-zero", None, &png(0, 10), false),
+            Err(PhotoError::InvalidImage)
+        );
+        service.put("edge", None, &jpeg(8192, 1), false).unwrap();
+        assert_eq!(service.cached(), 1);
+        assert_eq!(*log.0.lock().unwrap(), ["display edge 8192x1"]);
+    }
+
+    /// Повторный `put` того же ассета заменяет запись, а не добавляет вторую.
+    #[test]
+    fn replacing_an_asset_keeps_one_entry_and_latest_bytes() {
+        let log = Arc::new(Log::default());
+        let service = Service::new(log.clone());
+        let first = jpeg(10, 10);
+        let second = jpeg(20, 20);
+        service.put("same", None, &first, true).unwrap();
+        service.put("same", None, &second, true).unwrap();
+        assert_eq!(service.cached(), 1);
+        assert_eq!(service.cached_bytes(), second.len());
+        service.put("same", None, &second, false).unwrap();
+        assert_eq!(*log.0.lock().unwrap(), ["display same 20x20"]);
+    }
+
+    /// Показанный из кэша кадр остаётся доступным для перехода назад.
+    #[test]
+    fn display_cached_keeps_the_photo_available() {
+        let log = Arc::new(Log::default());
+        let service = Service::new(log.clone());
+        service.put("next", None, &jpeg(30, 40), true).unwrap();
+        service.display_cached("next", None).unwrap();
+        service.display_cached("next", Some("Dissolve")).unwrap();
+        assert_eq!(service.cached(), 1);
+        assert_eq!(
+            *log.0.lock().unwrap(),
+            ["display next 30x40", "display next 30x40"]
+        );
+    }
+
+    /// Удаление неизвестного ассета не очищает показанное изображение.
+    #[test]
+    fn removing_unknown_asset_does_not_clear_displayed() {
+        let log = Arc::new(Log::default());
+        let service = Service::new(log.clone());
+        service.put("shown", None, &jpeg(5, 5), false).unwrap();
+        assert!(!service.remove("missing"));
+        assert_eq!(*log.0.lock().unwrap(), ["display shown 5x5"]);
+    }
+
+    /// Заполнители 0xFF между сегментами JPEG допустимы, а короткий или
+    /// обрезанный сегмент — нет.
+    #[test]
+    fn jpeg_parser_handles_fill_bytes_and_broken_segments() {
+        let with_fill = [
+            0xff, 0xd8, 0xff, 0xff, 0xc0, 0, 11, 8, 0, 100, 0, 200, 3, 1, 1, 0, 0,
+        ];
+        assert_eq!(image_info(&with_fill), Some(("image/jpeg", 200, 100)));
+        assert_eq!(image_info(&[0xff, 0xd8, 0xff, 0xe0, 0, 1]), None);
+        assert_eq!(image_info(&[0xff, 0xd8, 0xff, 0xe0, 0, 40]), None);
+        assert_eq!(image_info(&[0xff, 0xd8, 0xff, 0xc0, 0, 11, 8]), None);
+    }
+
 }
