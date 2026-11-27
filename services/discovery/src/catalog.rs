@@ -247,4 +247,99 @@ mod tests {
             .is_err()
         );
     }
+
+    #[test]
+    fn ipv6_scope_and_port_are_preserved_per_receiver() {
+        use std::net::{Ipv6Addr, SocketAddrV6};
+        let mut v6 = ad("tv6", 7000, "", false);
+        v6.endpoint = SocketAddr::V6(SocketAddrV6::new(
+            "fe80::1234".parse::<Ipv6Addr>().unwrap(),
+            7000,
+            0,
+            3,
+        ));
+        let catalog = build(vec![v6, ad("v4", 7001, "", false)], &[]).unwrap();
+        assert_eq!(catalog.routes().len(), 2);
+
+        let route = catalog.resolve("tv6").unwrap();
+        match route.receivers[0].address {
+            SocketAddr::V6(address) => {
+                assert_eq!(address.scope_id(), 3);
+                assert_eq!(address.port(), 7000);
+            }
+            other => panic!("ожидался IPv6, получен {other}"),
+        }
+        let SocketAddr::V4(v4) = catalog.resolve("v4").unwrap().receivers[0].address else {
+            panic!("ожидался IPv4");
+        };
+        assert_eq!(v4.port(), 7001);
+    }
+
+    /// UUID сравниваются без учёта регистра, поэтому локальное устройство
+    /// исключается, даже если TXT и список локальных ID записаны по-разному.
+    #[test]
+    fn local_uuid_is_excluded_case_insensitively() {
+        let upper = "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE";
+        let catalog = build(vec![ad(&upper.to_lowercase(), 7000, "", false)], &[upper.into()])
+            .unwrap();
+        assert!(catalog.routes().is_empty());
+    }
+
+    /// Один порт у разных идентичностей не означает одно устройство:
+    /// маршруты остаются раздельными, адрес не подменяется.
+    #[test]
+    fn same_port_different_identities_stay_separate() {
+        let mut left = ad("left", 7000, "", false);
+        left.endpoint = ([127, 0, 0, 2], 7000).into();
+        let mut right = ad("right", 7000, "", false);
+        right.endpoint = ([127, 0, 0, 3], 7000).into();
+        let catalog = build(vec![left, right], &[]).unwrap();
+        assert_eq!(catalog.routes().len(), 2);
+        assert_eq!(catalog.resolve("left").unwrap().receivers[0].uid, "left");
+        assert_eq!(catalog.resolve("right").unwrap().receivers[0].uid, "right");
+        let selected = catalog.receivers(&["left".into()]).unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].address.ip().to_string(), "127.0.0.2");
+    }
+
+    /// Без `psi` идентичность берётся из `deviceid`; испорченные или
+    /// отсутствующие `features` не делают устройство аудиоприёмником.
+    #[test]
+    fn deviceid_fallback_and_invalid_features() {
+        let mut no_psi = ad("ignored", 7000, "", false);
+        no_psi.txt.remove("psi");
+        no_psi.txt.insert("deviceid".into(), "AA:BB:CC:DD:EE:FF".into());
+        let catalog = build(vec![no_psi], &[]).unwrap();
+        assert_eq!(catalog.resolve("AA:BB:CC:DD:EE:FF").unwrap().uid, "AA:BB:CC:DD:EE:FF");
+
+        for features in ["", "zzz", "0x0", "0x100,0x200"] {
+            let mut media = ad("media", 7000, "", false);
+            media.txt.insert("features".into(), features.into());
+            assert!(
+                build(vec![media], &[]).unwrap().routes().is_empty(),
+                "features={features}"
+            );
+        }
+    }
+
+    /// Исчезновение и повторное объявление строят каталог заново, без
+    /// устаревших маршрутов и без кэша между вызовами.
+    #[test]
+    fn removal_and_readvertisement_leave_no_stale_routes() {
+        let both = || vec![ad("a", 7000, "", false), ad("b", 7001, "", false)];
+        assert_eq!(build(both(), &[]).unwrap().routes().len(), 2);
+        let gone = build(vec![ad("a", 7000, "", false)], &[]).unwrap();
+        assert!(gone.resolve("b").is_err());
+        let back = build(both(), &[]).unwrap();
+        assert_eq!(back.resolve("b").unwrap().uid, "b");
+    }
+
+    #[test]
+    fn more_than_256_advertisements_are_rejected() {
+        let ads: Vec<_> = (0..257)
+            .map(|index| ad(&format!("id{index}"), 7000, "", false))
+            .collect();
+        assert!(build(ads, &[]).is_err());
+    }
+
 }
