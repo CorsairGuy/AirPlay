@@ -238,3 +238,21 @@ fn a_lost_connection_releases_the_buffer_and_a_new_session_starts() {
     assert!(sample_count(&captured) > before);
     second.stop();
 }
+
+/// Repeated sessions must discard queued packets and reject pushes after stop.
+#[test]
+fn repeated_stop_and_restart_leave_no_queue() {
+    let captured = Arc::new(Mutex::new(Captured::default()));
+    for round in 0..20i16 {
+        let playout = playout(&captured);
+        playout.set_anchor(anchor(0, true));
+        for index in 0..600u32 {
+            playout.push(index * FRAMES, 0x1600_0000, pcm_packet(round));
+        }
+        assert!(playout.buffered_packets() <= 4096, "round {round}");
+        playout.stop();
+        assert_eq!(playout.buffered_packets(), 0, "round {round}");
+        playout.push(0, 0x1600_0000, pcm_packet(round));
+        assert_eq!(playout.buffered_packets(), 0, "push after stop, round {round}");
+    }
+}
