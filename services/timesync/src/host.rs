@@ -35,16 +35,41 @@ impl Host {
         self._service.clone()
     }
     pub async fn bind(id: u64, ip: IpAddr) -> io::Result<Self> {
-        Self::bind_mode(id, ip, false).await
+        Self::bind_mode(
+            id,
+            ip,
+            false,
+            sender::Ports {
+                event: 319,
+                general: 320,
+            },
+        )
+        .await
     }
 
     /// Same socket pair with an explicit co-resident outbound master: this host
     /// can follow an inbound source and serve its own receivers at once.
     pub async fn bind_dual(id: u64, ip: IpAddr) -> io::Result<Self> {
-        Self::bind_mode(id, ip, true).await
+        Self::bind_dual_with_ports(
+            id,
+            ip,
+            sender::Ports {
+                event: 319,
+                general: 320,
+            },
+        )
+        .await
     }
 
-    async fn bind_mode(id: u64, ip: IpAddr, dual: bool) -> io::Result<Self> {
+    pub async fn bind_dual_with_ports(
+        id: u64,
+        ip: IpAddr,
+        ports: sender::Ports,
+    ) -> io::Result<Self> {
+        Self::bind_mode(id, ip, true, ports).await
+    }
+
+    async fn bind_mode(id: u64, ip: IpAddr, dual: bool, ports: sender::Ports) -> io::Result<Self> {
         let own = Domain::new(id, 1).map_err(io::Error::other)?;
         let local = LocalClock::new(u128::from(id)).map_err(io::Error::other)?;
         let dual_source = dual.then(|| {
@@ -63,10 +88,7 @@ impl Host {
             network: sender::Config {
                 domain: own,
                 bind_ip: ip,
-                ports: sender::Ports {
-                    event: 319,
-                    general: 320,
-                },
+                ports,
                 peers: vec![],
             },
             election: role::Config {

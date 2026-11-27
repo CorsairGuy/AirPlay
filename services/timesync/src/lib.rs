@@ -112,6 +112,21 @@ impl TimeSync {
         Ok(this)
     }
 
+    /// Explicit local ports for isolated tests or profiles using nonstandard ports.
+    /// Zero asks the OS for an ephemeral port; peer port negotiation stays explicit.
+    pub async fn start_host_dual_with_ports(
+        self_id: u64,
+        ip: IpAddr,
+        ports: sender::Ports,
+    ) -> std::io::Result<Self> {
+        validate_host_ip(ip)?;
+        let host = host::Host::bind_dual_with_ports(self_id, ip, ports).await?;
+        let mut this = Self::idle(self_id);
+        this.host = Some(Arc::new(host));
+        this.listening = true;
+        Ok(this)
+    }
+
     pub fn selected_reading(&self) -> Option<clock::domain::Reading> {
         self.host.as_ref()?.reading()
     }

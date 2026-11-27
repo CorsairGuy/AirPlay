@@ -102,7 +102,10 @@ impl Engine {
         own: Reading,
     ) -> io::Result<()> {
         if self.outbound.is_some() {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "dual mode requires separate peer roles"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "dual mode requires separate peer roles",
+            ));
         }
         let mut check = Master::new(self.own).map_err(io::Error::other)?;
         check.set_peers(peers).map_err(io::Error::other)?;
@@ -121,19 +124,35 @@ impl Engine {
     }
 
     /// Dual mode never advertises the local master to an inbound source.
-    pub fn set_dual_peers(&mut self, inbound: &[IpAddr], outbound: &[IpAddr], now: LocalInstant, own: Reading) -> io::Result<()> {
+    pub fn set_dual_peers(
+        &mut self,
+        inbound: &[IpAddr],
+        outbound: &[IpAddr],
+        now: LocalInstant,
+        own: Reading,
+    ) -> io::Result<()> {
         if self.outbound.is_none() || inbound.iter().any(|peer| outbound.contains(peer)) {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "dual peer roles overlap or mode is disabled"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "dual peer roles overlap or mode is disabled",
+            ));
         }
         let mut all = inbound.to_vec();
         all.extend_from_slice(outbound);
         let mut check = Master::new(self.own).map_err(io::Error::other)?;
         check.set_peers(&all).map_err(io::Error::other)?;
         self.validate(now, own)?;
-        let next = self.controller.set_peers(inbound, now).map_err(io::Error::other)?;
+        let next = self
+            .controller
+            .set_peers(inbound, now)
+            .map_err(io::Error::other)?;
         self.peers = inbound.to_vec();
         self.link.set_peers(&all).map_err(io::Error::other)?;
-        self.outbound.as_mut().unwrap().set_peers(outbound).map_err(io::Error::other)?;
+        self.outbound
+            .as_mut()
+            .unwrap()
+            .set_peers(outbound)
+            .map_err(io::Error::other)?;
         self.transition(next)?;
         self.refresh(now, own)
     }
@@ -580,7 +599,8 @@ mod tests {
         )
         .unwrap();
         let receiver: IpAddr = "192.0.2.2".parse().unwrap();
-        e.set_dual_peers(&[peer()], &[receiver], local().at(0), own(0)).unwrap();
+        e.set_dual_peers(&[peer()], &[receiver], local().at(0), own(0))
+            .unwrap();
         // Outbound exists before any role has been selected.
         let first = e.tick(local().at(1), own(1)).unwrap();
         assert!(!first.is_empty(), "outbound master emits immediately");
