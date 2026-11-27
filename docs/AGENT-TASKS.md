@@ -133,7 +133,7 @@
 
 ### C03 — RAOP RX: ANNOUNCE и аудиоформаты (P1)
 
-Статус: открыта. Область: `services/media/src/raop.rs`, SDP-парсер и их тесты; C04 не менять. Референсы: v12 D23/D25/D45, [OwnTone RAOP `612d6b3c`](https://github.com/owntone/owntone-server/blob/612d6b3cf34ae38bb71b6edfcd69fd7afe6ab25c/src/outputs/raop.c), [RAOP RX](RAOP-RX-20261125.md). Сверить реальные варианты PCM/ALAC и отказ неподдерживаемого шифрования, неверные параметры и границы размеров. Готово: независимые примеры SDP, негативные тесты и точная матрица поддержки без ложной рекламы.
+Статус: **на проверке** (Buffy, `feat/c03-sdp-matrix`). Добавлены независимый SDP с LF/переставленными строками и лишними атрибутами, матрица границ ALAC/L16/AAC (длины 1..4096, depth 16/24, 1–2 канала, 8–192 кГц) и отказ на не-UTF-8/отсутствие `m=audio`, `rtpmap`, ALAC `fmtp`; L16 без `fmtp` = 352 кадра. Существующие тесты шифрования, ALAC 24/48 и транспорта не менялись. `cargo test --offline -p media --lib raop` — 13 passed. PCM/ALAC с реального отправителя и OAEP-векторы (C01) не проверялись. Область: `services/media/src/raop.rs`, SDP-парсер и их тесты; C04 не менять. Референсы: v12 D23/D25/D45, [OwnTone RAOP `612d6b3c`](https://github.com/owntone/owntone-server/blob/612d6b3cf34ae38bb71b6edfcd69fd7afe6ab25c/src/outputs/raop.c), [RAOP RX](RAOP-RX-20261125.md). Сверить реальные варианты PCM/ALAC и отказ неподдерживаемого шифрования, неверные параметры и границы размеров. Готово: независимые примеры SDP, негативные тесты и точная матрица поддержки без ложной рекламы.
 
 ### C04 — RAOP RX: resend при обрывах и смене отправителя (P1)
 
