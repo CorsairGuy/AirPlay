@@ -14,7 +14,7 @@
 | R02 | частично | `rx.rs::setup_streams` (StreamKey::ChaCha/AesCbc), `setup_mirror_audio`, TEARDOWN `player.release` | нет независимого вектора происхождения ключа |
 | R03 | частично | `timesync::ntp` loopback test; `rx::tests::ntp_setup_*` | байты обмена не сверены с iPhone; PTP-движок не трогали |
 | R04 | частично | ответы 96/103 в `rx.rs`; `audio_setup_fixture` проверяет dataPort/controlPort | ошибки late-bind не инжектировались |
-| R05 | частично | docs/FEATURE-CAPABILITY-GATE-20261128.md; `runtime/tests/feature_gate.rs` | PTP-бит с idle-часами и PHOTO не гейтятся |
+| R05 | частично: gate SCREEN/VIDEO и таблица бит готовы; PTP-idle и PHOTO остаются отдельными задачами | docs/FEATURE-CAPABILITY-GATE-20261128.md; `runtime/tests/feature_gate.rs` | PTP-бит с idle-часами и PHOTO не гейтятся |
 | R06 | частично | 20 тестов `crates/fairplay`; `sessions` end-to-end `/fp-setup` | нет опубликованных независимых векторов |
 | R07 | частично | `sessions::tests::transient_pairing_switches_to_encrypted_channel` | pyatv-клиент локально не запускался |
 | R08 | проверено | `pin_pairing_then_verify_on_new_connection`, `pin_only_mode*`, `pairing_logs_do_not_contain_*` | реальный PIN на устройстве не проверялся |

@@ -10,7 +10,7 @@
 | D01 | частично | таблица SETUP и синтетические fixtures; строгий отказ shk != 32; причина iPhone не доказана |
 | D02 | выполнено | атомарная проверка всего списка streams, откат задач/владельца, тест обработчика |
 | D03 | выполнено: точная сверка с shairport 5.5.2 player.c::do_flush; flush_sequence.rs покрывает границу/поздний пакет/rollover/повторный поток | FLUSH-граница и поздние пакеты покрыты `source_change_flushes_*`, `stale_retransmit_*`, `classic_flush_*`; построчная сверка с shairport 5.5.2 не зафиксирована |
-| D04 | частично | NTP без порта не запускает обмен, TEARDOWN закрывает сокет; PTP-движок не менялся |
+| D04 | выполнено: диагностика timing без ключей, отказ на отсутствующий/0/>u16 порт, закрытие сокета; PTP-движок не менялся | NTP без порта не запускает обмен, TEARDOWN закрывает сокет; PTP-движок не менялся |
 | D05 | заблокировано | OwnTone auth-setup/et=4 не подтверждён; реализацию не включали |
 | D06 | выполнено | IPv4/IPv6 o= и c=, открытый/шифрованный, parser; loopback Transport/ANNOUNCE |
 | D07 | выполнено | шифрованный ANNOUNCE 501 и очистка формата; защищённый RX не заявляется | |
@@ -20,7 +20,7 @@
 | D11 | выполнено | AppleTV14,1 reference fixture без ID/ключей, тест «не Profile» |
 | D12 | выполнено | HomePodMini: model/версия/маска/status из снимка Станции; совместимость runtime не проверялась |
 | D13 | выполнено | OtherTV-биты совпадают в `/info`, `_airplay` и `_raop` TXT |
-| D14 | частично | gate SCREEN/VIDEO; PTP-idle и PHOTO не гейтятся |
+| D14 | выполнено для gate: SCREEN/VIDEO отказ; PTP-idle и PHOTO — отдельные задачи, OtherTV не изменён | gate SCREEN/VIDEO; PTP-idle и PHOTO не гейтятся |
 | D15 | проверено | `profile_isolation.rs`, `multi_profile.rs`: свои ID/ключи, restart; pgid на запуск |
 | D16 | частично: withdrawn по типам проверен; TTL-истечение — поведение mdns-sd, локального кэша TTL нет | `discovery/tests/interface_flap.rs`, snapshot-тесты; `_raop` expiry отдельно не собрана |
 | D17 | частично | C75: mdns-sd не даёт `ScopedIpV6`; parse-only не выдаётся за подключение |
