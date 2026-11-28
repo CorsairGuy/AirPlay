@@ -236,6 +236,47 @@ mod tests {
         assert_ne!(session_key(&[3; 16], Some(&[4; 32])), [3; 16]);
     }
 
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// R19: KDF посчитан независимо через Python hashlib.sha512, а не той же
+    /// формулой из тестируемого кода. Ключ и IV для streamConnectionID 42.
+    #[test]
+    fn stream_key_and_iv_match_independent_sha512_vectors() {
+        let (key, iv) = stream_key_iv(&[1; 16], 42);
+        assert_eq!(hex(&key), "b42e3732de9be31a3845440d33ebf2e0");
+        assert_eq!(hex(&iv), "05c598d26b031d812e8d16986d834d8d");
+    }
+
+    /// R19: NIST SP 800-38A F.5.1, AES-128-CTR, полный блок счётчика.
+    #[test]
+    fn aes128_ctr_matches_the_nist_vector() {
+        let key: [u8; 16] = [
+            0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6, 0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf,
+            0x4f, 0x3c,
+        ];
+        let iv: [u8; 16] = [
+            0xf0, 0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8, 0xf9, 0xfa, 0xfb, 0xfc, 0xfd,
+            0xfe, 0xff,
+        ];
+        let plain = [
+            0x6bu8, 0xc1, 0xbe, 0xe2, 0x2e, 0x40, 0x9f, 0x96, 0xe9, 0x3d, 0x7e, 0x11, 0x73, 0x93,
+            0x17, 0x2a, 0xae, 0x2d, 0x8a, 0x57, 0x1e, 0x03, 0xac, 0x9c, 0x9e, 0xb7, 0x6f, 0xac,
+            0x45, 0xaf, 0x8e, 0x51, 0x30, 0xc8, 0x1c, 0x46, 0xa3, 0x5c, 0xe4, 0x11, 0xe5, 0xfb,
+            0xc1, 0x19, 0x1a, 0x0a, 0x52, 0xef, 0xf6, 0x9f, 0x24, 0x45, 0xdf, 0x4f, 0x9b, 0x17,
+            0xad, 0x2b, 0x41, 0x7b, 0xe6, 0x6c, 0x37, 0x10,
+        ];
+        let expected = "874d6191b620e3261bef6864990db6ce\
+9806f66b7970fdff8617187bb9fffdff\
+5ae4df3edbd5d35e5b4f09020db03eab\
+1e031dda2fbe03d1792170a0f3009cee";
+        let mut data = plain;
+        let mut cipher = crypto::ctr::aes128_ctr(&key, &iv);
+        crypto::ctr::apply(&mut cipher, &mut data);
+        assert_eq!(hex(&data), expected.replace('\n', ""));
+    }
+
     #[test]
     fn annex_b_conversion() {
         let mut nals = vec![0, 0, 0, 2, 0x65, 0xAA, 0, 0, 0, 1, 0x41];

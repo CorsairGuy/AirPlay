@@ -20,7 +20,7 @@
 | R08 | проверено | `pin_pairing_then_verify_on_new_connection`, `pin_only_mode*`, `pairing_logs_do_not_contain_*` | реальный PIN на устройстве не проверялся |
 | R09 | проверено: crypto 14+5+8 тестов зелёные, включая tampered frame | `crypto/channel.rs`: multi-frame, partial reads, tampered frame | нет RFC 8439 кросс-вектора в тесте |
 | R10 | частично | `media::tx::airplay1` ANNOUNCE/SDP; AirPlay1 loopback в `runtime/tests/multi_profile.rs` | построчная сверка с OwnTone `raop.c` не зафиксирована |
-| R11 | частично | `crypto` RSA/CBC тесты существуют; `docs/RAOP-RX-CRYPTO.md` | нет OpenSSL/NIST fixture в этом ходе |
+| R11 | проверено: NIST CBC, OpenSSL CBC-вектор, OAEP/SHA-1 и 256-байтный модуль; защищённый RX не заявляется | `crypto` RSA/CBC тесты существуют; `docs/RAOP-RX-CRYPTO.md` | нет OpenSSL/NIST fixture в этом ходе |
 | R12 | частично | `rx.rs::setup_session` (ekey/eiv), `docs/RAOP-RX-20261125.md` | защищённый RX не заявляется рабочим |
 | R13 | проверено: пакеты crypto, rtp и media tx::session прогнаны 28.11 (17+25 тестов), retransmit/flush/wrap зелёные; двух разных клиентов в одном тесте нет | `airplay1::tests::retransmit_uses_original_packet_and_ignores_other_peers`; `session::peer_port_cannot_wrap_to_another_endpoint` | два разных клиента в одном тесте не подняты |
 | R14 | проверено: media tx::session 25 тестов и playout flush-тесты зелёные; построчная сверка с player.c не зафиксирована | `source_change_flushes_before_sending_marked_packet`; `stale_retransmit_after_flush_*`; `playout::classic_flush_*` | FLUSH не трактуется как смена эпохи |
@@ -28,7 +28,7 @@
 | R16 | проверено | `media` buffered tests: partial link, record/flush failure, new keys | частичная запись проверяется на TCP-модели |
 | R17 | частично | `codec::matrix` тесты и `realtime_format_rejects_impossible_parameters` | малые декодируемые fixtures не добавлены |
 | R18 | частично | `media/tests/mirror_tx.rs` (TX), ответы RX в `rx.rs` | loopback 400/406/415/455/500/501 для RX не собраны |
-| R19 | частично | `mirror::stream_key_iv`, `stream_key_matches_formula` | authenticated mock не равен AES-CTR |
+| R19 | проверено для KDF/CTR: независимый sha512-вектор и NIST AES-CTR; реальный поток не проверялся | `mirror::stream_key_iv`, `stream_key_matches_formula` | authenticated mock не равен AES-CTR |
 | R20 | проверено | `mirror::annex_b_conversion`, `hevc_parameter_sets_*` | нет исходных Apple-фикстур |
 | R21 | частично | тесты video/playout на устаревшие кадры | 60 FPS без дисплея не заявляется |
 | R22 | заблокировано | аудит владения PTP только по документам | менять координаторскую ветку нельзя |
