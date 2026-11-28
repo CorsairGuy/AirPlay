@@ -4,7 +4,7 @@
 <dict>
   <!-- Колонка без экрана: только приём звука AirPlay 2. -->
   <key>name</key>
-  <string>Колонка</string>
+  <string>AirPort</string>
   <key>model</key>
   <string>AirPort10,115</string>
   <key>features</key>

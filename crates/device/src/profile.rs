@@ -200,16 +200,25 @@ mod tests {
     use super::*;
 
     const SPEAKER: &str = include_str!("../../../docs/profiles/speaker.plist");
+    const OTHER_TV: &str = include_str!("../../../docs/profiles/other-tv.plist");
     const TV: &str = include_str!("../../../docs/profiles/tv.plist");
     const MAC: &str = include_str!("../../../docs/profiles/mac.plist");
 
     #[test]
     fn examples_parse_and_validate() {
         let speaker = Profile::parse(SPEAKER).unwrap();
+        assert_eq!(speaker.name.as_deref(), Some("AirPort"));
         assert_eq!(speaker.model, "AirPort10,115");
         assert!(speaker.display.is_none());
         assert!(speaker.features.0 & Features::AUDIO != 0);
         assert!(speaker.features.0 & Features::SCREEN == 0);
+
+        let other_tv = Profile::parse(OTHER_TV).unwrap();
+        assert_eq!(other_tv.name.as_deref(), Some("OtherTV"));
+        assert_eq!(other_tv.model, "AppleTV3,2");
+        assert_eq!(other_tv.features.0, 0x8300527FFEE6);
+        assert_eq!(other_tv.accessory_type, Some(1));
+        assert_eq!(other_tv.source_version, "550.10");
 
         let tv = Profile::parse(TV).unwrap();
         assert_eq!(
