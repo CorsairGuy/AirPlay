@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  D11: обезличенные факты AppleTV14,1 из docs/MIRRORING-AIRPLAY2-RESEARCH.md
+  (раздел сравнения TXT и /info). Это reference fixture, а не готовый
+  runtime-профиль: ID, ключи, имена и адреса удалены; неподтверждённые поля
+  не добавлены. Маска записана строкой, чтобы не выдавать её за проверенный
+  Profile.features.
+-->
+<plist version="1.0">
+<dict>
+  <key>reference</key>
+  <string>AppleTV14,1 TXT and /info observation, anonymized</string>
+  <key>model</key>
+  <string>AppleTV14,1</string>
+  <key>source_version</key>
+  <string>960.13.1</string>
+  <key>features_hex</key>
+  <string>0x3C177FDE4A7FDFD5</string>
+  <key>status_flags_hex</key>
+  <string>0x10644</string>
+  <key>has_udp_mirroring_support</key>
+  <true/>
+  <key>features_ex_base64</key>
+  <string>1d9/St5/Fzw4oY58</string>
+  <key>anonymized</key>
+  <true/>
+</dict>
+</plist>

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  D12: только факты, подтверждённые снимком Станции из
+  docs/DEVICE-PROFILES-20261125.md: station/data/local/bin/airplay_audio.sh
+  задаёт model=AudioAccessory5,1 и sourceVersion=550.10. Полная feature mask
+  в доступном снимке не извлечена, поэтому поля features здесь нет: маску
+  другого устройства подставлять нельзя. Это reference fixture, не Profile.
+-->
+<plist version="1.0">
+<dict>
+  <key>reference</key>
+  <string>Station airplay_audio.sh, anonymized</string>
+  <key>model</key>
+  <string>AudioAccessory5,1</string>
+  <key>source_version</key>
+  <string>550.10</string>
+  <key>features_hex</key>
+  <string>unknown</string>
+  <key>anonymized</key>
+  <true/>
+</dict>
+</plist>

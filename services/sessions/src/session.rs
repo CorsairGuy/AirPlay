@@ -2256,4 +2256,62 @@ mod tests {
             200
         );
     }
+
+    /// D13: профиль OtherTV сохраняет ровно свои биты в /info, AirPlay TXT и
+    /// RAOP TXT; чужие идентификаторы не подставляются.
+    #[test]
+    fn other_tv_bits_stay_identical_in_info_plist_and_both_txt_records() {
+        let mut context = ctx();
+        {
+            let c = Arc::get_mut(&mut context).unwrap();
+            c.device.model = "AppleTV3,2".into();
+            c.device.features = Features(0x8300_527F_FEE6);
+            c.device.status_flags = 4;
+            c.device.accessory_type = Some(1);
+            c.device.source_version = "550.10".into();
+        }
+        let device = context.device();
+        let plist = plist::Value::from_reader(std::io::Cursor::new(device.info_plist())).unwrap();
+        let plist = plist.as_dictionary().unwrap();
+        assert_eq!(plist["features"].as_unsigned_integer(), Some(0x8300_527F_FEE6));
+        assert_eq!(plist["statusFlags"].as_unsigned_integer(), Some(4));
+        assert_eq!(plist["accessoryType"].as_unsigned_integer(), Some(1));
+        assert_eq!(plist["model"].as_string(), Some("AppleTV3,2"));
+        assert_eq!(plist["sourceVersion"].as_string(), Some("550.10"));
+        assert_eq!(plist["deviceID"].as_string(), Some(device.device_id.as_str()));
+        assert_eq!(plist["psi"].as_string(), Some(device.pairing_id.as_str()));
+        assert_eq!(
+            plist["pk"].as_data(),
+            Some(device.public_key.as_slice()),
+            "ключ в /info — собственный"
+        );
+
+        let services = context.services();
+        let airplay = services
+            .iter()
+            .find(|s| s.service_type == mdns::AIRPLAY)
+            .unwrap();
+        let txt = |key: &str| {
+            airplay
+                .txt
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(txt("features"), Some("0x527FFEE6,0x8300"));
+        assert_eq!(txt("deviceid"), Some(device.device_id.as_str()));
+        assert_eq!(txt("model"), Some("AppleTV3,2"));
+
+        let raop = services
+            .iter()
+            .find(|s| s.service_type == mdns::RAOP)
+            .unwrap();
+        let ft = raop
+            .txt
+            .iter()
+            .find(|(k, _)| k == "ft")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(ft, Some("0x527FFEE6,0x8300"), "RAOP ft — те же биты");
+        assert_ne!(device.device_id, device.pairing_id, "ID не смешиваются");
+    }
 }

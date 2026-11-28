@@ -218,6 +218,20 @@ pub async fn start(opts: Options) -> Result<Receiver> {
         raop: profile.as_ref().is_none_or(|p| p.raop),
     };
 
+    // Явный отказ вместо ложного объявления: профиль с битами экрана/видео
+    // при выключенном backend зеркалирования раньше уходил в сеть как есть.
+    // Биты профиля не переписываем: это доказанный набор конкретного
+    // устройства, поэтому запуск с таким набором без обработчика отклоняется.
+    if !mirroring {
+        let screen = device.features.0 & (Features::SCREEN | Features::VIDEO);
+        if screen != 0 {
+            anyhow::bail!(
+                "profile advertises screen mirroring (features {:#x}) but mirroring is not configured",
+                device.features.0
+            );
+        }
+    }
+
     // [::] на Linux и macOS принимает и IPv4; на Windows сокет IPv6 отдельный,
     // поэтому пробуем занять и 0.0.0.0 (на Linux это просто не удастся).
     let mut listeners = Vec::new();
