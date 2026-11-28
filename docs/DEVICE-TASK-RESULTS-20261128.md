@@ -12,8 +12,8 @@
 | D03 | частично | FLUSH-граница и поздние пакеты покрыты `source_change_flushes_*`, `stale_retransmit_*`, `classic_flush_*`; построчная сверка с shairport 5.5.2 не зафиксирована |
 | D04 | частично | NTP без порта не запускает обмен, TEARDOWN закрывает сокет; PTP-движок не менялся |
 | D05 | заблокировано | OwnTone auth-setup/et=4 не подтверждён; реализацию не включали |
-| D06 | частично | SDP AirPlay1 покрыт loopback-тестом; fixture разных IPv4/IPv6 адресов не добавлен |
-| D07 | частично | `docs/RAOP-RX-CRYPTO.md`; отказ защищённого RX не заявляется |
+| D06 | выполнена для SDP: IPv4/IPv6 o= и c=, открытый/шифрованный, parser; loopback Transport/ANNOUNCE | SDP AirPlay1 покрыт loopback-тестом; fixture разных IPv4/IPv6 адресов не добавлен |
+| D07 | выполнена: шифрованный ANNOUNCE 501 и очистка формата; защищённый RX по-прежнему не заявляется | `docs/RAOP-RX-CRYPTO.md`; отказ защищённого RX не заявляется |
 | D08 | выполнено | `reject_policy_is_atomic_for_simultaneous_senders`, `parallel_teardowns_never_free_the_new_owner`, sessions reject-policy |
 | D09 | выполнено | повтор/недесятичный Content-Length отвергаются без сдвига буфера; склейка/разрыв покрыты |
 | D10 | выполнено | обрыв после OPTIONS/pairing/SETUP; UDP-порты освобождаются, следующий клиент обслуживается |
@@ -24,7 +24,7 @@
 | D15 | проверено | `profile_isolation.rs`, `multi_profile.rs`: свои ID/ключи, restart; pgid на запуск |
 | D16 | частично | `discovery/tests/interface_flap.rs`, snapshot-тесты; `_raop` expiry отдельно не собрана |
 | D17 | частично | C75: mdns-sd не даёт `ScopedIpV6`; parse-only не выдаётся за подключение |
-| D18 | частично | DeviceInfo первым, два клиента с своими identifier; порядок output/player state явно не закреплён |
+| D18 | выполнена: DeviceInfo первым, SetState после подписки, идентификаторы клиентов раздельны | DeviceInfo первым, два клиента с своими identifier; порядок output/player state явно не закреплён |
 | D19 | заблокировано | тип 37 не реализован (C31/C26); поля очереди не проверить |
 | D20 | выполнено как research | `docs/MRP-QUEUE-COMMANDS.md`; `NotSupported` сохранён |
 | D21 | частично | обложка заменяется/очищается, соседние треки делят; поколения источника нет |

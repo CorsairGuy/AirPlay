@@ -643,6 +643,60 @@ mod tests {
         panic!("ответ с идентификатором {identifier} не пришёл");
     }
 
+    /// D18: первое сообщение — DeviceInfo; состояние плеера приходит только
+    /// после подписки клиента и сохраняет его identifier.
+    #[tokio::test]
+    async fn device_info_is_first_and_player_state_follows_the_subscription() {
+        let identity = Identity {
+            device: "local".into(),
+            group: "group".into(),
+        };
+        let current = Feed {
+            source: "airplay".into(),
+            title: "Текущий".into(),
+            playing: true,
+            ..Default::default()
+        };
+        let (feed, updates) = watch::channel(current);
+        let control = Control::new(feed, media::control::Remote::new());
+        let (server, mut client) = tokio::io::duplex(65536);
+        let task = tokio::spawn(connection(server, identity, updates, control));
+
+        let hello = next_messages(&mut client).await;
+        assert_eq!(
+            hello[0].number(f("ProtocolMessage", "type")),
+            Some(kind("DEVICE_INFO_MESSAGE") as u64),
+            "первым обязан идти DeviceInfo"
+        );
+        assert!(
+            !hello.iter().any(|m| m.number(f("ProtocolMessage", "type"))
+                == Some(kind("SET_STATE_MESSAGE") as u64)),
+            "до подписки состояние плеера не отправляется"
+        );
+
+        send_messages(
+            &mut client,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64,
+            &[model::envelope(
+                "CLIENT_UPDATES_CONFIG_MESSAGE",
+                Node::default(),
+                Some("init-1"),
+            )],
+        )
+        .await;
+        let reply = read_reply(&mut client, "init-1").await;
+        assert!(
+            reply.iter().any(|m| m.number(f("ProtocolMessage", "type"))
+                == Some(kind("SET_STATE_MESSAGE") as u64)),
+            "после подписки должен прийти SetState"
+        );
+        drop(client);
+        task.await.unwrap().unwrap();
+    }
+
     #[tokio::test]
     async fn two_clients_keep_their_own_request_identifiers() {
         let identity = Identity {

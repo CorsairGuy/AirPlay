@@ -699,6 +699,27 @@ mod tests {
     }
 
     #[test]
+    fn sdp_uses_ip6_for_ipv6_and_stays_parseable() {
+        use std::net::Ipv6Addr;
+        let local = sdp(Ipv6Addr::LOCALHOST.into(), 9, Codec::Pcm, None);
+        assert!(local.contains("o=iTunes 9 0 IN IP6 ::1\r\n"), "{local}");
+        assert!(local.contains("c=IN IP6 ::1\r\n"), "{local}");
+        assert!(!local.contains("IP4"), "{local}");
+        let format = crate::raop::parse_sdp(local.as_bytes()).unwrap();
+        assert_eq!(format.sample_rate, 44_100);
+        assert_eq!(format.channels, 2);
+
+        // Глобальный адрес не должен превращаться в URL или терять family.
+        let global: Ipv6Addr = "2001:db8::1".parse().unwrap();
+        let sdp = sdp(global.into(), 10, Codec::Alac, None);
+        assert!(
+            sdp.contains("o=iTunes 10 0 IN IP6 2001:db8::1\r\n"),
+            "{sdp}"
+        );
+        assert!(sdp.contains("c=IN IP6 2001:db8::1\r\n"), "{sdp}");
+    }
+
+    #[test]
     fn receiver_parser_accepts_the_sender_sdp_vectors() {
         let pcm = sdp(Ipv4Addr::LOCALHOST.into(), 1, Codec::Pcm, None);
         let format = crate::raop::parse_sdp(pcm.as_bytes()).unwrap();
