@@ -3,6 +3,8 @@
 База: `agent/integration` на `af45129` (28 коммитов поверх `main` `fe41f82`).
 Проверены все локальные ветки, кроме `main` и самой `agent/integration`.
 
+Во время сверки удалённый `main` сдвинулся на `ec1a17a` («Provide four named external device profiles»); этот коммит уже был предком `agent/integration`, поэтому сравнение с `fe41f82` остаётся корректным и ничего не пересчитывалось.
+
 ## Метод
 
 - `git merge-base --is-ancestor` — что уже влито.
