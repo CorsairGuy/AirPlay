@@ -39,7 +39,7 @@
 | R27 | заблокировано | `PlaybackQueueRequestMessage` тип 37 намеренно игнорируется (C31/C26) | чтение очереди не реализовано |
 | R28 | выполнена для Card API: explicit artwork_for, late/current concurrency; RTSP path without id remains | `card.rs::artwork_for`, тесты поздней и конкурентной обложки | RTSP SET_PARAMETER не несёт id трека |
 | R29 | частично | `docs/STATION-PIPELINE-CONTRACTS-20261127.md`, `media/tests/station_adapter.rs` | синтетический адаптер не назван source API |
-| R30 | частично | loopback-стенды SETUP/NTP/RTSP cleanup, HLS cancel/EOF, `feature_gate` | Windows CI и pyatv не прогонялись в этом ходе |
+| R30 | частично: Windows fmt/clippy/remote 50/timesync 16 PASS; Linux CI/pyatv/SKIP | loopback-стенды SETUP/NTP/RTSP cleanup, HLS cancel/EOF, `feature_gate` | Windows CI и pyatv не прогонялись в этом ходе |
 
 ## Найденные расхождения
 
