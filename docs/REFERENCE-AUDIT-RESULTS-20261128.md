@@ -27,7 +27,7 @@
 | R15 | проверено: rtp 17 тестов (wrap/nonce/marker) зелёные; ChaCha-вектор не внешний | `rtp/packetizer`: nonce/marker при wrap; `sync_wire_fixture_and_wrapping_latency` | ChaCha-вектор не внешний |
 | R16 | проверено | `media` buffered tests: partial link, record/flush failure, new keys | частичная запись проверяется на TCP-модели |
 | R17 | частично | `codec::matrix` тесты и `realtime_format_rejects_impossible_parameters` | малые декодируемые fixtures не добавлены |
-| R18 | частично: набор 400/406/415/455/500/501 проверен unit-тестом; loopback 415 и cleanup PASS, остальные коды loopback отдельно | `media/tests/mirror_tx.rs` (TX), ответы RX в `rx.rs` | loopback 400/406/415/455/500/501 для RX не собраны |
+| R18 | проверено: все шесть кодов через loopback, один alternate descriptor, cleanup TEARDOWN | `media/tests/mirror_tx.rs` (TX), ответы RX в `rx.rs` | loopback 400/406/415/455/500/501 для RX не собраны |
 | R19 | проверено для KDF/CTR: независимый sha512-вектор и NIST AES-CTR; реальный поток не проверялся | `mirror::stream_key_iv`, `stream_key_matches_formula` | authenticated mock не равен AES-CTR |
 | R20 | проверено | `mirror::annex_b_conversion`, `hevc_parameter_sets_*` | нет исходных Apple-фикстур |
 | R21 | частично | тесты video/playout на устаревшие кадры | 60 FPS без дисплея не заявляется |

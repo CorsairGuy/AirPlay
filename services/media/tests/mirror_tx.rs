@@ -899,3 +899,139 @@ async fn rejected_video_setup_tears_down_the_partial_session() {
         "TEARDOWN names the partial session"
     );
 }
+
+/// Первый audio SETUP с современным `streamConnections` отвергается каждым
+/// документированным кодом; ровно один альтернативный дескриптор принимается,
+/// а затем отказ видео-SETUP освобождает сессию через TEARDOWN.
+async fn serve_audio_rejection(
+    control: TcpListener,
+    store: MemoryStore,
+    accessory: PairIdentity,
+    status: u16,
+) -> Result<()> {
+    let event_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let (stream, _) = control.accept().await?;
+    stream.set_nodelay(true)?;
+    let mut conn = Conn::new(stream);
+    let mut verify = PairVerify::new(accessory);
+    let mut rejected = false;
+    let mut session_uuid = None;
+    loop {
+        let request = conn.request().await?;
+        match (request.method.as_str(), request.uri.as_str()) {
+            ("POST", "/pair-verify") => match verify.handle(&request.body, &store)? {
+                VerifyOutcome::Continue(body) => conn.reply(&request, body).await?,
+                VerifyOutcome::Verified { reply, keys, .. } => {
+                    conn.reply(&request, reply).await?;
+                    conn.channel = Some(Channel::new(keys));
+                }
+                VerifyOutcome::Rejected(_) => bail!("pair-verify rejected"),
+            },
+            ("SETUP", _) => {
+                let body = plist(&request.body)?;
+                let stream = streams(&body)?;
+                match stream.get("type").and_then(|v| v.as_unsigned_integer()) {
+                    Some(96) => {
+                        if !rejected {
+                            assert!(
+                                stream.contains_key("streamConnections"),
+                                "first audio SETUP is the modern form"
+                            );
+                            rejected = true;
+                            conn.reply_status(&request, status, Vec::new()).await?;
+                            continue;
+                        }
+                        assert!(
+                            !stream.contains_key("streamConnections"),
+                            "alternate audio SETUP is the legacy form"
+                        );
+                        assert!(
+                            stream.contains_key("controlPort"),
+                            "alternate carries controlPort"
+                        );
+                        session_uuid = body
+                            .get("sessionUUID")
+                            .and_then(|v| v.as_string())
+                            .map(str::to_owned);
+                        let reply = dictionary(vec![
+                            (
+                                "eventPort",
+                                plist::Value::Integer(
+                                    (event_listener.local_addr()?.port() as u64).into(),
+                                ),
+                            ),
+                            (
+                                "streams",
+                                plist::Value::Array(vec![plist::Value::Dictionary(dictionary(
+                                    vec![
+                                        ("type", plist::Value::Integer(96u64.into())),
+                                        ("dataPort", plist::Value::Integer(7000u64.into())),
+                                        ("controlPort", plist::Value::Integer(7001u64.into())),
+                                    ],
+                                ))]),
+                            ),
+                        ]);
+                        conn.reply(&request, binary(reply)).await?;
+                    }
+                    Some(110) => {
+                        assert!(session_uuid.is_some(), "video follows audio SETUP");
+                        conn.reply_status(&request, 500, Vec::new()).await?;
+                    }
+                    other => bail!("unexpected stream type {other:?}"),
+                }
+            }
+            ("RECORD", _) => bail!("RECORD must not follow a rejected video SETUP"),
+            ("TEARDOWN", _) => {
+                assert!(rejected, "audio fallback was exercised");
+                assert_eq!(
+                    request.headers.get("Session"),
+                    session_uuid.as_deref(),
+                    "TEARDOWN names the partial session"
+                );
+                return Ok(());
+            }
+            (method, uri) => bail!("unexpected {method} {uri}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn every_documented_audio_setup_rejection_uses_one_alternate_descriptor() {
+    for status in [400, 406, 415, 455, 500, 501] {
+        let accessory = PairIdentity::from_seed("accessory:mirror-fallback", &[31u8; 32]);
+        let controller = PairIdentity::from_seed("controller:mirror-fallback", &[33u8; 32]);
+        let store = MemoryStore::default();
+        store.add(controller.pairing_id.as_bytes(), controller.public_key());
+        let credentials = PairingCredentials::new(
+            controller.clone(),
+            accessory.pairing_id.as_bytes().to_vec(),
+            accessory.public_key(),
+        )
+        .unwrap();
+        let control = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = control.local_addr().unwrap();
+        let receiver = tokio::spawn(serve_audio_rejection(control, store, accessory, status));
+
+        let mut identity = Identity::new("controller:mirror-fallback", "Mirror TX");
+        identity.model = "iPhone".into();
+        let mut config = MirrorConfig::new(
+            endpoint,
+            identity,
+            MirrorAuth::Paired(Box::new(credentials)),
+        );
+        config.audio = AudioFormat::AAC_ELD;
+        let error = MirrorSession::connect(config)
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("status {status}: video SETUP must fail"));
+        assert!(
+            format!("{error:#}").contains("video SETUP"),
+            "status {status}: {error:#}"
+        );
+        tokio::time::timeout(Duration::from_secs(5), receiver)
+            .await
+            .unwrap_or_else(|_| panic!("status {status}: receiver timeout"))
+            .unwrap_or_else(|e| panic!("status {status}: receiver task: {e:#}"))
+            .unwrap_or_else(|e| panic!("status {status}: protocol: {e:#}"));
+    }
+}
