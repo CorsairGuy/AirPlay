@@ -22,7 +22,7 @@
 | D13 | выполнено | OtherTV-биты совпадают в `/info`, `_airplay` и `_raop` TXT |
 | D14 | выполнено для gate: SCREEN/VIDEO отказ; PTP-idle и PHOTO — отдельные задачи, OtherTV не изменён | gate SCREEN/VIDEO; PTP-idle и PHOTO не гейтятся |
 | D15 | проверено | `profile_isolation.rs`, `multi_profile.rs`: свои ID/ключи, restart; pgid на запуск |
-| D16 | частично: withdrawn по типам проверен; TTL-истечение — поведение mdns-sd, локального кэша TTL нет | `discovery/tests/interface_flap.rs`, snapshot-тесты; `_raop` expiry отдельно не собрана |
+| D16 | выполнено для таблицы: withdrawn по типам; TTL-истечение — событие mdns-sd, локального TTL-кэша нет | `discovery/tests/interface_flap.rs`, snapshot-тесты; `_raop` expiry отдельно не собрана |
 | D17 | частично | C75: mdns-sd не даёт `ScopedIpV6`; parse-only не выдаётся за подключение |
 | D18 | выполнено | DeviceInfo первым, SetState после подписки, идентификаторы клиентов раздельны |
 | D19 | заблокировано | тип 37 не реализован (C31/C26); поля очереди не проверить |
@@ -32,7 +32,7 @@
 | D23 | заблокировано | публичный pause/seek runtime не согласован; контракты в docs/STATION-PIPELINE-CONTRACTS |
 | D24 | выполнена: два mock-получателя, уход одного безопасен, последний освобождает источник; EOF/отмена покрыты | `pcm_source_lifecycle.rs`, `continuous_source_generation.rs`: EOF, отмена, нет потребителей |
 | D25 | выполнено: subprocess abort до/после rename, перезапуск видит целый старый или новый файл; stale tmp не применяется | атомарная замена/fsync/stale tmp; настоящий subprocess crash не добавлен |
-| D26 | частично | revoke в FileStore и PIN-политика покрыты; семантика уже начатого verify не выбрана |
+| D26 | выполнено как политика: revoke для будущих verify; in-flight verify с прочитанным ключом завершается; активная сессия до teardown, race-тест | revoke в FileStore и PIN-политика покрыты; семантика уже начатого verify не выбрана |
 | D27 | выполнено | перехват логов: PIN и байты ключа не логируются |
 | D28 | заблокировано | нет рабочей FFmpeg-среды для воспроизводимых HLS-сегментов |
 | D29 | выполнено: сервер видит EOF после abort загрузки, permit возвращается; production-код не менялся — прежний провал был гонкой теста | permit/лимиты/редиректы покрыты; немедленный EOF на сервере после abort не гарантирован |
