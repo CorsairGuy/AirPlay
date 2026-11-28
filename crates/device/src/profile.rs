@@ -199,10 +199,10 @@ fn number(d: &Dictionary, key: &str) -> Result<Option<u64>, String> {
 mod tests {
     use super::*;
 
-    const SPEAKER: &str = include_str!("../../../docs/profiles/speaker.plist");
-    const OTHER_TV: &str = include_str!("../../../docs/profiles/other-tv.plist");
-    const TV: &str = include_str!("../../../docs/profiles/tv.plist");
-    const MAC: &str = include_str!("../../../docs/profiles/mac.plist");
+    const SPEAKER: &str = include_str!("../../../docs/profiles/AirPort.plist");
+    const OTHER_TV: &str = include_str!("../../../docs/profiles/OtherTV.plist");
+    const HOME_POD: &str = include_str!("../../../docs/profiles/HomePodMini.plist");
+    const APPLE_TV: &str = include_str!("../../../docs/profiles/AppleTV.plist");
 
     #[test]
     fn examples_parse_and_validate() {
@@ -220,7 +220,18 @@ mod tests {
         assert_eq!(other_tv.accessory_type, Some(1));
         assert_eq!(other_tv.source_version, "550.10");
 
-        let tv = Profile::parse(TV).unwrap();
+        let home_pod = Profile::parse(HOME_POD).unwrap();
+        assert_eq!(home_pod.name.as_deref(), Some("HomePodMini"));
+        assert_eq!(home_pod.model, "AudioAccessory5,1");
+        assert_eq!(home_pod.features.0, 0x1C340405FCA00);
+        assert_eq!(home_pod.source_version, "550.10");
+
+        let tv = Profile::parse(APPLE_TV).unwrap();
+        assert_eq!(tv.name.as_deref(), Some("AppleTV"));
+        assert_eq!(tv.model, "AppleTV14,1");
+        assert_eq!(tv.features.0, 0x3C177FDE4A7FDFD5);
+        assert_eq!(tv.status_flags, 0x10644);
+        assert_eq!(tv.source_version, "960.13.1");
         assert_eq!(
             tv.display,
             Some(Display {
@@ -230,10 +241,6 @@ mod tests {
                 ..Display::default()
             })
         );
-
-        let mac = Profile::parse(MAC).unwrap();
-        assert_eq!(mac.name.as_deref(), Some("Mac"));
-        assert!(mac.raop);
     }
 
     #[test]

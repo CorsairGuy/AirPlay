@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Captured device advertisement, not proof that its capabilities are implemented. -->
+  <key>name</key><string>AppleTV</string>
+  <key>model</key><string>AppleTV14,1</string>
+  <key>features</key><string>0x3C177FDE4A7FDFD5</string>
+  <key>status_flags</key><integer>67140</integer>
+  <key>source_version</key><string>960.13.1</string>
+  <!-- Host display fallback; its dimensions were not established by the capture. -->
+  <key>display</key>
+  <dict>
+    <key>width</key><integer>1920</integer>
+    <key>height</key><integer>1080</integer>
+    <key>fps</key><integer>60</integer>
+  </dict>
+  <key>raop</key><true/>
+</dict>
+</plist>

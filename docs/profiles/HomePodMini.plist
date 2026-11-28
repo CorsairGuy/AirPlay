@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Station advertisement snapshot; current runtime compatibility is unverified. -->
+  <key>name</key><string>HomePodMini</string>
+  <key>model</key><string>AudioAccessory5,1</string>
+  <key>features</key><string>0x1C340405FCA00</string>
+  <key>status_flags</key><integer>1028</integer>
+  <key>source_version</key><string>550.10</string>
+  <key>audio_only_ui</key><true/>
+  <key>raop</key><true/>
+</dict>
+</plist>
