@@ -1,0 +1,17 @@
+# D05 mock sequence, provenance:
+# OwnTone 612d6b3cf34ae38bb71b6edfcd69fd7afe6ab25c, src/outputs/raop.c,
+# raop_send_req_auth_setup / raop_cb_startup_options.
+# This is a sanitized mock, not a device capture.
+# The 32-byte public key is zeroed; the first byte 0x01 is the OwnTone
+# "no encryption" flag, so the body is exactly 33 bytes.
+>> POST /auth-setup RTSP/1.0
+>> CSeq: 3
+>> Content-Type: application/octet-stream
+>> Content-Length: 33
+>>
+>> \x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00
+>> \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00
+<< RTSP/1.0 200 OK
+<< CSeq: 3
+<< Content-Length: 0
+<<

@@ -11,7 +11,7 @@
 | D02 | выполнено | атомарная проверка всего списка streams, откат задач/владельца, тест обработчика |
 | D03 | выполнено: точная сверка с shairport 5.5.2 player.c::do_flush; flush_sequence.rs покрывает границу/поздний пакет/rollover/повторный поток | FLUSH-граница и поздние пакеты покрыты `source_change_flushes_*`, `stale_retransmit_*`, `classic_flush_*`; построчная сверка с shairport 5.5.2 не зафиксирована |
 | D04 | выполнено: диагностика timing без ключей, отказ на отсутствующий/0/>u16 порт, закрытие сокета; PTP-движок не менялся | NTP без порта не запускает обмен, TEARDOWN закрывает сокет; PTP-движок не менялся |
-| D05 | заблокировано | OwnTone auth-setup/et=4 не подтверждён; реализацию не включали |
+| D05 | частично: матрица условий, 33-байтный mock и ограничения зафиксированы; код не включён | OwnTone auth-setup/et=4 не подтверждён; реализацию не включали |
 | D06 | выполнено | IPv4/IPv6 o= и c=, открытый/шифрованный, parser; loopback Transport/ANNOUNCE |
 | D07 | выполнено | шифрованный ANNOUNCE 501 и очистка формата; защищённый RX не заявляется | |
 | D08 | выполнено | `reject_policy_is_atomic_for_simultaneous_senders`, `parallel_teardowns_never_free_the_new_owner`, sessions reject-policy |
