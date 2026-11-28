@@ -37,7 +37,7 @@
 | R25 | частично | `services/discovery` snapshot/interface_flap тесты | живого mDNS и scope IPv6 нет |
 | R26 | проверено как reference | `tests/interop/fixtures/appletv14-1.reference.plist`; `crates/device/tests/reference_profiles.rs` | сырая маска не профиль |
 | R27 | заблокировано | `PlaybackQueueRequestMessage` тип 37 намеренно игнорируется (C31/C26) | чтение очереди не реализовано |
-| R28 | частично | `card.rs` тесты обложки; второй трек с той же обложкой | нет поколения источника |
+| R28 | выполнена для Card API: explicit artwork_for, late/current concurrency; RTSP path without id remains | `card.rs` тесты обложки; второй трек с той же обложкой | нет поколения источника |
 | R29 | частично | `docs/STATION-PIPELINE-CONTRACTS-20261127.md`, `media/tests/station_adapter.rs` | синтетический адаптер не назван source API |
 | R30 | частично | loopback-стенды SETUP/NTP/RTSP cleanup, HLS cancel/EOF, `feature_gate` | Windows CI и pyatv не прогонялись в этом ходе |
 

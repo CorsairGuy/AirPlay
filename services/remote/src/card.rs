@@ -42,6 +42,18 @@ fn hash(bytes: &[u8]) -> String {
 }
 
 impl Card {
+    /// Attach artwork together with the track identity it was resolved for.
+    /// A late response for a previous item is dropped instead of replacing the
+    /// current cover. Equal image bytes are still fine for two different
+    /// tracks: ownership is the explicit id, never the image hash.
+    pub fn artwork_for(&self, content_id: &str, mime: &str, data: &[u8]) {
+        let current = self.feed.borrow().content_id.clone();
+        if current != content_id {
+            return;
+        }
+        Events::artwork(self, mime, data);
+    }
+
     /// Explicit host playback observations use the same Card/SourceControl
     /// machinery as receiver events. Keep identity, profile, output topology
     /// and routes under their existing owners. No queue-acceptance is invented.
@@ -791,6 +803,83 @@ mod phase6_tests {
         });
         card.artwork("image/jpeg", &jpeg(9, 9));
         assert_eq!(card.feed.borrow().cover.as_ref().unwrap().width, 9);
+    }
+
+    #[test]
+    fn artwork_for_rejects_a_late_cover_from_the_previous_track() {
+        let card = card("late-art");
+        card.metadata(&Metadata {
+            title: Some("first".into()),
+            artist: Some("artist".into()),
+            album: Some("album".into()),
+            ..Default::default()
+        });
+        let first_id = card.feed.borrow().content_id.clone();
+        let shared = jpeg(12, 12);
+        card.artwork_for(&first_id, "image/jpeg", &shared);
+        let first_cover = card.feed.borrow().cover.clone().unwrap();
+
+        card.metadata(&Metadata {
+            title: Some("second".into()),
+            ..Default::default()
+        });
+        let second_id = card.feed.borrow().content_id.clone();
+        assert_ne!(first_id, second_id);
+        assert!(card.feed.borrow().cover.is_none());
+
+        // Поздний ответ для прошлого трека не должен вернуть старую обложку.
+        card.artwork_for(&first_id, "image/jpeg", &jpeg(3, 3));
+        assert!(card.feed.borrow().cover.is_none());
+
+        // Та же самая картинка допустима для другого трека: принадлежность
+        // задаёт id трека, а не hash изображения.
+        card.artwork_for(&second_id, "image/jpeg", &shared);
+        let second_cover = card.feed.borrow().cover.clone().unwrap();
+        assert_eq!(second_cover.id, first_cover.id);
+        assert_eq!(second_cover.data, first_cover.data);
+    }
+
+    #[test]
+    fn concurrent_late_artwork_cannot_replace_the_current_cover() {
+        use std::sync::Barrier;
+
+        let card = card("race-art");
+        card.metadata(&Metadata {
+            title: Some("old".into()),
+            ..Default::default()
+        });
+        let old_id = card.feed.borrow().content_id.clone();
+        card.metadata(&Metadata {
+            title: Some("new".into()),
+            ..Default::default()
+        });
+        let new_id = card.feed.borrow().content_id.clone();
+        let old_data = jpeg(3, 3);
+        let new_data = jpeg(9, 9);
+        let barrier = Arc::new(Barrier::new(2));
+
+        let late = {
+            let card = Arc::clone(&card);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                card.artwork_for(&old_id, "image/jpeg", &old_data);
+            })
+        };
+        let current = {
+            let card = Arc::clone(&card);
+            let barrier = Arc::clone(&barrier);
+            let data = new_data.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                card.artwork_for(&new_id, "image/jpeg", &data);
+            })
+        };
+        late.join().unwrap();
+        current.join().unwrap();
+
+        let cover = card.feed.borrow().cover.clone().unwrap();
+        assert_eq!(cover.data.as_slice(), new_data.as_slice());
     }
 
     #[test]
