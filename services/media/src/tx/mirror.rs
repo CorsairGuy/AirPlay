@@ -277,9 +277,7 @@ impl MirrorSession {
             Err(error)
                 if error
                     .downcast_ref::<ReceiverStatus>()
-                    .is_some_and(|status| {
-                        matches!(status.0, 400 | 406 | 415 | 455 | 500 | 501)
-                    }) =>
+                    .is_some_and(|status| audio_setup_rejected(status.0)) =>
             {
                 let mut alternate = audio_setup;
                 let stream = alternate
@@ -892,6 +890,12 @@ async fn ntp_responder(socket: Arc<UdpSocket>) {
     }
 }
 
+/// Протокольные отказы, после которых doubletake пробует ровно один
+/// альтернативный audio-дескриптор. Остальные ответы не меняют форму SETUP.
+fn audio_setup_rejected(status: u16) -> bool {
+    matches!(status, 400 | 406 | 415 | 455 | 500 | 501)
+}
+
 #[cfg(test)]
 mod event_tests {
     use super::*;
@@ -960,6 +964,16 @@ mod event_tests {
         assert_eq!(reply.status, 200);
         assert_eq!(reply.headers.get("CSeq"), Some("17"));
         drop(task);
+    }
+
+    #[test]
+    fn only_documented_protocol_rejections_request_an_alternate_descriptor() {
+        for status in [400, 406, 415, 455, 500, 501] {
+            assert!(audio_setup_rejected(status), "status {status}");
+        }
+        for status in [200, 204, 401, 403, 404, 409, 503] {
+            assert!(!audio_setup_rejected(status), "status {status}");
+        }
     }
 
     #[tokio::test]
