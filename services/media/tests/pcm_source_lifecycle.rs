@@ -101,3 +101,32 @@ async fn closing_all_consumers_stops_the_source_with_an_error() {
     );
     drop(input);
 }
+
+#[tokio::test]
+async fn one_consumer_leaving_does_not_stop_the_other_and_the_last_release_does() {
+    let (tx, first) = broadcast::channel(8);
+    let mut second = tx.subscribe();
+    drop(first);
+    let (mut input, reader) = tokio::io::duplex(64);
+    let task = tokio::spawn(produce(reader, tx));
+    // Один получатель остался: полный пакет доходит.
+    input
+        .write_all(&vec![0u8; media::tx::PACKET_BYTES])
+        .await
+        .unwrap();
+    let packet = tokio::time::timeout(Duration::from_secs(2), second.recv())
+        .await
+        .expect("кадр при живом получателе")
+        .unwrap();
+    assert!(!packet.pcm().is_empty());
+    // Последний получатель ушёл: следующий кадр — ошибка, задача завершается.
+    drop(second);
+    input.write_all(&[0, 3, 0, 4]).await.unwrap();
+    input.shutdown().await.unwrap();
+    let err = tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .expect("источник не зависает без получателей")
+        .unwrap()
+        .unwrap_err();
+    assert!(err.to_string().contains("получател"), "{err}");
+}

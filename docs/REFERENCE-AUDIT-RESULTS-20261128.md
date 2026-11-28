@@ -18,13 +18,13 @@
 | R06 | частично | 20 тестов `crates/fairplay`; `sessions` end-to-end `/fp-setup` | нет опубликованных независимых векторов |
 | R07 | частично | `sessions::tests::transient_pairing_switches_to_encrypted_channel` | pyatv-клиент локально не запускался |
 | R08 | проверено | `pin_pairing_then_verify_on_new_connection`, `pin_only_mode*`, `pairing_logs_do_not_contain_*` | реальный PIN на устройстве не проверялся |
-| R09 | проверено | `crypto/channel.rs`: multi-frame, partial reads, tampered frame | нет RFC 8439 кросс-вектора в тесте |
+| R09 | проверено: crypto 14+5+8 тестов зелёные, включая tampered frame | `crypto/channel.rs`: multi-frame, partial reads, tampered frame | нет RFC 8439 кросс-вектора в тесте |
 | R10 | частично | `media::tx::airplay1` ANNOUNCE/SDP; AirPlay1 loopback в `runtime/tests/multi_profile.rs` | построчная сверка с OwnTone `raop.c` не зафиксирована |
 | R11 | частично | `crypto` RSA/CBC тесты существуют; `docs/RAOP-RX-CRYPTO.md` | нет OpenSSL/NIST fixture в этом ходе |
 | R12 | частично | `rx.rs::setup_session` (ekey/eiv), `docs/RAOP-RX-20261125.md` | защищённый RX не заявляется рабочим |
-| R13 | проверено | `airplay1::tests::retransmit_uses_original_packet_and_ignores_other_peers`; `session::peer_port_cannot_wrap_to_another_endpoint` | два разных клиента в одном тесте не подняты |
-| R14 | проверено | `source_change_flushes_before_sending_marked_packet`; `stale_retransmit_after_flush_*`; `playout::classic_flush_*` | FLUSH не трактуется как смена эпохи |
-| R15 | проверено | `rtp/packetizer`: nonce/marker при wrap; `sync_wire_fixture_and_wrapping_latency` | ChaCha-вектор не внешний |
+| R13 | проверено: пакеты crypto, rtp и media tx::session прогнаны 28.11 (17+25 тестов), retransmit/flush/wrap зелёные; двух разных клиентов в одном тесте нет | `airplay1::tests::retransmit_uses_original_packet_and_ignores_other_peers`; `session::peer_port_cannot_wrap_to_another_endpoint` | два разных клиента в одном тесте не подняты |
+| R14 | проверено: media tx::session 25 тестов и playout flush-тесты зелёные; построчная сверка с player.c не зафиксирована | `source_change_flushes_before_sending_marked_packet`; `stale_retransmit_after_flush_*`; `playout::classic_flush_*` | FLUSH не трактуется как смена эпохи |
+| R15 | проверено: rtp 17 тестов (wrap/nonce/marker) зелёные; ChaCha-вектор не внешний | `rtp/packetizer`: nonce/marker при wrap; `sync_wire_fixture_and_wrapping_latency` | ChaCha-вектор не внешний |
 | R16 | проверено | `media` buffered tests: partial link, record/flush failure, new keys | частичная запись проверяется на TCP-модели |
 | R17 | частично | `codec::matrix` тесты и `realtime_format_rejects_impossible_parameters` | малые декодируемые fixtures не добавлены |
 | R18 | частично | `media/tests/mirror_tx.rs` (TX), ответы RX в `rx.rs` | loopback 400/406/415/455/500/501 для RX не собраны |
@@ -32,8 +32,8 @@
 | R20 | проверено | `mirror::annex_b_conversion`, `hevc_parameter_sets_*` | нет исходных Apple-фикстур |
 | R21 | частично | тесты video/playout на устаревшие кадры | 60 FPS без дисплея не заявляется |
 | R22 | заблокировано | аудит владения PTP только по документам | менять координаторскую ветку нельзя |
-| R23 | частично | `crates/clock` тесты correction/domain/length | внешний corpus не подключён |
-| R24 | частично | `clock::domain` численные тесты | полный RX→TX relay не проверен |
+| R23 | частично: clock 68+7+9+6 тестов зелёные; внешний wire corpus не подключён | `crates/clock` тесты correction/domain/length | внешний corpus не подключён |
+| R24 | частично: clock domain-тесты входят в 90 зелёных; полный RX→TX relay не проверен | `clock::domain` численные тесты | полный RX→TX relay не проверен |
 | R25 | частично | `services/discovery` snapshot/interface_flap тесты | живого mDNS и scope IPv6 нет |
 | R26 | проверено как reference | `tests/interop/fixtures/appletv14-1.reference.plist`; `crates/device/tests/reference_profiles.rs` | сырая маска не профиль |
 | R27 | заблокировано | `PlaybackQueueRequestMessage` тип 37 намеренно игнорируется (C31/C26) | чтение очереди не реализовано |

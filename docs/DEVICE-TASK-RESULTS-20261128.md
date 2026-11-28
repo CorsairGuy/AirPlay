@@ -30,7 +30,7 @@
 | D21 | частично | обложка заменяется/очищается, соседние треки делят; поколения источника нет |
 | D22 | частично | `track_queue_async.rs`: поздний результат, abort, revision; лимита фоновых запросов нет |
 | D23 | заблокировано | публичный pause/seek runtime не согласован; контракты в docs/STATION-PIPELINE-CONTRACTS |
-| D24 | проверено | `pcm_source_lifecycle.rs`, `continuous_source_generation.rs`: EOF, отмена, нет потребителей |
+| D24 | выполнена: два mock-получателя, уход одного безопасен, последний освобождает источник; EOF/отмена покрыты | `pcm_source_lifecycle.rs`, `continuous_source_generation.rs`: EOF, отмена, нет потребителей |
 | D25 | частично | атомарная замена/fsync/stale tmp; настоящий subprocess crash не добавлен |
 | D26 | частично | revoke в FileStore и PIN-политика покрыты; семантика уже начатого verify не выбрана |
 | D27 | выполнено | перехват логов: PIN и байты ключа не логируются |
