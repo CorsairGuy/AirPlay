@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Historical Windows receiver settings; not the LG device's own TXT. -->
+  <key>name</key><string>OtherTV</string>
+  <key>model</key><string>AppleTV3,2</string>
+  <key>features</key><string>0x8300527FFEE6</string>
+  <key>status_flags</key><integer>4</integer>
+  <key>source_version</key><string>550.10</string>
+  <key>accessory_type</key><integer>1</integer>
+  <key>display</key>
+  <dict>
+    <key>width</key><integer>1920</integer>
+    <key>height</key><integer>1080</integer>
+    <key>fps</key><integer>60</integer>
+  </dict>
+  <key>raop</key><true/>
+</dict>
+</plist>

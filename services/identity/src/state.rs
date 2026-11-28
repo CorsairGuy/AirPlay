@@ -270,6 +270,26 @@ mod tests {
     }
 
     #[test]
+    fn abandoned_temporary_snapshots_do_not_restore_revoked_pairings() {
+        let dir = test_dir();
+        let store = FileStore::open(&dir).unwrap();
+        store.try_add(b"one", [1; 32]).unwrap();
+        store.try_add(b"two", [2; 32]).unwrap();
+        let before_revoke = fs::read(dir.join("pairings")).unwrap();
+        assert!(store.remove(b"one").unwrap());
+        let stale = dir.join(format!(".pairings-{}.tmp", uuid::Uuid::new_v4()));
+        let partial = dir.join(format!(".pairings-{}.tmp", uuid::Uuid::new_v4()));
+        fs::write(&stale, before_revoke).unwrap();
+        fs::write(&partial, b"partial record").unwrap();
+
+        let reopened = FileStore::open(&dir).unwrap();
+        assert_eq!(reopened.get(b"one"), None);
+        assert_eq!(reopened.get(b"two"), Some([2; 32]));
+        assert!(stale.exists() && partial.exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn failed_revoke_preserves_in_memory_pairing() {
         let dir = test_dir();
         let store = FileStore::open(&dir).unwrap();
