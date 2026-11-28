@@ -273,6 +273,22 @@ mod tests {
     }
 
     #[test]
+    fn fixed_reply_bytes_yield_the_hand_computed_offset() {
+        // Независимый 32-байтный ответ: t1=1.000 c, t2=t3=5.001 c,
+        // t4=1.002 c. Сервер спешит на 4 c, путь в каждую сторону 1 мс.
+        let mut packet = [0u8; 32];
+        packet[0] = 0x80;
+        packet[1] = REPLY;
+        packet[8..16].copy_from_slice(&0x0000_0001_0000_0000u64.to_be_bytes());
+        packet[16..24].copy_from_slice(&0x0000_0005_0041_8937u64.to_be_bytes());
+        packet[24..32].copy_from_slice(&0x0000_0005_0041_8937u64.to_be_bytes());
+        let clock = NtpClock::default();
+        clock.on_reply(&packet, 1_002_000_000);
+        let offset = clock.ntp_offset().unwrap();
+        assert!((offset - 4_000_000_000).abs() < 1_000, "{offset}");
+    }
+
+    #[test]
     fn stale_ntp_samples_stop_providing_a_mapping() {
         let clock = NtpClock::default();
         let mut state = clock.0.lock().unwrap();

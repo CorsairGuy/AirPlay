@@ -12,7 +12,7 @@
 |---|---|---|---|
 | R01 | частично | `services/media/tests/audio_setup_fixture.rs`; `rx::tests::failed_multi_stream_setup_*`; docs/IPHONE-AUDIO-SETUP-20261128.md | нет захвата iPhone; fixture синтетический |
 | R02 | частично | `rx.rs::setup_streams` (StreamKey::ChaCha/AesCbc), `setup_mirror_audio`, TEARDOWN `player.release` | нет независимого вектора происхождения ключа |
-| R03 | частично | `timesync::ntp` loopback test; `rx::tests::ntp_setup_*` | байты обмена не сверены с iPhone; PTP-движок не трогали |
+| R03 | проверено на loopback и фиксированном 32-байтном ответе; iPhone и 10-секундный таймер отдельно | `timesync::ntp` loopback test; `rx::tests::ntp_setup_*` | байты обмена не сверены с iPhone; PTP-движок не трогали |
 | R04 | частично | ответы 96/103 в `rx.rs`; `audio_setup_fixture` проверяет dataPort/controlPort | ошибки late-bind не инжектировались |
 | R05 | частично: gate SCREEN/VIDEO и таблица бит готовы; PTP-idle и PHOTO остаются отдельными задачами | docs/FEATURE-CAPABILITY-GATE-20261128.md; `runtime/tests/feature_gate.rs` | PTP-бит с idle-часами и PHOTO не гейтятся |
 | R06 | частично | 20 тестов `crates/fairplay`; `sessions` end-to-end `/fp-setup` | нет опубликованных независимых векторов |
