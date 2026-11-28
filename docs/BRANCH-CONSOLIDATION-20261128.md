@@ -180,12 +180,14 @@
 - Формулировка «ветка влита» здесь означает, что её работа уже присутствует в другой форме; это не подтверждение протокола и не аппаратная проверка.
 - Отклонённые ветки оставлены в репозитории как есть: удалять чужие ветки без поручения нельзя.
 
+
 ## 5. Удалённые ветки (origin)
 
-Локальный `remote.origin.fetch` ограничен `main`, поэтому список получен через `git ls-remote --heads origin` и явный fetch. На `origin` 30 веток: `main`, `agent/integration` и 28 рабочих.
+Список получен через `git ls-remote --heads origin` и явный fetch: локальный `remote.origin.fetch` ограничен `main`. На `origin` 30 веток — `main`, `agent/integration` и 28 рабочих.
 
-- Уже влиты в `agent/integration`: **18**.
-- Не влиты: **10** (6 отклонённых задач и 4 сводные/WIP-ветки).
+- **28 из 28 рабочих веток влиты** в `agent/integration`.
+- 18 влиты раньше в составе консолидации локальных веток (раздел 2): их работа уже была в дереве в более позднем виде.
+- 10 помечены влитыми через `git merge -s ours`: это отклонённые и координаторские ветки. **Их код не переносится**, дерево не изменилось.
 
 | Ветка | Tip | Статус |
 | --- | --- | --- |
@@ -205,17 +207,19 @@
 | feat/c54-ntp-fallback | `d64ee56` | влита |
 | feat/c56-capability-bits-audit | `8893890` | влита |
 | feat/c61-pairing-revoke-race | `e0577b3` | влита |
-| feat/c66-card-stale-artwork | `265d99e` | не влита: Хеш как принадлежность обложки; принят artwork_for по content id. |
+| feat/c66-card-stale-artwork | `265d99e` | влита через -s ours, код не перенесён: Хеш как принадлежность обложки; принят artwork_for по content id. |
 | feat/c70-buffered-partial-writes | `6a463f6` | влита |
 | feat/c80-mirror-session-restart | `04ad49a` | влита |
-| feat/clock-attestation | `e967850` | не влита: Неподтверждённый Claim от вызывающего. |
-| feat/dual-clock-roles | `0dafc60` | не влита: Зона координатора: одновременные follower и master. |
-| feat/epoch-recovery | `bfeb487` | не влита: Эвристика эпохи в crates/audio_stream/src/playout.rs отклонена; в main эпоха меняется только по явным сигналам. |
-| feat/long-session-recovery | `cdc98b2` | не влита: Смена эпохи по одному запоздавшему пакету. |
-| feat/nqptp-shm-reader | `bec5de1` | не влита: NQPTP-специфичный код запрещён в ядре. |
-| integration/all-new-20261127 | `ba584e7` | не влита: Сводная ветка: включает NQPTP SHM, clock attestation, epoch-эвристику и dual PTP; целиком не сливается (AGENT-TASKS). |
-| review/epoch-recovery-20261127 | `183d6e5` | не влита: Эвристика эпохи в crates/audio_stream/src/playout.rs отклонена; в main эпоха меняется только по явным сигналам. |
-| review/today-20261127 | `8a7f413` | не влита: Та же сводная ветка плюс правки playout.rs; полезные части (relay-тест, interop, TEST-PLAN) уже есть в дереве. |
-| wip/dual-clock-peer-roles-20261126 | `3119984` | не влита: WIP координатора по dual PTP; требует сквозного relay-теста. |
+| feat/clock-attestation | `e967850` | влита через -s ours, код не перенесён: Неподтверждённый Claim от вызывающего. |
+| feat/dual-clock-roles | `0dafc60` | влита через -s ours, код не перенесён: Зона координатора: одновременные follower и master. |
+| feat/epoch-recovery | `bfeb487` | влита через -s ours, код не перенесён: Эвристика эпохи в crates/audio_stream/src/playout.rs отклонена. |
+| feat/long-session-recovery | `cdc98b2` | влита через -s ours, код не перенесён: Смена эпохи по одному запоздавшему пакету. |
+| feat/nqptp-shm-reader | `bec5de1` | влита через -s ours, код не перенесён: NQPTP-специфичный код запрещён в ядре. |
+| integration/all-new-20261127 | `ba584e7` | влита через -s ours, код не перенесён: Сводная ветка: NQPTP SHM, clock attestation, epoch-эвристика, dual PTP. |
+| review/epoch-recovery-20261127 | `183d6e5` | влита через -s ours, код не перенесён: Эвристика эпохи в crates/audio_stream/src/playout.rs отклонена. |
+| review/today-20261127 | `8a7f413` | влита через -s ours, код не перенесён: Та же сводная ветка плюс правки playout.rs. |
+| wip/dual-clock-peer-roles-20261126 | `3119984` | влита через -s ours, код не перенесён: WIP координатора по dual PTP. |
 
-Сводные `integration/all-new-20261127` и `review/today-20261127` не сливаются целиком: по `docs/AGENT-TASKS.md` они включают старый NQPTP SHM, экспериментальный dual PTP и небезопасную трактовку RAOP FLUSH. Проверенные части этих веток уже перенесены отдельно: relay-тест `relay_round_trip_converts_the_inbound_stamp_exactly_once`, interop-receiver и `docs/TEST-PLAN-IPHONE-WINDOWS-20261127.md` присутствуют в дереве.
+Сводные `integration/all-new-20261127` и `review/today-20261127` не переносятся целиком: по `docs/AGENT-TASKS.md` они включают старый NQPTP SHM, экспериментальный dual PTP и небезопасную трактовку RAOP FLUSH. Проверенные части этих веток уже есть в дереве отдельно: relay-тест `relay_round_trip_converts_the_inbound_stamp_exactly_once`, `runtime/examples/interop_receiver.rs` и `docs/TEST-PLAN-IPHONE-WINDOWS-20261127.md`. Новыми в `review/today` остаются только `docs/REVIEW-CHECKLIST-20261127.md` и `scripts/verify-today.sh` — артефакты ревью, не код.
+
+Проверка после слияния: `git merge-base --is-ancestor origin/<branch> HEAD` истинно для всех 28 веток, а `git diff HEAD^1 HEAD` пуст — слияние не добавило ни одного файла.
