@@ -101,8 +101,50 @@ impl TimeSync {
         Ok(this)
     }
 
+    /// Same pair with an explicit co-resident outbound master: follow an inbound
+    /// source and serve receivers from our own domain at the same time.
+    pub async fn start_host_dual(self_id: u64, ip: IpAddr) -> std::io::Result<Self> {
+        validate_host_ip(ip)?;
+        let host = host::Host::bind_dual(self_id, ip).await?;
+        let mut this = Self::idle(self_id);
+        this.host = Some(Arc::new(host));
+        this.listening = true;
+        Ok(this)
+    }
+
+    /// Explicit local ports for isolated tests or profiles using nonstandard ports.
+    /// Zero asks the OS for an ephemeral port; peer port negotiation stays explicit.
+    pub async fn start_host_dual_with_ports(
+        self_id: u64,
+        ip: IpAddr,
+        ports: sender::Ports,
+    ) -> std::io::Result<Self> {
+        validate_host_ip(ip)?;
+        let host = host::Host::bind_dual_with_ports(self_id, ip, ports).await?;
+        let mut this = Self::idle(self_id);
+        this.host = Some(Arc::new(host));
+        this.listening = true;
+        Ok(this)
+    }
+
     pub fn selected_reading(&self) -> Option<clock::domain::Reading> {
         self.host.as_ref()?.reading()
+    }
+
+    /// Access the same service to register outgoing group peers; no socket is
+    /// created and dropping this handle does not stop the host-owned service.
+    pub fn shared_service(&self) -> Option<Arc<service::Service>> {
+        self.host.as_ref().map(|host| host.service())
+    }
+
+    /// Physical clock shared by the dual host and its media timeline.
+    pub fn dual_clock_source(&self) -> Option<Arc<media::InstantSource>> {
+        self.host.as_ref()?.dual_source()
+    }
+
+    /// Clock this host offers its receivers; available while following inbound.
+    pub fn outbound_reading(&self) -> Option<clock::domain::Reading> {
+        self.host.as_ref()?.outbound_reading()
     }
 
     pub fn set_session_peers(&self, owner: u128, peers: Vec<IpAddr>) {

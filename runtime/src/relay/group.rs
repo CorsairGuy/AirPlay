@@ -2,7 +2,7 @@
 use crate::routing::worker as output_worker;
 use ::discovery::catalog::{OutputCatalog, ReceiverEndpoint};
 use ::media::tx::{AudioPacket, MediaClock, Session, pool::SessionPool};
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use remote::output_control::OutputRequest;
 use sessions::SessionPreparer;
 use std::sync::{Arc, Weak};
@@ -146,6 +146,30 @@ impl ClockPeers {
     }
 }
 impl PtpGroup {
+    /// Bind an outgoing group to the live inbound epoch of the same dual
+    /// timing service. Losing that epoch cancels the group instead of silently
+    /// continuing on the still-running outbound clock.
+    pub fn new_relay(
+        timing: &timesync::TimeSync,
+        group: u128,
+        owner: u128,
+        ports: timesync::sender::Ports,
+        upstream: watch::Receiver<bool>,
+    ) -> Result<Self> {
+        let source = timing
+            .dual_clock_source()
+            .context("dual timing source is not running")?;
+        let service = timing
+            .shared_service()
+            .context("timing service is not running")?;
+        let timeline = Arc::new(MasterTimeline::new_relay(
+            source,
+            service.subscribe(),
+            std::time::Duration::from_millis(100),
+        )?);
+        Self::new(timeline, group, upstream)?.with_clock_service(&service, owner, ports)
+    }
+
     pub fn new(
         timeline: Arc<MasterTimeline>,
         group: u128,
@@ -563,6 +587,113 @@ impl<P: SessionPreparer> SessionPreparer for QualifiedPreparer<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn host_dual_relay_stops_after_inbound_source_is_removed() {
+        use clock::{domain::Domain, ptp_sender::Master, role::Role};
+        use timesync::sender::{Peer, Ports};
+        use tokio::{
+            net::UdpSocket,
+            time::{Duration, timeout},
+        };
+
+        let ip = "127.0.0.1".parse().unwrap();
+        let event = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let general = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let receiver_event = UdpSocket::bind("127.0.0.3:0").await.unwrap();
+        let receiver_general = UdpSocket::bind("127.0.0.3:0").await.unwrap();
+        let peer = Peer {
+            ip,
+            ports: Ports {
+                event: event.local_addr().unwrap().port(),
+                general: general.local_addr().unwrap().port(),
+            },
+        };
+        let timing = timesync::TimeSync::start_host_dual_with_ports(
+            100,
+            ip,
+            Ports {
+                event: 0,
+                general: 0,
+            },
+        )
+        .await
+        .unwrap();
+        let service = timing.shared_service().unwrap();
+        service.set_session_peers(1, vec![peer]).await.unwrap();
+        let addresses = service.addresses();
+        let mut status = service.subscribe();
+        let mut master = Master::new(Domain::new(50, 1).unwrap()).unwrap();
+        master.set_peers(&[ip]).unwrap();
+        timeout(Duration::from_secs(5), async {
+            for round in 0..100u64 {
+                for datagram in master.poll(round * 1_000_000_000).unwrap() {
+                    let (socket, target) = if datagram.port == 319 {
+                        (&event, addresses.0)
+                    } else {
+                        (&general, addresses.1)
+                    };
+                    socket.send_to(&datagram.bytes, target).await.unwrap();
+                    if let Some(token) = datagram.completion {
+                        let follow = master
+                            .complete_send(
+                                &token,
+                                Domain::new(50, 1)
+                                    .unwrap()
+                                    .reading(clock::now_ns() + 20_000_000_000),
+                            )
+                            .unwrap();
+                        general.send_to(&follow.bytes, addresses.1).await.unwrap();
+                    }
+                }
+                let snapshot = *status.borrow_and_update();
+                if snapshot.selection.role == Role::Follower(ip) && snapshot.mapping.is_some() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(30)).await;
+            }
+            panic!("inbound source was not selected");
+        })
+        .await
+        .unwrap();
+        let (_upstream, upstream) = watch::channel(false);
+        let group = PtpGroup::new_relay(
+            &timing,
+            42,
+            9,
+            Ports {
+                event: receiver_event.local_addr().unwrap().port(),
+                general: receiver_general.local_addr().unwrap().port(),
+            },
+            upstream,
+        )
+        .unwrap();
+        group
+            .clock_peers
+            .as_ref()
+            .unwrap()
+            .apply(&[receiver_event.local_addr().unwrap().ip()])
+            .await
+            .unwrap();
+        let mut stop = group.stop();
+        let producer = group.producer(MediaClock::now());
+        let packet = producer.packet(0, &[0; ::media::tx::PACKET_BYTES]).unwrap();
+        assert_eq!(packet.ptp_reading().unwrap().domain().id(), 100);
+        let mut bytes = [0u8; 1024];
+        let (size, _) = timeout(Duration::from_secs(2), receiver_event.recv_from(&mut bytes))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(size >= 44);
+        assert_eq!(bytes[0] & 15, 0);
+        service.set_session_peers(1, vec![]).await.unwrap();
+        timeout(Duration::from_secs(2), stop.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(*stop.borrow());
+        assert!(producer.packet(0, &[0; ::media::tx::PACKET_BYTES]).is_err());
+    }
     use clock::{
         domain::{ClockMap, Domain, LocalClock},
         role::{Role, Selection},
@@ -596,6 +727,7 @@ mod tests {
             ),
             quality: Some(Quality::Local),
             link: None,
+            outbound: None,
         });
         let timeline =
             Arc::new(MasterTimeline::new(source, status, Duration::from_millis(100)).unwrap());
@@ -650,6 +782,56 @@ mod tests {
         );
         updates.send_replace(initial);
         drop(group);
+        assert!(producer.packet(0, &pcm).is_err());
+    }
+    #[tokio::test]
+    async fn relay_group_stops_producer_when_inbound_mapping_is_lost() {
+        let origin = Instant::now();
+        let own = Domain::new(7, 1).unwrap();
+        let inbound = Domain::new(50, 2).unwrap();
+        let local = LocalClock::new(1).unwrap();
+        let source = Arc::new(InstantSource::new(origin, local, own, 1_000_000_000));
+        let snapshot = Snapshot {
+            selection: Selection {
+                role: Role::Follower("192.0.2.1".parse().unwrap()),
+                domain: Some(inbound),
+            },
+            mapping: Some(
+                ClockMap::new(
+                    local.at(0),
+                    inbound.reading(2_000_000_000),
+                    0,
+                    5_000_000_000,
+                )
+                .unwrap(),
+            ),
+            quality: Some(Quality::OneWay),
+            link: None,
+            outbound: Some(
+                ClockMap::new(local.at(0), own.reading(1_000_000_000), 0, 5_000_000_000).unwrap(),
+            ),
+        };
+        let (updates, status) = watch::channel(snapshot);
+        let timeline = Arc::new(
+            MasterTimeline::new_relay(source, status, Duration::from_millis(100)).unwrap(),
+        );
+        let (_user, upstream) = watch::channel(false);
+        let group = PtpGroup::new(timeline, 42, upstream).unwrap();
+        let producer = group.producer(MediaClock::at(origin, 0));
+        let pcm = [0; ::media::tx::PACKET_BYTES];
+        assert_eq!(
+            producer
+                .packet(0, &pcm)
+                .unwrap()
+                .ptp_reading()
+                .unwrap()
+                .domain(),
+            own
+        );
+        let mut lost = snapshot;
+        lost.mapping = None;
+        lost.quality = None;
+        updates.send_replace(lost);
         assert!(producer.packet(0, &pcm).is_err());
     }
     struct Blocked {

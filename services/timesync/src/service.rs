@@ -11,8 +11,11 @@ use clock::{follower, probe, role};
 use std::{
     collections::{BTreeMap, VecDeque},
     io,
-    net::SocketAddr,
-    sync::Arc,
+    net::{IpAddr, SocketAddr},
+    sync::{
+        Arc,
+        atomic::{AtomicU8, Ordering},
+    },
     time::Duration,
 };
 use tokio::{
@@ -38,8 +41,47 @@ pub struct Service {
 struct PeerRequest {
     owner: u128,
     peers: Vec<Peer>,
+    inbound: bool,
     deadline: Option<std::time::Instant>,
+    completion: Arc<AtomicU8>,
     reply: oneshot::Sender<io::Result<()>>,
+}
+
+const PENDING: u8 = 0;
+const ACCEPTED: u8 = 1;
+const CANCELLED: u8 = 2;
+
+// The receiver marks a queued update cancelled if its future is dropped,
+// including after the worker has sent the reply but before it is observed.
+struct CompletionGuard(Arc<AtomicU8>);
+impl Drop for CompletionGuard {
+    fn drop(&mut self) {
+        let _ = self
+            .0
+            .compare_exchange(PENDING, CANCELLED, Ordering::AcqRel, Ordering::Acquire);
+    }
+}
+
+fn dual_union(
+    inbound: &OwnerInterests,
+    outbound: &OwnerInterests,
+) -> io::Result<BTreeMap<IpAddr, Ports>> {
+    let mut all = inbound.union().clone();
+    for (ip, ports) in outbound.union() {
+        if all.insert(*ip, *ports).is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "peer cannot be both timing source and receiver",
+            ));
+        }
+    }
+    if all.len() > 64 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "too many timing peers",
+        ));
+    }
+    Ok(all)
 }
 
 #[cfg(test)]
@@ -244,6 +286,112 @@ mod tests {
         let _general = UdpSocket::bind(addresses.1).await.unwrap();
     }
     #[tokio::test]
+    async fn dual_service_follows_a_source_and_serves_receivers_on_one_pair() {
+        let event = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let general = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let peer = Peer {
+            ip: "127.0.0.1".parse().unwrap(),
+            ports: Ports {
+                event: event.local_addr().unwrap().port(),
+                general: general.local_addr().unwrap().port(),
+            },
+        };
+        let source = Arc::new(crate::media::InstantSource::new(
+            std::time::Instant::now(),
+            LocalClock::new(1).unwrap(),
+            Domain::new(100, 1).unwrap(),
+            clock::now_ns() + 10_000_000_000,
+        ));
+        let service = Service::bind_dual(config(peer, Policy::FollowOnly(peer.ip)), source.clone())
+            .await
+            .unwrap();
+        let receiver_event = UdpSocket::bind("127.0.0.3:0").await.unwrap();
+        let receiver_general = UdpSocket::bind("127.0.0.3:0").await.unwrap();
+        let receiver = Peer {
+            ip: receiver_event.local_addr().unwrap().ip(),
+            ports: Ports {
+                event: receiver_event.local_addr().unwrap().port(),
+                general: receiver_general.local_addr().unwrap().port(),
+            },
+        };
+        service.set_group_peers(1, vec![receiver]).await.unwrap();
+        service.set_group_peers(2, vec![receiver]).await.unwrap();
+        service.set_group_peers(1, vec![]).await.unwrap();
+        assert!(
+            service.set_group_peers(2, vec![peer]).await.is_err(),
+            "source cannot be a receiver"
+        );
+        assert!(
+            service.set_session_peers(3, vec![receiver]).await.is_err(),
+            "receiver cannot become source"
+        );
+        let addresses = service.addresses();
+        let mut status = service.subscribe();
+        let mut remote = Master::new(Domain::new(50, 1).unwrap()).unwrap();
+        remote.set_peers(&[peer.ip]).unwrap();
+        let mut buffer = [0u8; 1024];
+        let followed = timeout(Duration::from_secs(2), async {
+            let mut round = 0;
+            loop {
+                emit(&mut remote, round, &event, &general, addresses).await;
+                round += 1;
+                let value = *status.borrow_and_update();
+                if value.selection.role == Role::Follower(peer.ip) && value.mapping.is_some() {
+                    break value;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("inbound evidence must be followed");
+        assert_eq!(followed.quality, Some(Quality::OneWay));
+        assert_eq!(followed.selection.domain.unwrap().id(), 50);
+        let outbound = followed
+            .outbound
+            .expect("outbound mapping survives following");
+        assert_eq!(outbound.domain().id(), 100);
+        assert_ne!(outbound.domain(), followed.selection.domain.unwrap());
+        let timeline = Arc::new(
+            crate::media::MasterTimeline::new_relay(
+                source,
+                service.subscribe(),
+                Duration::from_millis(100),
+            )
+            .unwrap(),
+        );
+        let (_upstream, upstream) = watch::channel(false);
+        let lease = crate::media::MasterLease::spawn(timeline, upstream);
+        let mut stopped = lease.subscribe();
+        assert!(!*stopped.borrow());
+        // The same socket pair still serves receivers while we follow.
+        while receiver_event.try_recv(&mut buffer).is_ok() {}
+        let (size, _) = timeout(
+            Duration::from_secs(1),
+            receiver_event.recv_from(&mut buffer),
+        )
+        .await
+        .expect("outbound Sync while following")
+        .unwrap();
+        assert!(size >= 44);
+        assert_eq!(buffer[0] & 15, 0);
+        assert_eq!(&buffer[20..28], &100u64.to_be_bytes());
+        assert!(
+            event.try_recv(&mut buffer).is_err(),
+            "no outbound Sync to source"
+        );
+        service.set_peers(vec![]).await.unwrap();
+        timeout(Duration::from_secs(1), stopped.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            *stopped.borrow(),
+            "removing the inbound source stops relay media"
+        );
+        service.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn opt_in_probe_completes_over_loopback_without_changing_mapping_quality() {
         let event = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let general = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -381,6 +529,221 @@ mod peer_update_tests {
         assert!(owners.is_empty());
         assert!(union.is_empty());
     }
+
+    #[test]
+    fn dual_peer_conflict_does_not_modify_the_committed_owners() {
+        let bind = "192.0.2.1".parse().unwrap();
+        let mut inbound = OwnerInterests::new(bind);
+        let mut outbound = OwnerInterests::new(bind);
+        let source = Peer {
+            ip: "192.0.2.2".parse().unwrap(),
+            ports: Ports {
+                event: 319,
+                general: 320,
+            },
+        };
+        let receiver = Peer {
+            ip: "192.0.2.3".parse().unwrap(),
+            ports: Ports {
+                event: 319,
+                general: 320,
+            },
+        };
+        inbound.set(1, vec![source], None).unwrap();
+        outbound.set(2, vec![receiver], None).unwrap();
+        let previous = dual_union(&inbound, &outbound).unwrap();
+        let mut candidate = outbound.clone();
+        candidate.set(2, vec![source], None).unwrap();
+        assert!(dual_union(&inbound, &candidate).is_err());
+        assert_eq!(dual_union(&inbound, &outbound).unwrap(), previous);
+    }
+
+    #[test]
+    fn dual_expiry_keeps_the_other_role_and_shared_owners() {
+        let bind = "192.0.2.1".parse().unwrap();
+        let mut inbound = OwnerInterests::new(bind);
+        let mut outbound = OwnerInterests::new(bind);
+        let source = Peer {
+            ip: "192.0.2.2".parse().unwrap(),
+            ports: Ports {
+                event: 319,
+                general: 320,
+            },
+        };
+        let receiver = Peer {
+            ip: "192.0.2.3".parse().unwrap(),
+            ports: Ports {
+                event: 319,
+                general: 320,
+            },
+        };
+        let now = std::time::Instant::now();
+        inbound.set(1, vec![source], Some(now)).unwrap();
+        inbound.set(2, vec![source], None).unwrap();
+        outbound.set(3, vec![receiver], Some(now)).unwrap();
+        inbound.expire(now);
+        outbound.expire(now);
+        let remaining = dual_union(&inbound, &outbound).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining.get(&source.ip), Some(&source.ports));
+        assert_eq!(inbound.owner_count(), 1);
+        assert_eq!(outbound.owner_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn cancelled_after_apply_releases_the_owner_without_touching_others() {
+        let source = Peer {
+            ip: "127.0.0.2".parse().unwrap(),
+            ports: Ports {
+                event: 319,
+                general: 320,
+            },
+        };
+        let receiver = Peer {
+            ip: "127.0.0.3".parse().unwrap(),
+            ports: Ports {
+                event: 319,
+                general: 320,
+            },
+        };
+        let service = Service::bind_dual(
+            config(source, Policy::FollowOnly(source.ip)),
+            Arc::new(TestClock),
+        )
+        .await
+        .unwrap();
+        let other = Peer {
+            ip: "127.0.0.4".parse().unwrap(),
+            ports: receiver.ports,
+        };
+        service.set_group_peers(9, vec![other]).await.unwrap();
+        let (reply, wait) = oneshot::channel();
+        let completion = Arc::new(AtomicU8::new(PENDING));
+        let guard = CompletionGuard(completion.clone());
+        assert!(
+            service
+                .peers
+                .send(PeerRequest {
+                    owner: 3,
+                    peers: vec![receiver],
+                    inbound: false,
+                    deadline: None,
+                    completion,
+                    reply
+                })
+                .await
+                .is_ok()
+        );
+        wait.await.unwrap().unwrap();
+        assert!(service.set_session_peers(4, vec![receiver]).await.is_err());
+        drop(guard);
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if service.set_session_peers(4, vec![receiver]).await.is_ok() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("cancelled owner must be released");
+        assert!(
+            service.set_session_peers(5, vec![other]).await.is_err(),
+            "another owner remains active"
+        );
+        service.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_older_update_cannot_remove_a_newer_update_for_same_owner() {
+        let source = Peer {
+            ip: "127.0.0.2".parse().unwrap(),
+            ports: Ports {
+                event: 319,
+                general: 320,
+            },
+        };
+        let old = Peer {
+            ip: "127.0.0.3".parse().unwrap(),
+            ports: source.ports,
+        };
+        let new = Peer {
+            ip: "127.0.0.4".parse().unwrap(),
+            ports: source.ports,
+        };
+        let service = Service::bind_dual(
+            config(source, Policy::FollowOnly(source.ip)),
+            Arc::new(TestClock),
+        )
+        .await
+        .unwrap();
+        let (reply, wait) = oneshot::channel();
+        let completion = Arc::new(AtomicU8::new(PENDING));
+        let guard = CompletionGuard(completion.clone());
+        assert!(
+            service
+                .peers
+                .send(PeerRequest {
+                    owner: 3,
+                    peers: vec![old],
+                    inbound: false,
+                    deadline: None,
+                    completion,
+                    reply
+                })
+                .await
+                .is_ok()
+        );
+        wait.await.unwrap().unwrap();
+        service.set_group_peers(3, vec![new]).await.unwrap();
+        drop(guard);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            service.set_session_peers(4, vec![new]).await.is_err(),
+            "newer update must remain"
+        );
+        service.set_session_peers(5, vec![old]).await.unwrap();
+        service.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dropping_public_update_future_does_not_leave_its_peer() {
+        let source = Peer {
+            ip: "127.0.0.2".parse().unwrap(),
+            ports: Ports {
+                event: 319,
+                general: 320,
+            },
+        };
+        let peer = Peer {
+            ip: "127.0.0.3".parse().unwrap(),
+            ports: source.ports,
+        };
+        let service = Service::bind_dual(
+            config(source, Policy::FollowOnly(source.ip)),
+            Arc::new(TestClock),
+        )
+        .await
+        .unwrap();
+        let mut update = Box::pin(service.set_group_peers(3, vec![peer]));
+        tokio::select! {
+            biased;
+            result = &mut update => panic!("update completed before cancellation: {result:?}"),
+            _ = std::future::ready(()) => {},
+        }
+        drop(update);
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if service.set_session_peers(4, vec![peer]).await.is_ok() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("cancelled future must not leave a peer");
+        service.shutdown().await.unwrap();
+    }
     #[tokio::test]
     async fn live_peer_changes_reuse_sockets_source_and_master_epoch() {
         let event = UdpSocket::bind("127.0.0.1:0").await.unwrap();
@@ -507,6 +870,21 @@ impl Drop for StatusGuard {
 }
 impl Service {
     pub async fn bind(config: Config, clock: Arc<dyn ClockSource>) -> io::Result<Self> {
+        Self::bind_mode(config, clock, false).await
+    }
+
+    /// One socket pair and one physical source with an explicit co-resident
+    /// outbound master. Receivers are served from our own domain while the
+    /// selected role may follow an inbound source; domains never mix.
+    pub async fn bind_dual(config: Config, clock: Arc<dyn ClockSource>) -> io::Result<Self> {
+        Self::bind_mode(config, clock, true).await
+    }
+
+    async fn bind_mode(
+        config: Config,
+        clock: Arc<dyn ClockSource>,
+        dual: bool,
+    ) -> io::Result<Self> {
         let network = config.network;
         if network.bind_ip.is_unspecified()
             || network.bind_ip.is_multicast()
@@ -519,6 +897,7 @@ impl Service {
         }
         peer_table(network.bind_ip, &network.peers)?;
         let mut interests = OwnerInterests::new(network.bind_ip);
+        let mut output_interests = OwnerInterests::new(network.bind_ip);
         if !network.peers.is_empty() {
             interests.set(0, network.peers.clone(), None)?;
         }
@@ -536,13 +915,23 @@ impl Service {
             local: initial.clock(),
         };
         let ips = network.peers.iter().map(|peer| peer.ip).collect::<Vec<_>>();
-        let mut engine = Engine::new(
-            network.domain,
-            initial,
-            &ips,
-            config.election,
-            config.follow,
-        )?;
+        let mut engine = if dual {
+            Engine::new_dual(
+                network.domain,
+                initial,
+                &ips,
+                config.election,
+                config.follow,
+            )?
+        } else {
+            Engine::new(
+                network.domain,
+                initial,
+                &ips,
+                config.election,
+                config.follow,
+            )?
+        };
         if let Some(probe) = config.probe {
             engine.enable_probe(probe)?;
         }
@@ -560,20 +949,34 @@ impl Service {
             tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
             let mut event_buffer = [0u8; 1024];
             let mut general_buffer = [0u8; 1024];
+            let mut pending = BTreeMap::<(bool, u128), Arc<AtomicU8>>::new();
             loop {
                 let batch = tokio::select! {
                     biased;
                     _=&mut stopped=>return Ok(()),
                     _=tick.tick()=>{
+                        let mut changed = false;
+                        pending.retain(|&(inbound, owner), completion| match completion.load(Ordering::Acquire) {
+                            CANCELLED => {
+                                let owners = if dual && !inbound { &mut output_interests } else { &mut interests };
+                                changed |= owners.release(owner).is_some();
+                                false
+                            },
+                            ACCEPTED => false,
+                            _ => true,
+                        });
                         // A silent owner expires exactly like an explicit release.
-                        if let Some(change) = interests.expire(std::time::Instant::now()) {
+                        let input_change = interests.expire(std::time::Instant::now());
+                        let output_change = output_interests.expire(std::time::Instant::now());
+                        if changed || input_change.is_some() || output_change.is_some() {
                             let (local, own) = source.sample()?;
-                            engine.set_peers(
-                                &change.union().keys().copied().collect::<Vec<_>>(),
-                                local,
-                                own,
-                            )?;
-                            peers = change.union().clone();
+                            if dual {
+                                engine.set_dual_peers(&interests.union().keys().copied().collect::<Vec<_>>(), &output_interests.union().keys().copied().collect::<Vec<_>>(), local, own)?;
+                                peers = dual_union(&interests, &output_interests)?;
+                            } else {
+                                engine.set_peers(&interests.union().keys().copied().collect::<Vec<_>>(), local, own)?;
+                                peers = interests.union().clone();
+                            }
                             worker_status.send_replace(engine.snapshot());
                         }
                         let (local,own)=source.sample()?;
@@ -581,10 +984,29 @@ impl Service {
                     },
                     request=peer_requests.recv()=>{
                         let Some(request) = request else { return Ok(()); };
-                        // A cancelled caller must reconcile state: once queued,
-                        // an update may still apply. Ack means applied locally,
-                        // never receiver adoption or measured synchronization.
-                        let result = match interests.set(request.owner, request.peers, request.deadline) {
+                        if request.completion.load(Ordering::Acquire) == CANCELLED || request.reply.is_closed() { continue; }
+                        let owner_key = (dual && request.inbound, request.owner);
+                        let completion = request.completion.clone();
+                        let result = if dual {
+                            let mut input = interests.clone();
+                            let mut output = output_interests.clone();
+                            let selected = if request.inbound { &mut input } else { &mut output };
+                            match selected.set(request.owner, request.peers, request.deadline) {
+                                Err(error) => Err(error),
+                                Ok(_) => match dual_union(&input, &output) {
+                                    Err(error) => Err(error),
+                                    Ok(next) => {
+                                        let (local, own) = source.sample()?;
+                                        engine.set_dual_peers(&input.union().keys().copied().collect::<Vec<_>>(), &output.union().keys().copied().collect::<Vec<_>>(), local, own)?;
+                                        peers = next;
+                                        interests = input;
+                                        output_interests = output;
+                                        worker_status.send_replace(engine.snapshot());
+                                        Ok(())
+                                    }
+                                }
+                            }
+                        } else { match interests.set(request.owner, request.peers, request.deadline) {
                             Err(error) => Err(error),
                             Ok(change) => {
                                 if let Some(change) = change {
@@ -599,15 +1021,16 @@ impl Service {
                                 }
                                 Ok(())
                             },
-                        };
+                        }};
+                        if result.is_ok() { pending.insert(owner_key, completion); }
                         let _ = request.reply.send(result);
                         continue;
                     },
                     received=event.recv_from(&mut event_buffer)=>{
                         let (size,addr)=match received {
                             Ok(packet) => packet,
-                            // Windows can report ICMP port-unreachable on a later
-                            // receive from an otherwise usable UDP socket.
+                            // Windows can report an ICMP port-unreachable on a later
+                            // recv from an otherwise usable, unconnected UDP socket.
                             Err(error) if cfg!(windows) && error.kind() == io::ErrorKind::ConnectionReset => continue,
                             Err(error) => return Err(error),
                         };let (local,own)=source.sample()?;
@@ -642,9 +1065,20 @@ impl Service {
     }
     /// Replace base receiver/service peers (owner zero). Group-owned peers are
     /// retained independently. Sockets/source remain alive, including no peers.
-    /// Bounded queue: retry WouldBlock; cancellation after enqueue is not rollback.
+    /// Bounded queue: retry WouldBlock. A cancelled update releases its owner
+    /// asynchronously; this is fail-closed, not restoration of prior peers.
     pub async fn set_peers(&self, peers: Vec<Peer>) -> io::Result<()> {
-        self.update_peers(0, peers, None).await
+        self.update_peers(0, peers, None, true).await
+    }
+    /// Peers belonging to an incoming session, distinct from group receivers.
+    pub async fn set_session_peers(&self, owner: u128, peers: Vec<Peer>) -> io::Result<()> {
+        if owner == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "reserved timing owner",
+            ));
+        }
+        self.update_peers(owner, peers, None, true).await
     }
     /// Lease the owner's peers for at most `lease`. A consumer that stops
     /// refreshing releases its peers without an explicit call; other owners are
@@ -669,7 +1103,7 @@ impl Service {
                 "unbounded timing-owner lease",
             ));
         }
-        self.update_peers(owner, peers, deadline).await
+        self.update_peers(owner, peers, deadline, false).await
     }
     /// Replace one consumer's peers in the common service's union. Owner is an
     /// application lifecycle token, not proof of native AirPlay group adoption.
@@ -681,21 +1115,26 @@ impl Service {
                 "reserved timing owner",
             ));
         }
-        self.update_peers(owner, peers, None).await
+        self.update_peers(owner, peers, None, false).await
     }
     async fn update_peers(
         &self,
         owner: u128,
         peers: Vec<Peer>,
         deadline: Option<std::time::Instant>,
+        inbound: bool,
     ) -> io::Result<()> {
         peer_table(self.addresses.0.ip(), &peers)?;
         let (reply, result) = oneshot::channel();
+        let completion = Arc::new(AtomicU8::new(PENDING));
+        let guard = CompletionGuard(completion.clone());
         self.peers
             .try_send(PeerRequest {
                 owner,
                 peers,
+                inbound,
                 deadline,
+                completion,
                 reply,
             })
             .map_err(|error| {
@@ -707,9 +1146,11 @@ impl Service {
                     "timing peer update unavailable",
                 )
             })?;
-        result
+        let outcome = result
             .await
-            .map_err(|_| io::Error::new(io::ErrorKind::NotConnected, "clock service ended"))?
+            .map_err(|_| io::Error::new(io::ErrorKind::NotConnected, "clock service ended"))?;
+        guard.0.store(ACCEPTED, Ordering::Release);
+        outcome
     }
     pub async fn shutdown(mut self) -> io::Result<()> {
         self.status.send_replace(Snapshot::inactive());

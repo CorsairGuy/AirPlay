@@ -76,6 +76,7 @@ impl Aggregate {
 /// consumer cannot pin the aggregate forever. Every update is planned and
 /// validated before anything is committed, and callers only ever see complete
 /// [`Aggregate`] snapshots — never a partially applied owner change.
+#[derive(Clone)]
 pub struct OwnerInterests {
     bind: IpAddr,
     owners: BTreeMap<u128, Owner>,
@@ -83,6 +84,7 @@ pub struct OwnerInterests {
     generation: u64,
 }
 
+#[derive(Clone)]
 struct Owner {
     peers: Vec<Peer>,
     deadline: Option<Instant>,
