@@ -19,6 +19,7 @@ use crypto::cbc::AudioCbc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::time::timeout;
+use tracing::debug;
 
 use super::{FRAMES_PER_PACKET, PACKET_BYTES, Volume};
 
@@ -65,6 +66,18 @@ pub fn may_support_auth_setup(receiver: &Receiver) -> bool {
 
 fn announce_challenge() -> String {
     STANDARD_NO_PAD.encode(rand::random::<[u8; 16]>())
+}
+
+/// OwnTone `raop_cb_startup_options`: auth-setup is sent only when OPTIONS
+/// `Public` lists `POST` *and* the advertised `et` contains `4`. Either
+/// condition alone is not enough; this must not enable a pairing flow.
+pub fn supports_auth_setup(options_public: Option<&str>, receiver: &Receiver) -> bool {
+    may_support_auth_setup(receiver)
+        && options_public.is_some_and(|public| {
+            public
+                .split(',')
+                .any(|method| method.trim().eq_ignore_ascii_case("POST"))
+        })
 }
 
 impl Receiver {
@@ -317,7 +330,14 @@ impl Session {
             session.config.receiver.address, session.ssrc
         );
         // OPTIONS proves the peer is RAOP and exposes methods without changing state.
-        session.request("OPTIONS", "*", &[], &[]).await?;
+        let options = session.request("OPTIONS", "*", &[], &[]).await?;
+        // OwnTone sends auth-setup between OPTIONS and ANNOUNCE. The reply is
+        // not used to derive keys; a failure is logged and ANNOUNCE still runs.
+        let auth_setup =
+            supports_auth_setup(options.headers.get("Public"), &session.config.receiver);
+        if auth_setup {
+            session.send_auth_setup().await;
+        }
         let challenge = session.config.audio_key.map(|_| announce_challenge());
         let mut announce_headers = vec![("Content-Type", "application/sdp")];
         if let Some(challenge) = &challenge {
@@ -399,7 +419,7 @@ impl Session {
         sdp(local, self.ssrc, self.config.codec, encryption)
     }
 
-    async fn request(
+    async fn request_status(
         &mut self,
         method: &str,
         uri: &str,
@@ -439,11 +459,46 @@ impl Session {
             buffer.extend_from_slice(&chunk[..n]);
         };
         self.cseq += 1;
+        Ok(response)
+    }
+
+    async fn request(
+        &mut self,
+        method: &str,
+        uri: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+    ) -> Result<rtsp::Response> {
         // Some RAOP receivers return an incorrect CSeq (also tolerated by OwnTone).
+        let response = self.request_status(method, uri, headers, body).await?;
         if response.status != 200 {
             bail!("RAOP {method} rejected with {}", response.status);
         }
         Ok(response)
+    }
+
+    /// OwnTone `raop_send_req_auth_setup` / `raop_cb_startup_auth_setup`:
+    /// a compatibility POST before ANNOUNCE. The reply is not used to derive
+    /// keys and no authentication is claimed; a rejection is only logged.
+    async fn send_auth_setup(&mut self) {
+        let secret = x25519_dalek::StaticSecret::from(rand::random::<[u8; 32]>());
+        let public = x25519_dalek::PublicKey::from(&secret);
+        let mut body = Vec::with_capacity(33);
+        body.push(0x01);
+        body.extend_from_slice(public.as_bytes());
+        let result = self
+            .request_status(
+                "POST",
+                "/auth-setup",
+                &[("Content-Type", "application/octet-stream")],
+                &body,
+            )
+            .await;
+        match result {
+            Ok(response) if response.status == 200 => {}
+            Ok(response) => debug!("RAOP auth-setup rejected with {}", response.status),
+            Err(error) => debug!("RAOP auth-setup failed: {error}"),
+        }
     }
 
     /// Send one 352-frame packet. `pcm` is interleaved 16-bit big-endian.
@@ -1053,6 +1108,86 @@ mod tests {
         assert_eq!(packets.len(), 2);
         assert_eq!(alac_escape_frame(&pcm).unwrap(), packets[0]);
         assert_eq!(packets[0], packets[1]);
+    }
+
+    #[test]
+    fn auth_setup_needs_both_post_and_et_four() {
+        let et4 = raop("0,1", "0,4");
+        assert!(supports_auth_setup(Some("ANNOUNCE, SETUP, POST"), &et4));
+        assert!(supports_auth_setup(Some("post"), &et4));
+        assert!(!supports_auth_setup(Some("ANNOUNCE, SETUP"), &et4));
+        assert!(!supports_auth_setup(None, &et4));
+        // `et=4` alone is not enough, and POST without et=4 sends nothing.
+        assert!(!supports_auth_setup(
+            Some("ANNOUNCE, POST"),
+            &raop("0,1", "0,1")
+        ));
+    }
+
+    #[tokio::test]
+    async fn auth_setup_precedes_announce_when_gate_is_open() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let fake = tokio::spawn(async move {
+            let (mut tcp, _) = listener.accept().await.unwrap();
+            let mut buffer = Vec::new();
+            let mut methods = Vec::new();
+            let mut auth_body = None;
+            for _ in 0..4 {
+                let req = loop {
+                    if let Some(req) = rtsp::decode_request(&mut buffer).unwrap() {
+                        break req;
+                    }
+                    let mut chunk = [0u8; 2048];
+                    let n = tcp.read(&mut chunk).await.unwrap();
+                    assert!(n > 0);
+                    buffer.extend_from_slice(&chunk[..n]);
+                };
+                methods.push(req.method.clone());
+                let mut response = rtsp::Response::to(&req, 200);
+                if req.method == "OPTIONS" {
+                    response
+                        .headers
+                        .insert("Public", "ANNOUNCE, SETUP, RECORD, POST");
+                }
+                if req.method == "POST" {
+                    assert_eq!(req.uri, "/auth-setup");
+                    assert_eq!(
+                        req.headers.get("Content-Type"),
+                        Some("application/octet-stream")
+                    );
+                    auth_body = Some(req.body.clone());
+                }
+                if req.method == "SETUP" {
+                    response.status = 500;
+                    response.reason = "Internal Server Error".into();
+                }
+                let mut wire = Vec::new();
+                response.encode(&mut wire);
+                tcp.write_all(&wire).await.unwrap();
+            }
+            (methods, auth_body)
+        });
+
+        let mut config = SessionConfig::new(raop("0,1", "0,4"), Codec::Pcm);
+        config.receiver.address = address;
+        assert!(
+            Session::connect(config).await.is_err(),
+            "SETUP 500 stops the session"
+        );
+
+        let (methods, body) = timeout(Duration::from_secs(5), fake)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(methods, ["OPTIONS", "POST", "ANNOUNCE", "SETUP"]);
+        let body = body.expect("auth-setup body");
+        assert_eq!(body.len(), 33, "0x01 + 32-byte public key");
+        assert_eq!(body[0], 0x01);
     }
 
     #[tokio::test]

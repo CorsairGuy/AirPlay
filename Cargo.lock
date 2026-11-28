@@ -1244,6 +1244,7 @@ dependencies = [
  "tokio",
  "tracing",
  "video",
+ "x25519-dalek",
 ]
 
 [[package]]

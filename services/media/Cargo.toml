@@ -38,6 +38,7 @@ rtp.workspace = true
 timesync.workspace = true
 fairplay.workspace = true
 tracing.workspace = true
+x25519-dalek.workspace = true
 if-addrs.workspace = true
 libc = "0.2"
 
