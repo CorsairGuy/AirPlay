@@ -15,6 +15,8 @@ use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
 
+use tokio::sync::Semaphore;
+
 /// Provider-scoped stable identifier. Never derived from array position, so a
 /// reordered queue does not change identity.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -93,6 +95,7 @@ pub enum QueueError {
     InvalidPosition,
     ItemIdsExhausted,
     Cancelled,
+    InvalidConcurrency,
     Source(SourceError),
 }
 
@@ -100,6 +103,82 @@ impl From<SourceError> for QueueError {
     fn from(error: SourceError) -> Self {
         Self::Source(error)
     }
+}
+
+/// Resolves tracks off the async thread with a hard cap on concurrent source
+/// requests. The `Source` is synchronous and provider-owned, so it runs on a
+/// blocking worker; the permit moves into that worker and is not released by
+/// cancelling the caller's future. Revision safety remains with
+/// [`TrackQueue::begin_load`] / [`TrackQueue::apply_load`].
+pub struct TrackLoader {
+    in_flight: Arc<Semaphore>,
+}
+
+impl TrackLoader {
+    pub fn new(max_in_flight: usize) -> Result<Self, QueueError> {
+        if max_in_flight == 0 {
+            return Err(QueueError::InvalidConcurrency);
+        }
+        Ok(Self {
+            in_flight: Arc::new(Semaphore::new(max_in_flight)),
+        })
+    }
+
+    /// Resolve every id before the queue is touched. A failed resolve returns
+    /// an error and no partial vector; the caller's queue stays unchanged.
+    pub async fn resolve<S>(
+        &self,
+        mut source: S,
+        ids: Vec<TrackId>,
+    ) -> Result<Vec<Track>, QueueError>
+    where
+        S: Source + Send + 'static,
+    {
+        if ids.is_empty() {
+            return Err(QueueError::Empty);
+        }
+        if ids.len() > TrackQueue::MAX_TRACKS {
+            return Err(QueueError::TooManyTracks);
+        }
+        let permit = self
+            .in_flight
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| QueueError::Cancelled)?;
+        tokio::task::spawn_blocking(move || {
+            // Keep the permit until the blocking source work really ends.
+            let _permit = permit;
+            resolve_tracks(&mut source, &ids)
+        })
+        .await
+        .map_err(|_| QueueError::Cancelled)?
+    }
+}
+
+/// Shared pre-validation for synchronous `load` and `TrackLoader`: identity
+/// mismatch or oversized metadata rejects the whole batch.
+fn resolve_tracks(source: &mut impl Source, ids: &[TrackId]) -> Result<Vec<Track>, QueueError> {
+    if ids.is_empty() {
+        return Err(QueueError::Empty);
+    }
+    if ids.len() > TrackQueue::MAX_TRACKS {
+        return Err(QueueError::TooManyTracks);
+    }
+    let mut resolved = Vec::with_capacity(ids.len());
+    for id in ids {
+        let track = source.resolve(id)?;
+        if &track.id != id {
+            return Err(QueueError::Source(SourceError::Unavailable(
+                "source returned another id".into(),
+            )));
+        }
+        if track.title.len() > TrackQueue::MAX_TITLE_BYTES {
+            return Err(QueueError::InvalidMetadata);
+        }
+        resolved.push(track);
+    }
+    Ok(resolved)
 }
 
 /// A selection that has been requested but not yet committed. While it is in
@@ -224,25 +303,11 @@ impl TrackQueue {
         source: &mut impl Source,
         ids: &[TrackId],
     ) -> Result<&[Track], QueueError> {
-        if ids.is_empty() {
-            return Err(QueueError::Empty);
-        }
-        if ids.len() > Self::MAX_TRACKS {
-            return Err(QueueError::TooManyTracks);
-        }
-        let mut resolved = Vec::with_capacity(ids.len());
-        for id in ids {
-            let track = source.resolve(id)?;
-            if &track.id != id {
-                return Err(QueueError::Source(SourceError::Unavailable(
-                    "source returned another id".into(),
-                )));
-            }
-            if track.title.len() > Self::MAX_TITLE_BYTES {
-                return Err(QueueError::InvalidMetadata);
-            }
-            resolved.push(track);
-        }
+        let resolved = resolve_tracks(source, ids)?;
+        self.install(resolved)
+    }
+
+    fn install(&mut self, resolved: Vec<Track>) -> Result<&[Track], QueueError> {
         let items = self.assign(resolved.len())?;
         self.tracks = resolved;
         self.items = items;
