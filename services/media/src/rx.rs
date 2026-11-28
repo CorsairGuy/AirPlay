@@ -784,22 +784,28 @@ impl Media {
             self.eiv = eiv.try_into().ok();
         }
         if timing == "NTP" {
-            let requested = uint(body, "timingPort").unwrap_or(0);
-            // Порт из сети: `as u16` завернул бы 65536+n в чужой порт.
-            match u16::try_from(requested) {
-                Ok(port) => match timesync::ntp::start(SocketAddr::new(self.remote, port)) {
-                    Ok((local, clock, task)) => {
-                        self.tasks.push(task);
-                        self.ntp = Some(clock);
-                        #[cfg(feature = "hls")]
-                        {
-                            self.hls_v2_setup = port != 0;
+            // Без порта отправителя обмен вести не с кем: не открываем сокет
+            // и не создаём часы. Порт из сети `as u16` завернул бы 65536+n
+            // в чужой порт, поэтому выходим за диапазон явно.
+            match uint(body, "timingPort") {
+                None => info!("NTP: timingPort отсутствует, обмен не запускается"),
+                Some(0) => info!("NTP: timingPort=0, обмен не запускается"),
+                Some(requested) => match u16::try_from(requested) {
+                    Ok(port) => match timesync::ntp::start(SocketAddr::new(self.remote, port)) {
+                        Ok((local, clock, task)) => {
+                            self.tasks.push(task);
+                            self.ntp = Some(clock);
+                            #[cfg(feature = "hls")]
+                            {
+                                self.hls_v2_setup = true;
+                            }
+                            info!(port, local, "NTP: обмен с отправителем запущен");
+                            d.insert("timingPort".into(), Value::Integer(local.into()));
                         }
-                        d.insert("timingPort".into(), Value::Integer(local.into()));
-                    }
-                    Err(e) => warn!("NTP: {e}"),
+                        Err(e) => warn!(port, "NTP: {e}"),
+                    },
+                    Err(_) => warn!(requested, "NTP: timingPort вне диапазона u16"),
                 },
-                Err(_) => warn!(requested, "NTP: timingPort вне диапазона u16"),
             }
         }
         if timing == "PTP" {
@@ -2008,6 +2014,81 @@ mod tests {
         );
         player.release(id);
         assert!(player.active.lock().unwrap().is_none());
+    }
+
+    fn session_body(timing: &str, port: Option<u64>) -> Request {
+        let mut d = Dictionary::new();
+        d.insert("timingProtocol".into(), Value::String(timing.into()));
+        if let Some(port) = port {
+            d.insert("timingPort".into(), Value::Integer(port.into()));
+        }
+        let mut req = Request::new("SETUP", "/setup", "RTSP/1.0");
+        req.body = plist(Value::Dictionary(d));
+        req
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ntp_setup_without_a_usable_port_does_not_open_an_exchange() {
+        let player = Arc::new(Player::new(
+            audio_stream::Config::default(),
+            TimeSync::idle(1),
+        ));
+        let mut media = Media::new(
+            &media_context(player.clone()),
+            "127.0.0.1".parse().unwrap(),
+            "127.0.0.1".parse().unwrap(),
+        );
+        for port in [None, Some(0), Some(65_536)] {
+            let resp = media.handle(&session_body("NTP", port)).unwrap();
+            assert_eq!(resp.status, 200);
+            let body = plist_dict(&resp.body).expect("ответ — plist");
+            assert!(
+                !body.contains_key("timingPort"),
+                "без порта отправителя не обещаем timingPort: {port:?}"
+            );
+            assert!(media.tasks.is_empty(), "обмен не запущен: {port:?}");
+            assert!(media.ntp.is_none());
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ntp_setup_starts_an_exchange_on_the_sender_port_and_teardown_closes_it() {
+        let sender = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let sender_port = sender.local_addr().unwrap().port();
+        let player = Arc::new(Player::new(
+            audio_stream::Config::default(),
+            TimeSync::idle(1),
+        ));
+        let mut media = Media::new(
+            &media_context(player.clone()),
+            "127.0.0.1".parse().unwrap(),
+            "127.0.0.1".parse().unwrap(),
+        );
+        let resp = media.handle(&session_body("NTP", Some(sender_port.into()))).unwrap();
+        assert_eq!(resp.status, 200);
+        let body = plist_dict(&resp.body).unwrap();
+        let local = body
+            .get("timingPort")
+            .and_then(Value::as_unsigned_integer)
+            .expect("timingPort нашего сокета");
+        assert_ne!(local, 0);
+        assert_eq!(media.ntp.is_some(), true);
+        assert_eq!(media.tasks.len(), 1);
+
+        let resp = media.handle(&Request::new("TEARDOWN", "/setup", "RTSP/1.0")).unwrap();
+        assert_eq!(resp.status, 200);
+        assert!(media.tasks.is_empty());
+        assert!(media.ntp.is_none());
+        // Сокет закрыт: порт можно занять снова.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            match std::net::UdpSocket::bind(("127.0.0.1", local as u16)) {
+                Ok(_) => break,
+                Err(e) if std::time::Instant::now() > deadline => panic!("порт NTP не закрыт: {e}"),
+                Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+            }
+        }
+        sender.set_read_timeout(Some(Duration::from_millis(10))).ok();
     }
 }
 

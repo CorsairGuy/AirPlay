@@ -46,19 +46,26 @@ impl Headers {
     }
 
     fn content_length(&self) -> Result<usize, Error> {
-        match self.get("Content-Length") {
-            None => Ok(0),
-            // Только десятичные цифры: `parse` для usize принял бы ещё
-            // знак плюс, а "-1", "0x10" и переполнение — нет; отказываем
-            // всем недесятичным записям одинаково.
-            Some(v) => {
-                let v = v.trim();
-                if v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()) {
-                    return Err(Error::BadHeader);
-                }
-                v.parse().map_err(|_| Error::BadHeader)
-            }
+        let mut values = self
+            .0
+            .iter()
+            .filter(|(k, _)| k.eq_ignore_ascii_case("Content-Length"))
+            .map(|(_, v)| v.trim());
+        let Some(v) = values.next() else {
+            return Ok(0);
+        };
+        // Повтор Content-Length неоднозначен для промежуточных узлов: даже
+        // одинаковые значения отвергаем, а не выбираем первое молча.
+        if values.next().is_some() {
+            return Err(Error::BadHeader);
         }
+        // Только десятичные цифры: `parse` для usize принял бы ещё знак
+        // плюс, а "-1", "0x10" и переполнение — нет; отказываем всем
+        // недесятичным записям одинаково.
+        if v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(Error::BadHeader);
+        }
+        v.parse().map_err(|_| Error::BadHeader)
     }
 }
 
@@ -328,15 +335,14 @@ mod tests {
         assert_eq!(req.body, b"hi");
     }
 
-    /// Повторный Content-Length не должен давать двойное чтение тела:
-    /// длина берётся из первого заголовка, как и раньше.
+    /// Повторный Content-Length неоднозначен: запрос отвергается целиком,
+    /// тело не читается ни по первой, ни по второй длине.
     #[test]
-    fn duplicate_content_length_uses_the_first() {
-        let mut buf =
-            b"POST /x RTSP/1.0\r\nContent-Length: 2\r\nContent-Length: 4\r\n\r\nabcd".to_vec();
-        let req = decode_request(&mut buf).unwrap().unwrap();
-        assert_eq!(req.body, b"ab");
-        assert_eq!(buf, b"cd");
+    fn duplicate_content_length_is_rejected() {
+        let wire = b"POST /x RTSP/1.0\r\nContent-Length: 2\r\nContent-Length: 4\r\n\r\nabcd";
+        let mut buf = wire.to_vec();
+        assert_eq!(decode_request(&mut buf), Err(Error::BadHeader));
+        assert_eq!(buf, wire);
     }
 
     #[test]

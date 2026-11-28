@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Негативный fixture: та же форма SETUP, но shk 16 байт. shairport-sync
+  5.5.2 rtsp.c handle_setup_2 (строки 2766-2784) считает ключ неверным при
+  длине != 32; наш приёмник обязан отказать целиком, а не принять короткий
+  ключ как рабочий.
+-->
+<plist version="1.0">
+<dict>
+  <key>streams</key>
+  <array>
+    <dict>
+      <key>type</key>
+      <integer>96</integer>
+      <key>shk</key>
+      <data>AAAAAAAAAAAAAAAAAAAAAA==</data>
+      <key>ct</key>
+      <integer>1</integer>
+      <key>ss</key>
+      <integer>16</integer>
+      <key>sr</key>
+      <integer>44100</integer>
+      <key>spf</key>
+      <integer>352</integer>
+      <key>ch</key>
+      <integer>2</integer>
+    </dict>
+  </array>
+</dict>
+</plist>

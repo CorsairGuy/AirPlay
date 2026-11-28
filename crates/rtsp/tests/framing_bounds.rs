@@ -110,3 +110,27 @@ fn limits_do_not_shift_with_query_or_version() {
         assert_eq!(buf, b"Z");
     }
 }
+
+#[test]
+fn duplicate_content_length_is_rejected_even_when_the_values_match() {
+    for value in ["0", "3"] {
+        let wire = format!(
+            "POST /x RTSP/1.0\r\nCSeq: 1\r\nContent-Length: {value}\r\nContent-Length: {value}\r\n\r\nabc"
+        );
+        let mut buf = wire.clone().into_bytes();
+        assert_eq!(decode_request(&mut buf), Err(Error::BadHeader));
+        assert_eq!(buf, wire.into_bytes(), "неоднозначный запрос не должен сдвигать буфер");
+    }
+}
+
+#[test]
+fn ambiguous_content_length_spellings_are_rejected_without_consuming_followers() {
+    for value in ["-1", "+3", "0x10", " 3x", "3 4"] {
+        let wire = format!(
+            "POST /x RTSP/1.0\r\nCSeq: 1\r\nContent-Length: {value}\r\n\r\nGET /info RTSP/1.0\r\nCSeq: 2\r\n\r\n"
+        );
+        let mut buf = wire.clone().into_bytes();
+        assert_eq!(decode_request(&mut buf), Err(Error::BadHeader), "{value:?}");
+        assert_eq!(buf, wire.into_bytes(), "ошибка не съедает следующий запрос");
+    }
+}
