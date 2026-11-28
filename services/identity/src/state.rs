@@ -146,7 +146,16 @@ impl FileStore {
             file.write_all(text.as_bytes())?;
             file.sync_all()?;
             drop(file);
+            // D25: тестовый subprocess обрывается на выбранной стороне rename.
+            #[cfg(test)]
+            if std::env::var("AIRPLAY_TEST_CRASH").as_deref() == Ok("before-rename") {
+                std::process::abort();
+            }
             fs::rename(&temporary, &self.path)?;
+            #[cfg(test)]
+            if std::env::var("AIRPLAY_TEST_CRASH").as_deref() == Ok("after-rename") {
+                std::process::abort();
+            }
             Ok(())
         })();
         if result.is_err() && created {
@@ -266,6 +275,64 @@ mod tests {
         let reopened = FileStore::open(&dir).unwrap();
         assert_eq!(reopened.get(b"one"), None);
         assert_eq!(reopened.get(b"two"), Some([2; 32]));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// D25: дочерний процесс с тем же тестовым бинарником пишет FileStore и
+    /// обрывается до или после rename. Родитель проверяет, что после
+    /// перезапуска виден только целый старый или новый снимок.
+    #[test]
+    fn crash_child_writes_and_aborts() {
+        let Some(dir) = std::env::var_os("AIRPLAY_TEST_CRASH_DIR") else {
+            return;
+        };
+        let store = FileStore::open(Path::new(&dir)).unwrap();
+        store.try_add(b"new", [7; 32]).unwrap();
+        panic!("crash hook did not fire");
+    }
+
+    fn run_crash_child(dir: &Path, when: &str) {
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "state::tests::crash_child_writes_and_aborts",
+                "--nocapture",
+            ])
+            .env("AIRPLAY_TEST_CRASH", when)
+            .env("AIRPLAY_TEST_CRASH_DIR", dir)
+            .status()
+            .unwrap();
+        assert!(!status.success(), "дочерний процесс должен быть прерван");
+    }
+
+    #[test]
+    fn subprocess_crash_before_rename_keeps_the_old_snapshot() {
+        let dir = test_dir();
+        let store = FileStore::open(&dir).unwrap();
+        store.try_add(b"one", [1; 32]).unwrap();
+        run_crash_child(&dir, "before-rename");
+        assert!(
+            fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .any(|entry| entry.file_name().to_string_lossy().contains(".tmp")),
+            "незавершённый временный файл остаётся"
+        );
+        let reopened = FileStore::open(&dir).unwrap();
+        assert_eq!(reopened.get(b"one"), Some([1; 32]));
+        assert_eq!(reopened.get(b"new"), None);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn subprocess_crash_after_rename_keeps_the_new_snapshot() {
+        let dir = test_dir();
+        let store = FileStore::open(&dir).unwrap();
+        store.try_add(b"one", [1; 32]).unwrap();
+        run_crash_child(&dir, "after-rename");
+        let reopened = FileStore::open(&dir).unwrap();
+        assert_eq!(reopened.get(b"one"), Some([1; 32]));
+        assert_eq!(reopened.get(b"new"), Some([7; 32]));
         fs::remove_dir_all(dir).unwrap();
     }
 

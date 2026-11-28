@@ -23,6 +23,7 @@ tracing.workspace = true
 
 [dev-dependencies]
 audio.workspace = true
+clock.workspace = true
 codec.workspace = true
 crypto.workspace = true
 socket2.workspace = true

@@ -357,6 +357,50 @@ Connection: close
         server.abort();
     }
 
+    /// D29: отмена незавершённой загрузки закрывает соединение, а не оставляет
+    /// сервер ждать следующий запрос; слот освобождается.
+    #[tokio::test]
+    async fn cancelled_fetch_closes_the_server_connection() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (accepted, wait_accepted) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let _ = accepted.send(());
+            let mut request = [0; 4096];
+            assert!(stream.read(&mut request).await.unwrap() > 0);
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nhello\r\n",
+                )
+                .await
+                .unwrap();
+            // Клиент получил первую часть и ждёт продолжения; после abort
+            // сервер обязан увидеть EOF, а не таймаут.
+            let mut buf = [0; 64];
+            let read =
+                tokio::time::timeout(std::time::Duration::from_secs(3), stream.read(&mut buf))
+                    .await
+                    .expect("соединение закрыто после отмены")
+                    .unwrap();
+            assert_eq!(read, 0, "ожидался EOF");
+        });
+        let fetcher = Fetcher::for_tests();
+        let url = Url::parse(&format!("http://localhost:{port}/slow.m3u8")).unwrap();
+        let task = tokio::spawn(async move { fetcher.fetch_playlist(&url).await });
+        tokio::time::timeout(std::time::Duration::from_secs(3), wait_accepted)
+            .await
+            .expect("клиент подключился")
+            .expect("сервер отправил сигнал");
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .expect("сервер увидел закрытие")
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn redirected_playlist_resolves_segments_against_final_url() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
