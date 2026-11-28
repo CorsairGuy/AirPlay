@@ -763,6 +763,49 @@ mod tests {
         ));
     }
 
+    /// D16 (RFC 6763 §12): снятие одного типа сервиса не оставляет его
+    /// записи жить за счёт второго типа; после снятия обоих устройство уходит.
+    #[test]
+    fn withdrawing_one_service_type_removes_only_that_record() {
+        let mut table = table(vec![
+            record(
+                mdns::AIRPLAY,
+                "Кухня",
+                "speaker.local.",
+                "192.0.2.10",
+                7000,
+                &[
+                    ("deviceid", "AA:BB:CC:DD:EE:FF"),
+                    ("features", "0x200,0x0"),
+                    ("model", "ThirdParty1,1"),
+                ],
+            ),
+            record(
+                mdns::RAOP,
+                "AABBCCDDEEFF@Кухня",
+                "speaker.local.",
+                "192.0.2.10",
+                7000,
+                &[("ch", "2"), ("sr", "44100"), ("et", "0x4"), ("ft", "0x4")],
+            ),
+        ]);
+        assert!(table.apply(ServiceEvent::ServiceRemoved(
+            mdns::AIRPLAY.to_string(),
+            "Кухня._airplay._tcp.local.".to_string(),
+        )));
+        let found = devices(&table);
+        assert_eq!(found.len(), 1, "RAOP-запись ещё жива");
+        assert!(!found[0].has_airplay);
+        assert!(found[0].has_raop);
+        assert!(found[0].endpoint(false).is_some());
+
+        assert!(table.apply(ServiceEvent::ServiceRemoved(
+            mdns::RAOP.to_string(),
+            "AABBCCDDEEFF@Кухня._raop._tcp.local.".to_string(),
+        )));
+        assert!(devices(&table).is_empty());
+    }
+
     #[test]
     fn incomplete_txt_refuses_instead_of_assuming_audio() {
         let table = table(vec![record(

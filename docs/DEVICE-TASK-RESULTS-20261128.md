@@ -22,7 +22,7 @@
 | D13 | выполнено | OtherTV-биты совпадают в `/info`, `_airplay` и `_raop` TXT |
 | D14 | частично | gate SCREEN/VIDEO; PTP-idle и PHOTO не гейтятся |
 | D15 | проверено | `profile_isolation.rs`, `multi_profile.rs`: свои ID/ключи, restart; pgid на запуск |
-| D16 | частично | `discovery/tests/interface_flap.rs`, snapshot-тесты; `_raop` expiry отдельно не собрана |
+| D16 | частично: withdrawn по типам проверен; TTL-истечение — поведение mdns-sd, локального кэша TTL нет | `discovery/tests/interface_flap.rs`, snapshot-тесты; `_raop` expiry отдельно не собрана |
 | D17 | частично | C75: mdns-sd не даёт `ScopedIpV6`; parse-only не выдаётся за подключение |
 | D18 | выполнена: DeviceInfo первым, SetState после подписки, идентификаторы клиентов раздельны | DeviceInfo первым, два клиента с своими identifier; порядок output/player state явно не закреплён |
 | D19 | заблокировано | тип 37 не реализован (C31/C26); поля очереди не проверить |
