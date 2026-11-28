@@ -554,4 +554,93 @@ mod tests {
         updates.send_replace(snapshot);
         assert!(timeline.reading_at_now(origin, origin).is_err());
     }
+    /// Маршрут приём → relay → отправка без сокетов. Метка отправителя в чужом
+    /// домене пересчитывается одним `clock::domain::translate` в наш домен, и
+    /// исходящий штамп совпадает с результатом этого пересчёта: второго сдвига
+    /// нет, а смена входящей эпохи не переносит чужую шкалу в нашу.
+    #[test]
+    fn relay_round_trip_converts_the_inbound_stamp_exactly_once() {
+        let (origin, updates, timeline) = fixture();
+        let local = LocalClock::new(1).unwrap();
+        let outbound = updates.borrow().mapping.expect("fixture has a mapping");
+        // Отправитель объявил 9,025 с своего домена; локально это 25 мс.
+        let inbound_domain = Domain::new(50, 2).unwrap();
+        let inbound = ClockMap::new(
+            local.at(0),
+            inbound_domain.reading(9_000_000_000),
+            0,
+            2_000_000_000,
+        )
+        .unwrap();
+        let produced = origin + Duration::from_millis(25);
+        let bridged = clock::domain::translate(
+            inbound_domain.reading(9_025_000_000),
+            &inbound,
+            &outbound,
+            local.at(25_000_000),
+        )
+        .unwrap();
+        assert_eq!(bridged.domain(), timeline.domain(), "bridged stamp is ours");
+        assert_eq!(bridged.ns(), 1_025_000_000, "the offset is applied once");
+        assert_eq!(
+            timeline.reading_at_now(produced, produced).unwrap(),
+            bridged,
+            "outgoing stamp is the same single translation, not a second shift"
+        );
+        // Смена входящей эпохи не переносит чужую шкалу в нашу.
+        let next_domain = Domain::new(50, 3).unwrap();
+        let next = ClockMap::new(
+            local.at(0),
+            next_domain.reading(5_000_000_000),
+            0,
+            2_000_000_000,
+        )
+        .unwrap();
+        assert_eq!(
+            timeline.reading_at_now(produced, produced).unwrap().ns(),
+            1_025_000_000,
+            "our outgoing scale does not follow the inbound epoch"
+        );
+        let resent = clock::domain::translate(
+            next_domain.reading(5_025_000_000),
+            &next,
+            &outbound,
+            local.at(25_000_000),
+        )
+        .unwrap();
+        assert_eq!(resent, bridged, "same instant, still one shift");
+        // Дрейф входящего домена пересчитывается, а не отбрасывается: при
+        // +250 ppb те же 9,025 с дают 24 999 993 нс локально, а не 25 000 000.
+        let drifting = ClockMap::new(
+            local.at(0),
+            inbound_domain.reading(9_000_000_000),
+            250,
+            2_000_000_000,
+        )
+        .unwrap();
+        let drifted = clock::domain::translate(
+            inbound_domain.reading(9_025_000_000),
+            &drifting,
+            &outbound,
+            local.at(25_000_000),
+        )
+        .unwrap();
+        assert_eq!(drifted.ns(), 1_024_999_993, "inbound drift is applied once");
+        let produced_at_drift = origin + Duration::from_nanos(24_999_993);
+        assert_eq!(
+            timeline
+                .reading_at_now(produced_at_drift, produced_at_drift)
+                .unwrap(),
+            drifted,
+            "outgoing stamp keeps the drifting instant"
+        );
+        // Потеря исходящей шкалы обрывает маршрут.
+        let mut lost = *updates.borrow();
+        lost.mapping = None;
+        updates.send_replace(lost);
+        assert!(
+            timeline.reading_at_now(produced, produced).is_err(),
+            "a lost outgoing mapping ends the relay route"
+        );
+    }
 }
