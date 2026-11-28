@@ -674,6 +674,66 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Default)]
+    struct LogSink(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogSink {
+        type Writer = LogSink;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// D27: PIN и байты ключа из запроса не попадают в журнал — ни при
+    /// успешном запросе PIN, ни при отклонённом pair-setup.
+    #[test]
+    fn pairing_logs_do_not_contain_the_pin_or_request_secret_bytes() {
+        let logs = LogSink::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(logs.clone())
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .finish();
+        let secret = vec![0xA7u8; 48];
+        tracing::subscriber::with_default(subscriber, || {
+            let mut c = Client::new(ctx());
+            assert_eq!(c.call("POST", "/pair-pin-start", &[], vec![]).status, 200);
+            let _ = c.call(
+                "POST",
+                "/pair-setup",
+                &[("X-Apple-HKP", "3")],
+                secret.clone(),
+            );
+            let _ = c.call(
+                "POST",
+                "/pair-verify",
+                &[("X-Apple-HKP", "3")],
+                vec![0x5C; 32],
+            );
+        });
+        let text = String::from_utf8_lossy(&logs.0.lock().unwrap()).to_string();
+        assert!(!text.is_empty(), "журнал должен содержать события");
+        assert!(!text.contains("1234"), "PIN не должен логироваться: {text}");
+        assert!(
+            !text.contains(&"a7".repeat(8)) && !text.contains(&"A7".repeat(8)),
+            "байты ключа не должны логироваться: {text}"
+        );
+        assert!(
+            !text.contains(&"5c".repeat(8)) && !text.contains(&"5C".repeat(8)),
+            "байты verify не должны логироваться"
+        );
+    }
+
     #[test]
     fn info_is_a_binary_plist() {
         let mut c = Client::new(ctx());

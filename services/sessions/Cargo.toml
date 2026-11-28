@@ -38,6 +38,7 @@ uuid = { version = "1", features = ["v4", "v5"] }
 audio.workspace = true
 plist.workspace = true
 rtp.workspace = true
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true

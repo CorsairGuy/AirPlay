@@ -2159,6 +2159,7 @@ dependencies = [
  "timesync",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 
