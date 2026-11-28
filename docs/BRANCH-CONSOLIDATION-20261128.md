@@ -183,7 +183,7 @@
 
 ## 5. Удалённые ветки (origin)
 
-Список получен через `git ls-remote --heads origin` и явный fetch: локальный `remote.origin.fetch` ограничен `main`. На `origin` 30 веток — `main`, `agent/integration` и 28 рабочих.
+Список получен через `git ls-remote --heads origin` и явный fetch: локальный `remote.origin.fetch` ограничен `main`. На момент этой проверки на `origin` было 30 веток — `main`, `agent/integration` и 28 рабочих.
 
 - **28 из 28 рабочих веток влиты** в `agent/integration`.
 - 18 влиты раньше в составе консолидации локальных веток (раздел 2): их работа уже была в дереве в более позднем виде.
@@ -223,3 +223,15 @@
 Сводные `integration/all-new-20261127` и `review/today-20261127` не переносятся целиком: по `docs/AGENT-TASKS.md` они включают старый NQPTP SHM, экспериментальный dual PTP и небезопасную трактовку RAOP FLUSH. Проверенные части этих веток уже есть в дереве отдельно: relay-тест `relay_round_trip_converts_the_inbound_stamp_exactly_once`, `runtime/examples/interop_receiver.rs` и `docs/TEST-PLAN-IPHONE-WINDOWS-20261127.md`. Новыми в `review/today` остаются только `docs/REVIEW-CHECKLIST-20261127.md` и `scripts/verify-today.sh` — артефакты ревью, не код.
 
 Проверка после слияния: `git merge-base --is-ancestor origin/<branch> HEAD` истинно для всех 28 веток, а `git diff HEAD^1 HEAD` пуст — слияние не добавило ни одного файла.
+
+## 6. Локальные ветки, сохранённые на origin
+
+Три ветки существовали только локально и не были предками `agent/integration`. Чтобы их коммиты не потерялись, они опубликованы отдельными ветками; в `agent/integration` они по-прежнему не влиты. После публикации на `origin` 31 рабочая ветка: 28 влиты (раздел 5) и 3 сохранены без слияния.
+
+| Ветка | Tip | Проверка | Почему не влита |
+| --- | --- | --- | --- |
+| feat/raop-timing | `8fa3817` | `cargo test --offline -p audio_stream --lib` — 17 passed | Пассивная оценка часов отправителя конфликтует с timing-сервисом, который передаёт хост (D04/D14): порт времени принадлежит хосту, `receive_timing` ветки им не владеет. Нужна отдельная задача с координатором. |
+| feat/hls-segments | `6a6dfce` | `cargo test --offline -p hls` — 14 passed | Реализует обработку discontinuity, которую сейчас намеренно отклоняем до реализации PTS/декодера. |
+| feat/relay-domain-shift | `5c2a019` | `cargo test --offline -p media --lib relay` — 5 passed | Дублирует `clock::domain::translate` как отдельный offset. |
+
+Проверки выполнены локально на Windows, офлайн, только программные тесты; реальные отправитель и приёмник не проверялись. Ветки сохранены как есть: их код не считается подтверждённым и не рекламируется.
