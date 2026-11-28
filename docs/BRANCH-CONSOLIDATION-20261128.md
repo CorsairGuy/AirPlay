@@ -179,3 +179,43 @@
 - Ни одна из 95 консолидированных веток не добавляет кода, которого нет в дереве: проверка шла по именам функций и по прямому сравнению файлов, а не по одному флагу.
 - Формулировка «ветка влита» здесь означает, что её работа уже присутствует в другой форме; это не подтверждение протокола и не аппаратная проверка.
 - Отклонённые ветки оставлены в репозитории как есть: удалять чужие ветки без поручения нельзя.
+
+## 5. Удалённые ветки (origin)
+
+Локальный `remote.origin.fetch` ограничен `main`, поэтому список получен через `git ls-remote --heads origin` и явный fetch. На `origin` 30 веток: `main`, `agent/integration` и 28 рабочих.
+
+- Уже влиты в `agent/integration`: **18**.
+- Не влиты: **10** (6 отклонённых задач и 4 сводные/WIP-ветки).
+
+| Ветка | Tip | Статус |
+| --- | --- | --- |
+| feat/c03-sdp-matrix | `e5fb9a2` | влита |
+| feat/c06-mirror-framing | `2e392b3` | влита |
+| feat/c07-ffmpeg-blocker | `af9fb70` | влита |
+| feat/c09-card-audit | `2a25435` | влита |
+| feat/c14-discontinuity-blocker | `2f7515b` | влита |
+| feat/c18-identity-audit | `d94f7b5` | влита |
+| feat/c19-packetizer-audit | `bb4d29b` | влита |
+| feat/c20-pool-audit | `65a509e` | влита |
+| feat/c23-long-run-limits | `13dce12` | влита |
+| feat/c35-hls-url-policy | `0c6ed9a` | влита |
+| feat/c41-mirror-fanout-config | `b9cb337` | влита |
+| feat/c49-pcm-source-lifecycle | `df1c7c4` | влита |
+| feat/c53-runtime-profile-isolation | `88cfe10` | влита |
+| feat/c54-ntp-fallback | `d64ee56` | влита |
+| feat/c56-capability-bits-audit | `8893890` | влита |
+| feat/c61-pairing-revoke-race | `e0577b3` | влита |
+| feat/c66-card-stale-artwork | `265d99e` | не влита: Хеш как принадлежность обложки; принят artwork_for по content id. |
+| feat/c70-buffered-partial-writes | `6a463f6` | влита |
+| feat/c80-mirror-session-restart | `04ad49a` | влита |
+| feat/clock-attestation | `e967850` | не влита: Неподтверждённый Claim от вызывающего. |
+| feat/dual-clock-roles | `0dafc60` | не влита: Зона координатора: одновременные follower и master. |
+| feat/epoch-recovery | `bfeb487` | не влита: Эвристика эпохи в crates/audio_stream/src/playout.rs отклонена; в main эпоха меняется только по явным сигналам. |
+| feat/long-session-recovery | `cdc98b2` | не влита: Смена эпохи по одному запоздавшему пакету. |
+| feat/nqptp-shm-reader | `bec5de1` | не влита: NQPTP-специфичный код запрещён в ядре. |
+| integration/all-new-20261127 | `ba584e7` | не влита: Сводная ветка: включает NQPTP SHM, clock attestation, epoch-эвристику и dual PTP; целиком не сливается (AGENT-TASKS). |
+| review/epoch-recovery-20261127 | `183d6e5` | не влита: Эвристика эпохи в crates/audio_stream/src/playout.rs отклонена; в main эпоха меняется только по явным сигналам. |
+| review/today-20261127 | `8a7f413` | не влита: Та же сводная ветка плюс правки playout.rs; полезные части (relay-тест, interop, TEST-PLAN) уже есть в дереве. |
+| wip/dual-clock-peer-roles-20261126 | `3119984` | не влита: WIP координатора по dual PTP; требует сквозного relay-теста. |
+
+Сводные `integration/all-new-20261127` и `review/today-20261127` не сливаются целиком: по `docs/AGENT-TASKS.md` они включают старый NQPTP SHM, экспериментальный dual PTP и небезопасную трактовку RAOP FLUSH. Проверенные части этих веток уже перенесены отдельно: relay-тест `relay_round_trip_converts_the_inbound_stamp_exactly_once`, interop-receiver и `docs/TEST-PLAN-IPHONE-WINDOWS-20261127.md` присутствуют в дереве.
