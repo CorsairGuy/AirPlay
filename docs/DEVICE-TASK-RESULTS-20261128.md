@@ -18,7 +18,7 @@
 | D09 | выполнено | повтор/недесятичный Content-Length отвергаются без сдвига буфера; склейка/разрыв покрыты |
 | D10 | выполнено | обрыв после OPTIONS/pairing/SETUP; UDP-порты освобождаются, следующий клиент обслуживается |
 | D11 | выполнено | AppleTV14,1 reference fixture без ID/ключей, тест «не Profile» |
-| D12 | частично | HomePodMini: подтверждены model/версия, маска unknown |
+| D12 | выполнена: маска и модель зафиксированы по снимку Станции (HomePodMini.plist); совместимость runtime не проверялась | HomePodMini: подтверждены model/версия, маска unknown |
 | D13 | выполнено | OtherTV-биты совпадают в `/info`, `_airplay` и `_raop` TXT |
 | D14 | частично | gate SCREEN/VIDEO; PTP-idle и PHOTO не гейтятся |
 | D15 | проверено | `profile_isolation.rs`, `multi_profile.rs`: свои ID/ключи, restart; pgid на запуск |

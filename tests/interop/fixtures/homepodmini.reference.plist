@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  D12: только факты, подтверждённые снимком Станции из
-  docs/DEVICE-PROFILES-20261125.md: station/data/local/bin/airplay_audio.sh
-  задаёт model=AudioAccessory5,1 и sourceVersion=550.10. Полная feature mask
-  в доступном снимке не извлечена, поэтому поля features здесь нет: маску
-  другого устройства подставлять нельзя. Это reference fixture, не Profile.
+  D12: факты из docs/profiles/HomePodMini.plist (коммит ec1a17a) и снимка
+  Станции: model=AudioAccessory5,1, sourceVersion=550.10,
+  features=0x1C340405FCA00, statusFlags=1028. Маска заявлена как снимок
+  объявления Станции; совместимость текущего runtime с ней не проверена.
+  Это reference fixture, не Profile.
 -->
 <plist version="1.0">
 <dict>
@@ -16,7 +16,9 @@
   <key>source_version</key>
   <string>550.10</string>
   <key>features_hex</key>
-  <string>unknown</string>
+  <string>0x1C340405FCA00</string>
+  <key>status_flags</key>
+  <integer>1028</integer>
   <key>anonymized</key>
   <true/>
 </dict>

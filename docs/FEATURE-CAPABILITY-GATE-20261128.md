@@ -44,9 +44,11 @@ AirPlay TXT и RAOP TXT и что `deviceID`/`psi`/`pk` — собственны
 `Profile`: маска записана строкой, `display` отсутствует, поэтому
 `Profile::from_value` возвращает ошибку — сырой захват не запускается.
 
-`homepodmini.reference.plist` содержит только подтверждённые снимком Станции
-`model AudioAccessory5,1` и `sourceVersion 550.10`; полная маска помечена
-`unknown` и не подменяется маской другого устройства.
+`homepodmini.reference.plist` фиксирует снимок Станции:
+`model AudioAccessory5,1`, `sourceVersion 550.10`,
+`features 0x1C340405FCA00`, `statusFlags 1028` (совпадает с
+`docs/profiles/HomePodMini.plist`, коммит ec1a17a). Это снимок объявления,
+а не проверка совместимости runtime с данной маской.
 
 Неподдержанные/отсутствующие поля AppleTV: `display` (ширина/высота/цвет),
 `accessory_type`, `enclosure_color`, `audio_only_ui`, `raop`; `featuresEx`

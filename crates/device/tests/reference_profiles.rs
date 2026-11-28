@@ -36,18 +36,18 @@ fn appletv_reference_keeps_observed_fields_and_is_not_a_runtime_profile() {
 }
 
 #[test]
-fn homepod_reference_does_not_invent_a_feature_mask() {
+fn homepod_reference_records_the_station_snapshot() {
     let value = load("homepodmini.reference.plist");
     let d = value.as_dictionary().unwrap();
     assert_eq!(d["model"].as_string(), Some("AudioAccessory5,1"));
     assert_eq!(d["source_version"].as_string(), Some("550.10"));
-    assert_eq!(d["features_hex"].as_string(), Some("unknown"));
+    assert_eq!(d["features_hex"].as_string(), Some("0x1C340405FCA00"));
+    assert_eq!(d["status_flags"].as_unsigned_integer(), Some(1028));
     assert_eq!(d["anonymized"].as_boolean(), Some(true));
     for forbidden in ["deviceID", "pk", "psi", "pi", "gid", "name"] {
         assert!(!d.contains_key(forbidden), "лишнее поле {forbidden}");
     }
-    assert!(
-        Profile::from_value(&value).is_err(),
-        "без подтверждённой маски профиль не запускается"
-    );
+    // Reference fixture не является готовым Profile, пока совместимость
+    // runtime с этой маской не проверена.
+    assert!(Profile::from_value(&value).is_err());
 }
