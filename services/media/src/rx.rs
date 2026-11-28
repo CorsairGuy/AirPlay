@@ -1027,6 +1027,60 @@ impl Media {
     }
 
     fn setup_streams(&mut self, streams: &[Value]) -> Result<Dictionary, SetupError> {
+        // Сначала проверяем весь список: отказ не должен оставлять поток,
+        // открытые сокеты или частично заменённого владельца.
+        self.validate_streams(streams)?;
+        let tasks_before = self.tasks.len();
+        match self.setup_streams_inner(streams) {
+            Ok(d) => Ok(d),
+            Err(e) => {
+                for task in self.tasks.drain(tasks_before..) {
+                    task.abort();
+                }
+                self.player.release(self.id);
+                Err(e)
+            }
+        }
+    }
+
+    /// Проверка дескрипторов SETUP до любых изменений состояния.
+    fn validate_streams(&self, streams: &[Value]) -> Result<(), SetupError> {
+        for s in streams {
+            let Some(s) = s.as_dictionary() else { continue };
+            let kind = uint(s, "type").unwrap_or(0);
+            #[cfg(feature = "mirroring")]
+            if kind == 96 && self.mirror.is_some() && !s.contains_key("shk") {
+                // Звук зеркалирования: ключ и IV приходят в SETUP сессии.
+                if self.aes_key.is_none() {
+                    return Err("нет ключа звука: SETUP без ekey".into());
+                }
+                if self.eiv.is_none() {
+                    return Err("нет eiv в SETUP".into());
+                }
+                sample_rate(s)?;
+                continue;
+            }
+            if matches!(kind, 96 | 103) {
+                let key_len = s.get("shk").and_then(Value::as_data).map(|key| key.len());
+                if key_len != Some(32) {
+                    return Err(format!("нет ключа потока shk (len={key_len:?})").into());
+                }
+                if kind == 96 {
+                    realtime_format(s)?;
+                }
+            }
+            #[cfg(feature = "mirroring")]
+            if kind == 110 {
+                video_stream_id(s, self.aes_key.is_none())?;
+                if self.aes_key.is_none() && self.shared.is_none() {
+                    return Err("video requires ekey or HAP session".into());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn setup_streams_inner(&mut self, streams: &[Value]) -> Result<Dictionary, SetupError> {
         let mut replies = Vec::new();
         for s in streams {
             let Some(s) = s.as_dictionary() else { continue };
@@ -1872,6 +1926,88 @@ mod tests {
             [first.join().unwrap(), second.join().unwrap()]
         });
         assert_eq!(results.into_iter().filter(|ok| *ok).count(), 1);
+    }
+    struct NoGroups;
+    impl SessionGroup for NoGroups {
+        fn set_group(&self, _owner: u64, _group: Option<String>) {}
+    }
+
+    fn setup_body(streams: Vec<Value>) -> Request {
+        let mut d = Dictionary::new();
+        d.insert("streams".into(), Value::Array(streams));
+        let mut req = Request::new("SETUP", "/stream", "RTSP/1.0");
+        req.body = plist(Value::Dictionary(d));
+        req
+    }
+
+    fn audio_descriptor(shk: Option<Vec<u8>>) -> Value {
+        let mut s = Dictionary::new();
+        s.insert("type".into(), Value::Integer(96.into()));
+        s.insert("ct".into(), Value::Integer(1.into()));
+        s.insert("ss".into(), Value::Integer(16.into()));
+        s.insert("sr".into(), Value::Integer(44_100.into()));
+        s.insert("spf".into(), Value::Integer(352.into()));
+        if let Some(key) = shk {
+            s.insert("shk".into(), Value::Data(key));
+        }
+        Value::Dictionary(s)
+    }
+
+    fn media_context(player: Arc<Player>) -> MediaContext {
+        MediaContext {
+            player,
+            #[cfg(feature = "mirroring")]
+            mirror: None,
+            #[cfg(feature = "hls")]
+            hls: None,
+            remote: Remote::new(),
+            mrp: None,
+            pairing_id: "test".into(),
+            session_group: Arc::new(NoGroups),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_multi_stream_setup_leaves_no_active_stream_and_a_retry_succeeds() {
+        let player = Arc::new(Player::new(
+            audio_stream::Config {
+                device: "null".into(),
+                ..Default::default()
+            },
+            TimeSync::idle(1),
+        ));
+        let mut media = Media::new(
+            &media_context(player.clone()),
+            "127.0.0.1".parse().unwrap(),
+            "127.0.0.1".parse().unwrap(),
+        );
+        let id = media.id;
+        // Первый поток валиден, второй без shk: отказ целиком, без остатка.
+        let req = setup_body(vec![
+            audio_descriptor(Some(vec![7; 32])),
+            audio_descriptor(None),
+        ]);
+        let resp = media.handle(&req).unwrap();
+        assert_eq!(resp.status, 500);
+        assert!(
+            player.active.lock().unwrap().is_none(),
+            "после отказа не осталось активного потока"
+        );
+        // Повторный SETUP того же отправителя проходит.
+        let req = setup_body(vec![audio_descriptor(Some(vec![9; 32]))]);
+        let resp = media.handle(&req).unwrap();
+        assert_eq!(resp.status, 200);
+        assert!(
+            player
+                .active
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|(owner, _)| *owner == id),
+            "повторный SETUP занял плеер"
+        );
+        player.release(id);
+        assert!(player.active.lock().unwrap().is_none());
     }
 }
 
