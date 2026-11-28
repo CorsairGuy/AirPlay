@@ -262,14 +262,26 @@ async fn a_client_can_vanish_after_each_stage_and_the_next_one_is_served() {
         "streams".into(),
         plist::Value::Array(vec![plist::Value::Dictionary(stream.clone())]),
     );
-    let reply = call(port, "SETUP", "/stream", &plist(plist::Value::Dictionary(root.clone()))).await;
+    let reply = call(
+        port,
+        "SETUP",
+        "/stream",
+        &plist(plist::Value::Dictionary(root.clone())),
+    )
+    .await;
     assert_eq!(reply.status, 200);
     let first = ports(&reply);
     assert_eq!(first.len(), 2, "dataPort и controlPort");
     for p in &first {
         wait_udp_released(*p).await;
     }
-    let reply = call(port, "SETUP", "/stream", &plist(plist::Value::Dictionary(root))).await;
+    let reply = call(
+        port,
+        "SETUP",
+        "/stream",
+        &plist(plist::Value::Dictionary(root)),
+    )
+    .await;
     assert_eq!(reply.status, 200, "следующий клиент получает поток");
     let second = ports(&reply);
     assert_eq!(second.len(), 2);

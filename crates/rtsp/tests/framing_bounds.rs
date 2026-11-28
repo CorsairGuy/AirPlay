@@ -119,7 +119,11 @@ fn duplicate_content_length_is_rejected_even_when_the_values_match() {
         );
         let mut buf = wire.clone().into_bytes();
         assert_eq!(decode_request(&mut buf), Err(Error::BadHeader));
-        assert_eq!(buf, wire.into_bytes(), "неоднозначный запрос не должен сдвигать буфер");
+        assert_eq!(
+            buf,
+            wire.into_bytes(),
+            "неоднозначный запрос не должен сдвигать буфер"
+        );
     }
 }
 

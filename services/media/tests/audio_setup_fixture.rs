@@ -72,7 +72,10 @@ async fn the_reference_audio_descriptor_is_accepted_and_teardown_releases_it() {
         .and_then(|v| v.as_array())
         .expect("streams в ответе");
     let stream = streams[0].as_dictionary().unwrap();
-    assert_eq!(stream.get("type").and_then(|v| v.as_unsigned_integer()), Some(96));
+    assert_eq!(
+        stream.get("type").and_then(|v| v.as_unsigned_integer()),
+        Some(96)
+    );
     assert!(
         stream
             .get("dataPort")

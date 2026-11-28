@@ -2064,7 +2064,9 @@ mod tests {
             "127.0.0.1".parse().unwrap(),
             "127.0.0.1".parse().unwrap(),
         );
-        let resp = media.handle(&session_body("NTP", Some(sender_port.into()))).unwrap();
+        let resp = media
+            .handle(&session_body("NTP", Some(sender_port.into())))
+            .unwrap();
         assert_eq!(resp.status, 200);
         let body = plist_dict(&resp.body).unwrap();
         let local = body
@@ -2075,7 +2077,9 @@ mod tests {
         assert_eq!(media.ntp.is_some(), true);
         assert_eq!(media.tasks.len(), 1);
 
-        let resp = media.handle(&Request::new("TEARDOWN", "/setup", "RTSP/1.0")).unwrap();
+        let resp = media
+            .handle(&Request::new("TEARDOWN", "/setup", "RTSP/1.0"))
+            .unwrap();
         assert_eq!(resp.status, 200);
         assert!(media.tasks.is_empty());
         assert!(media.ntp.is_none());
@@ -2088,7 +2092,9 @@ mod tests {
                 Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
             }
         }
-        sender.set_read_timeout(Some(Duration::from_millis(10))).ok();
+        sender
+            .set_read_timeout(Some(Duration::from_millis(10)))
+            .ok();
     }
 }
 

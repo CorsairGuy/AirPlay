@@ -2273,12 +2273,18 @@ mod tests {
         let device = context.device();
         let plist = plist::Value::from_reader(std::io::Cursor::new(device.info_plist())).unwrap();
         let plist = plist.as_dictionary().unwrap();
-        assert_eq!(plist["features"].as_unsigned_integer(), Some(0x8300_527F_FEE6));
+        assert_eq!(
+            plist["features"].as_unsigned_integer(),
+            Some(0x8300_527F_FEE6)
+        );
         assert_eq!(plist["statusFlags"].as_unsigned_integer(), Some(4));
         assert_eq!(plist["accessoryType"].as_unsigned_integer(), Some(1));
         assert_eq!(plist["model"].as_string(), Some("AppleTV3,2"));
         assert_eq!(plist["sourceVersion"].as_string(), Some("550.10"));
-        assert_eq!(plist["deviceID"].as_string(), Some(device.device_id.as_str()));
+        assert_eq!(
+            plist["deviceID"].as_string(),
+            Some(device.device_id.as_str())
+        );
         assert_eq!(plist["psi"].as_string(), Some(device.pairing_id.as_str()));
         assert_eq!(
             plist["pk"].as_data(),

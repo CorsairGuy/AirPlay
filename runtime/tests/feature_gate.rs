@@ -106,9 +106,10 @@ async fn info_features(port: u16) -> u64 {
                 })
                 .unwrap_or(0);
             if buf.len() >= end + 4 + len {
-                let value =
-                    plist::Value::from_reader(std::io::Cursor::new(buf[end + 4..end + 4 + len].to_vec()))
-                        .unwrap();
+                let value = plist::Value::from_reader(std::io::Cursor::new(
+                    buf[end + 4..end + 4 + len].to_vec(),
+                ))
+                .unwrap();
                 return value
                     .as_dictionary()
                     .and_then(|d| d.get("features"))
@@ -123,12 +124,11 @@ async fn info_features(port: u16) -> u64 {
 async fn screen_bits_without_a_mirror_backend_refuse_to_start() {
     let dir = TempDir::new("screen");
     let features = device::Features(device::Features::SCREEN | device::Features::VIDEO);
-    let err = match runtime::AirPlay::start(options("Screen", dir.path(), free_port(), features))
-        .await
-    {
-        Ok(_) => panic!("нельзя объявлять экран без обработчика"),
-        Err(err) => err,
-    };
+    let err =
+        match runtime::AirPlay::start(options("Screen", dir.path(), free_port(), features)).await {
+            Ok(_) => panic!("нельзя объявлять экран без обработчика"),
+            Err(err) => err,
+        };
     let text = format!("{err:#}");
     assert!(text.contains("mirroring"), "{text}");
 }
@@ -137,9 +137,7 @@ async fn screen_bits_without_a_mirror_backend_refuse_to_start() {
 async fn audio_bits_still_start_and_are_reported_unchanged() {
     let dir = TempDir::new("audio");
     let port = free_port();
-    let features = device::Features(
-        device::Features::AUDIO_RECEIVER.0 & !device::Features::PTP,
-    );
+    let features = device::Features(device::Features::AUDIO_RECEIVER.0 & !device::Features::PTP);
     let receiver = runtime::AirPlay::start(options("Audio", dir.path(), port, features))
         .await
         .expect("аудиопрофиль без битов экрана стартует");
