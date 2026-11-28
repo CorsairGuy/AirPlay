@@ -12,7 +12,10 @@ use std::{
     collections::{BTreeMap, VecDeque},
     io,
     net::{IpAddr, SocketAddr},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU8, Ordering},
+    },
     time::Duration,
 };
 use tokio::{
@@ -40,7 +43,23 @@ struct PeerRequest {
     peers: Vec<Peer>,
     inbound: bool,
     deadline: Option<std::time::Instant>,
+    completion: Arc<AtomicU8>,
     reply: oneshot::Sender<io::Result<()>>,
+}
+
+const PENDING: u8 = 0;
+const ACCEPTED: u8 = 1;
+const CANCELLED: u8 = 2;
+
+// The receiver marks a queued update cancelled if its future is dropped,
+// including after the worker has sent the reply but before it is observed.
+struct CompletionGuard(Arc<AtomicU8>);
+impl Drop for CompletionGuard {
+    fn drop(&mut self) {
+        let _ = self
+            .0
+            .compare_exchange(PENDING, CANCELLED, Ordering::AcqRel, Ordering::Acquire);
+    }
 }
 
 fn dual_union(
@@ -572,7 +591,7 @@ mod peer_update_tests {
     }
 
     #[tokio::test]
-    async fn cancelled_peer_update_must_be_reconciled_by_its_owner() {
+    async fn cancelled_after_apply_releases_the_owner_without_touching_others() {
         let source = Peer {
             ip: "127.0.0.2".parse().unwrap(),
             ports: Ports {
@@ -593,7 +612,14 @@ mod peer_update_tests {
         )
         .await
         .unwrap();
+        let other = Peer {
+            ip: "127.0.0.4".parse().unwrap(),
+            ports: receiver.ports,
+        };
+        service.set_group_peers(9, vec![other]).await.unwrap();
         let (reply, wait) = oneshot::channel();
+        let completion = Arc::new(AtomicU8::new(PENDING));
+        let guard = CompletionGuard(completion.clone());
         assert!(
             service
                 .peers
@@ -602,17 +628,120 @@ mod peer_update_tests {
                     peers: vec![receiver],
                     inbound: false,
                     deadline: None,
+                    completion,
                     reply
                 })
                 .await
                 .is_ok()
         );
-        drop(wait);
-        // Queue order guarantees the update has been applied before this
-        // conflict is evaluated, even though its caller stopped waiting.
+        wait.await.unwrap().unwrap();
         assert!(service.set_session_peers(4, vec![receiver]).await.is_err());
-        service.set_group_peers(3, vec![]).await.unwrap();
-        service.set_session_peers(4, vec![receiver]).await.unwrap();
+        drop(guard);
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if service.set_session_peers(4, vec![receiver]).await.is_ok() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("cancelled owner must be released");
+        assert!(
+            service.set_session_peers(5, vec![other]).await.is_err(),
+            "another owner remains active"
+        );
+        service.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_older_update_cannot_remove_a_newer_update_for_same_owner() {
+        let source = Peer {
+            ip: "127.0.0.2".parse().unwrap(),
+            ports: Ports {
+                event: 319,
+                general: 320,
+            },
+        };
+        let old = Peer {
+            ip: "127.0.0.3".parse().unwrap(),
+            ports: source.ports,
+        };
+        let new = Peer {
+            ip: "127.0.0.4".parse().unwrap(),
+            ports: source.ports,
+        };
+        let service = Service::bind_dual(
+            config(source, Policy::FollowOnly(source.ip)),
+            Arc::new(TestClock),
+        )
+        .await
+        .unwrap();
+        let (reply, wait) = oneshot::channel();
+        let completion = Arc::new(AtomicU8::new(PENDING));
+        let guard = CompletionGuard(completion.clone());
+        assert!(
+            service
+                .peers
+                .send(PeerRequest {
+                    owner: 3,
+                    peers: vec![old],
+                    inbound: false,
+                    deadline: None,
+                    completion,
+                    reply
+                })
+                .await
+                .is_ok()
+        );
+        wait.await.unwrap().unwrap();
+        service.set_group_peers(3, vec![new]).await.unwrap();
+        drop(guard);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            service.set_session_peers(4, vec![new]).await.is_err(),
+            "newer update must remain"
+        );
+        service.set_session_peers(5, vec![old]).await.unwrap();
+        service.shutdown().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dropping_public_update_future_does_not_leave_its_peer() {
+        let source = Peer {
+            ip: "127.0.0.2".parse().unwrap(),
+            ports: Ports {
+                event: 319,
+                general: 320,
+            },
+        };
+        let peer = Peer {
+            ip: "127.0.0.3".parse().unwrap(),
+            ports: source.ports,
+        };
+        let service = Service::bind_dual(
+            config(source, Policy::FollowOnly(source.ip)),
+            Arc::new(TestClock),
+        )
+        .await
+        .unwrap();
+        let mut update = Box::pin(service.set_group_peers(3, vec![peer]));
+        tokio::select! {
+            biased;
+            result = &mut update => panic!("update completed before cancellation: {result:?}"),
+            _ = std::future::ready(()) => {},
+        }
+        drop(update);
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if service.set_session_peers(4, vec![peer]).await.is_ok() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("cancelled future must not leave a peer");
         service.shutdown().await.unwrap();
     }
     #[tokio::test]
@@ -820,15 +949,26 @@ impl Service {
             tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
             let mut event_buffer = [0u8; 1024];
             let mut general_buffer = [0u8; 1024];
+            let mut pending = BTreeMap::<(bool, u128), Arc<AtomicU8>>::new();
             loop {
                 let batch = tokio::select! {
                     biased;
                     _=&mut stopped=>return Ok(()),
                     _=tick.tick()=>{
+                        let mut changed = false;
+                        pending.retain(|&(inbound, owner), completion| match completion.load(Ordering::Acquire) {
+                            CANCELLED => {
+                                let owners = if dual && !inbound { &mut output_interests } else { &mut interests };
+                                changed |= owners.release(owner).is_some();
+                                false
+                            },
+                            ACCEPTED => false,
+                            _ => true,
+                        });
                         // A silent owner expires exactly like an explicit release.
                         let input_change = interests.expire(std::time::Instant::now());
                         let output_change = output_interests.expire(std::time::Instant::now());
-                        if input_change.is_some() || output_change.is_some() {
+                        if changed || input_change.is_some() || output_change.is_some() {
                             let (local, own) = source.sample()?;
                             if dual {
                                 engine.set_dual_peers(&interests.union().keys().copied().collect::<Vec<_>>(), &output_interests.union().keys().copied().collect::<Vec<_>>(), local, own)?;
@@ -844,9 +984,9 @@ impl Service {
                     },
                     request=peer_requests.recv()=>{
                         let Some(request) = request else { return Ok(()); };
-                        // A cancelled caller must reconcile state: once queued,
-                        // an update may still apply. Ack means applied locally,
-                        // never receiver adoption or measured synchronization.
+                        if request.completion.load(Ordering::Acquire) == CANCELLED || request.reply.is_closed() { continue; }
+                        let owner_key = (dual && request.inbound, request.owner);
+                        let completion = request.completion.clone();
                         let result = if dual {
                             let mut input = interests.clone();
                             let mut output = output_interests.clone();
@@ -882,6 +1022,7 @@ impl Service {
                                 Ok(())
                             },
                         }};
+                        if result.is_ok() { pending.insert(owner_key, completion); }
                         let _ = request.reply.send(result);
                         continue;
                     },
@@ -924,7 +1065,8 @@ impl Service {
     }
     /// Replace base receiver/service peers (owner zero). Group-owned peers are
     /// retained independently. Sockets/source remain alive, including no peers.
-    /// Bounded queue: retry WouldBlock; cancellation after enqueue is not rollback.
+    /// Bounded queue: retry WouldBlock. A cancelled update releases its owner
+    /// asynchronously; this is fail-closed, not restoration of prior peers.
     pub async fn set_peers(&self, peers: Vec<Peer>) -> io::Result<()> {
         self.update_peers(0, peers, None, true).await
     }
@@ -984,12 +1126,15 @@ impl Service {
     ) -> io::Result<()> {
         peer_table(self.addresses.0.ip(), &peers)?;
         let (reply, result) = oneshot::channel();
+        let completion = Arc::new(AtomicU8::new(PENDING));
+        let guard = CompletionGuard(completion.clone());
         self.peers
             .try_send(PeerRequest {
                 owner,
                 peers,
                 inbound,
                 deadline,
+                completion,
                 reply,
             })
             .map_err(|error| {
@@ -1001,9 +1146,11 @@ impl Service {
                     "timing peer update unavailable",
                 )
             })?;
-        result
+        let outcome = result
             .await
-            .map_err(|_| io::Error::new(io::ErrorKind::NotConnected, "clock service ended"))?
+            .map_err(|_| io::Error::new(io::ErrorKind::NotConnected, "clock service ended"))?;
+        guard.0.store(ACCEPTED, Ordering::Release);
+        outcome
     }
     pub async fn shutdown(mut self) -> io::Result<()> {
         self.status.send_replace(Snapshot::inactive());
