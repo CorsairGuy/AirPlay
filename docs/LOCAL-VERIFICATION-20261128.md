@@ -1,7 +1,8 @@
 # Локальный прогон 28 ноября 2026 (R30)
 
-Срез кода: `4e19eab`, ветка `agent/integration`. Это Windows-прогон в Git
-Bash, не Linux CI и не аппаратная проверка.
+Срез кода: `33b35ae`, ветка `agent/integration`. `remote` и `timesync`
+прогнаны на `4e19eab`, зеркалирование — на `33b35ae`. Это Windows-прогон
+в Git Bash, не Linux CI и не аппаратная проверка.
 
 ## Команды Windows
 
@@ -31,6 +32,9 @@ cargo test --offline --workspace
 | `cargo clippy` для `remote` и `timesync` | PASS, без предупреждений | не весь workspace |
 | `cargo test -p remote --lib` | PASS, 50 тестов | не весь workspace |
 | `cargo test -p timesync --lib ntp::tests` | PASS, 16 тестов | фильтр по NTP |
+| `cargo test -p media --lib` | PASS, 171 тест | не весь workspace |
+| `cargo test -p media --test mirror_tx` | PASS, 4 теста | loopback, не устройство |
+| `cargo clippy -p media --test mirror_tx` | PASS | один integration target |
 | pyatv-клиент | SKIP | пакет и независимый клиент не установлены |
 | iPhone/Apple TV/HomePod | SKIP | нет устройства в этом стенде |
 | реальный звук, 60 FPS, sync | SKIP | нет дисплея/выхода |
